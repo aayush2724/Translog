@@ -1,7 +1,9 @@
 # The extraction contract
 
-**Status:** Contract implemented (Phase 4). **No model is called by any code in
-this repository.** The provider adapter that will call one arrives in Phase 5.
+**Status:** Contract implemented (Phase 4); OpenRouter adapter implemented
+(Phase 5). A live extraction requires `TRANSLOG_OPENROUTER__API_KEY`; without
+it nothing in this repository contacts a network, and the whole test suite still
+passes.
 
 ---
 
@@ -315,10 +317,23 @@ versioned alongside the schema they describe. The transport that carries them is
 not, and lives in the adapter.
 
 The prompt names **no provider, no model, no slug, no endpoint and no API
-shape**, and a test enforces that. Intended model: **Qwen 3.7 Flash**. The
-provider-specific identifier will be configured during the OpenRouter
-integration phase after verification — it is not guessed here, and
-`openrouter.model` remains `None`.
+shape**, and a test enforces that.
+
+Model: **Qwen 3.7 Flash**, `qwen/qwen3.7-flash` (AMB-2, resolved in Phase 5).
+The slug was confirmed against OpenRouter's live model list before being
+written into configuration — the catalogue also carries `qwen3.7-plus`,
+`qwen3.7-max` and `qwen3.6-flash`, any of which a guess could plausibly have
+landed on. It lives in `config`, never in domain code, and a test pins it.
+
+### Structured output
+
+OpenRouter's model metadata reports `qwen/qwen3.7-flash` as supporting
+`response_format` but **not** `structured_outputs`. The adapter therefore asks
+for JSON mode (`{"type": "json_object"}`) and does **not** send a `json_schema`
+the model would not honour. Schema enforcement happens locally, against
+`ExtractionResult`, exactly as documented in §10 — which is where it would have
+had to happen anyway, since a provider's enforcement is not something to take on
+trust for a contract this load-bearing.
 
 ## 14. Worked examples
 
@@ -362,9 +377,10 @@ domain model was found.
 
 Not implemented by this contract, and not implied by it:
 
-- Any network call, HTTP client, API key or provider SDK
-- The OpenRouter adapter (Phase 5)
-- Client intent reading — declared on the port, implemented in Phase 12
+- Client intent reading — declared on the port, and deliberately
+  `NotImplementedError` in the adapter. Phase 4 defined no contract for
+  accept/reject intent, and a stub that guessed would put an undefined contract
+  in front of a commercial decision (Phase 12)
 - Clarification generation (Phase 6)
 - Thread correlation (Phase 7)
 - Anything to do with rates, carriers, quotations or booking

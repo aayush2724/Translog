@@ -13,6 +13,9 @@ dependencies = [
     "pydantic>=2.9",
     # Environment-backed configuration. Companion to pydantic for settings.
     "pydantic-settings>=2.5",
+    # One POST to one endpoint, but with timeouts, a clean exception taxonomy to
+    # translate, and no vendor SDK dragged in behind it.
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +36,7 @@ markers = [
     "phase2: awaits Phase 2 (extraction, ingestion, validation)",
     "phase3: awaits Phase 3 (rate pipeline)",
     "phase4: awaits Phase 4 (mock WebCargo adapter)",
+    "live: calls a real external API; skipped unless credentials are configured",
 ]
 
 [tool.mypy]

@@ -40,17 +40,22 @@ class WebCargoMode(StrEnum):
 
 
 class OpenRouterSettings(BaseModel):
-    """Extraction adapter configuration. Not read before Phase 5."""
+    """Extraction adapter configuration."""
 
     api_key: SecretStr | None = None
-    base_url: str = "https://openrouter.ai/api/v1"
-    model: str | None = None
-    """AMB-2 unresolved.
+    """No default, ever. Absent means the live adapter refuses to build."""
 
-    The brief names "Qwen 3.7 Flash"; the specification names "Qwen Plus 0728".
-    Neither is an OpenRouter model slug. Left as None until the exact slug is
-    confirmed against OpenRouter's live model list — a guessed identifier that
-    fails to resolve is worse than an absent one.
+    base_url: str = "https://openrouter.ai/api/v1"
+    model: str = "qwen/qwen3.7-flash"
+    """AMB-2, resolved in Phase 5.
+
+    Qwen 3.7 Flash. The slug was confirmed against OpenRouter's live model list
+    before being written here rather than inferred from the product name — the
+    catalogue also carries `qwen3.7-plus`, `qwen3.7-max` and `qwen3.6-flash`,
+    any of which a guess could plausibly have landed on.
+
+    The model advertises `response_format` but not `structured_outputs`, so the
+    adapter asks for JSON mode and enforces the schema itself.
     """
 
     timeout_seconds: int = Field(default=60, gt=0)

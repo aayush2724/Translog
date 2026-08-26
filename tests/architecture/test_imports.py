@@ -97,12 +97,18 @@ def test_no_secret_has_a_default_value(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.webcargo.password is None
 
 
-def test_openrouter_model_is_unset_pending_amb2(monkeypatch: pytest.MonkeyPatch) -> None:
-    """AMB-2: the exact OpenRouter slug is unconfirmed, so nothing is guessed."""
+def test_openrouter_model_is_the_verified_slug(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AMB-2, resolved in Phase 5.
+
+    Pinned as a test because the OpenRouter catalogue also carries
+    `qwen3.7-plus`, `qwen3.7-max` and `qwen3.6-flash`. A well-meaning edit to any
+    of those would change which model quotes cargo, and would otherwise be
+    invisible.
+    """
     for key in list(__import__("os").environ):
         if key.startswith("TRANSLOG_"):
             monkeypatch.delenv(key, raising=False)
 
     from translog_quote.config import Settings
 
-    assert Settings(_env_file=None).openrouter.model is None  # type: ignore[call-arg]
+    assert Settings(_env_file=None).openrouter.model == "qwen/qwen3.7-flash"  # type: ignore[call-arg]

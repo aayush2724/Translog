@@ -1,7 +1,7 @@
 # Architecture — AI-Assisted Cargo Quotation Demo
 
 **Design status:** Frozen during Phase 0. Unchanged since.
-**Implementation status:** Phases 1-4 implemented. Phase 5 next. See §17.
+**Implementation status:** Phases 1-5 implemented. Phase 6 next. See §17.
 **Scope:** Demonstration / proof of concept. Not the production system.
 **Supersedes:** nothing. This is the first architecture document in the repository.
 
@@ -28,7 +28,7 @@ during Phase 0 and have not been revised since. It is written in the present
 tense throughout — "the port returns normalised rates", "filtering never scores" —
 and that tense describes *the design*, not what is built.
 
-Phases 1-4 have been implemented incrementally without abandoning any of those
+Phases 1-5 have been implemented incrementally without abandoning any of those
 boundaries. Where a section below describes a component that does not exist yet,
 the design still stands; only the code is absent. **§17 is the single place this
 document states what is actually built.** Nothing else here should be read as an
@@ -1074,7 +1074,7 @@ listed; the full set lives with the requirements.
 | Ref | Blocks | Demo impact |
 |---|---|---|
 | **AMB-1** | `RealRateMapper` transit mapping | **None** — resolved for the demo (§3). Production blocker, documented at the mapping site. |
-| **AMB-2** | model id in config | Extraction adapter needs the exact OpenRouter slug before it runs. |
+| **AMB-2** | model id in config | **Resolved** in Phase 5: `qwen/qwen3.7-flash`, verified against the live model list. |
 | **AMB-3** | `DropRestrictedCarrier` rule set and its inputs | Demo uses config-driven fixture restrictions; the real rule set is unconfirmed. |
 | **AMB-4** | `DECLINED` terminal vs. loop | Built terminal. One edge to add. |
 | **AMB-8** | `RateQuery.date` source | **Blocking for Phase 8.** The type requires a date; no rule says where it comes from. |
@@ -1099,6 +1099,7 @@ the code exists.
 | 6.4 | `validate_shipment` and all eleven rules | `domain/validation/` |
 | 6.6 | `Thread`; fixture-level thread grouping | `domain/conversation/`, `EmailFixtureScenario` |
 | 6.2 | The extraction *contract*, mapping and prompt — no provider | `domain/extraction/` |
+| 6.2 | `OpenRouterExtractionAdapter` + HTTP transport | `adapters/extraction/` |
 | 6.14 | Typed settings, safe with nothing configured | `config/` |
 | 6.15 | Application logging | `observability/` |
 | 10 | 12-state transition table and its enforcement | `domain/workflow/`, `pipeline/state_machine.py` |
@@ -1117,7 +1118,6 @@ models and vocabulary, and `pipeline/audit.py` holds the audit event types.
 
 | §  | Component | Phase |
 |---|---|---|
-| 6.2 | `ExtractionPort` *implementation* — the OpenRouter adapter and its transport | 5 |
 | 6.5 | `ClarificationComposer` | 6 |
 | 6.6 | A concrete `CorrelationPolicy` | 7 |
 | 6.7 | `MockWebCargoAdapter`; `RealWebCargoAdapter` | 8 |
@@ -1129,9 +1129,9 @@ models and vocabulary, and `pipeline/audit.py` holds the audit event types.
 | 6.13, 9 | Pipeline stages; demo runners; the four scenarios | 13 |
 | 13 | The mock strategy, beyond the email fixture layer | 8, 13 |
 
-`adapters/` currently contains one implementation — `FixtureEmailSource`. The
-other six adapter packages hold a docstring naming what will implement which
-port, and no code. That is deliberate: a stub that pretends to reach OpenRouter
+`adapters/` currently contains two implementations — `FixtureEmailSource` and
+`OpenRouterExtractionAdapter`. The other five adapter packages hold a docstring
+naming what will implement which port, and no code. That is deliberate: a stub that pretends to reach OpenRouter
 or WebCargo would make a smoke test pass while proving nothing.
 
 ### Phase roadmap
@@ -1142,8 +1142,8 @@ or WebCargo would make a smoke test pass while proving nothing.
 | 2 | Canonical shipment normalization, merging, conflict detection, deterministic validation | ✅ Complete |
 | 3 | Email fixtures, conversation fixture data, deterministic fixture source | ✅ Complete |
 | 4 | Qwen 3.7 Flash extraction contract | ✅ Complete |
-| 5 | Qwen 3.7 Flash + OpenRouter adapter | Next |
-| 6 | Extraction → canonical shipment → validation pipeline, and clarification decision loop | Planned |
+| 5 | Qwen 3.7 Flash + OpenRouter adapter | ✅ Complete |
+| 6 | Extraction → canonical shipment → validation pipeline, and clarification decision loop | Next |
 | 7 | Email/thread correlation and clarification reply handling | Planned |
 | 8 | Mock WebCargo adapter for deterministic demo behaviour | Planned |
 | 9 | Rate normalization and eligibility filtering | Planned |
@@ -1152,10 +1152,10 @@ or WebCargo would make a smoke test pass while proving nothing.
 | 12 | Client ACCEPT / REJECT workflow | Planned |
 | 13 | End-to-end demo orchestration and demo hardening | Planned |
 
-Intended extraction model: **Qwen 3.7 Flash**. The provider-specific model
-identifier will be configured during the OpenRouter integration phase after
-verification — `openrouter.model` defaults to `None` and no slug is guessed
-(AMB-2).
+Extraction model: **Qwen 3.7 Flash** — `qwen/qwen3.7-flash`, verified against
+OpenRouter's live model list (AMB-2, resolved). The model supports
+`response_format` but not `structured_outputs`, so the adapter uses JSON mode and
+enforces the schema locally.
 
 ---
 

@@ -5,12 +5,13 @@ concept**. A client emails a shipment request; the system understands the email,
 asks for anything missing, searches for rates, selects the fastest eligible one,
 and stops so a human can approve before the quotation reaches the client.
 
-> **Status: Phase 4 complete.**
+> **Status: Phase 5 complete.**
 > The deterministic core of the workflow exists and is tested: the canonical
 > shipment record, normalization, merging with conflict detection, the eleven
 > validation rules, a deterministic email fixture layer, and the extraction
-> contract a model will later be held to. **No external service is
-> integrated** — no model is ever called, no mailbox, no rate provider.
+> contract a model is held to, and a live Qwen 3.7 Flash extraction adapter.
+> A model is called **only** when an API key is configured; without one the
+> whole suite passes offline. No mailbox and no rate provider are integrated.
 > See [What is implemented today](#what-is-implemented-today).
 
 ---
@@ -45,7 +46,7 @@ Client email
     ↓
 Email ingestion
     ↓
-Qwen extraction                       ← contract implemented; adapter not
+Qwen extraction                       ← implemented (needs an API key)
     ↓
 Canonical shipment                    ← implemented
     ↓
@@ -99,6 +100,8 @@ Everything in this list exists, is typed, and is covered by tests.
 | Extraction contract — four-state fields, evidence, ambiguity | `domain/extraction/` |
 | Deterministic mapping into the canonical record | `to_extracted_fields` |
 | The extraction prompt and its injection boundary | `domain/extraction/prompt.py` |
+| OpenRouter / Qwen 3.7 Flash extraction adapter | `adapters/extraction/` |
+| HTTP transport — timeouts, bounded retries, error translation | `adapters/extraction/transport.py` |
 
 ## What is not implemented yet
 
@@ -106,7 +109,6 @@ Nothing in this list is stubbed, faked, or partially wired. It does not exist.
 
 | Not implemented | Arrives in |
 |---|---|
-| OpenRouter adapter, any model call | Phase 5 |
 | Extraction → shipment → validation pipeline; clarification decision loop | Phase 6 |
 | Clarification message generation | Phase 6 |
 | Production email/thread correlation policy | Phase 7 |
@@ -299,7 +301,6 @@ none has been resolved by guessing.
 
 | Question | Status | Blocks |
 |---|---|---|
-| **Extraction model identifier.** Intended model: **Qwen 3.7 Flash**. The provider-specific model identifier will be configured during the OpenRouter integration phase after verification. No slug is guessed; `openrouter.model` defaults to `None`, and a test asserts it stays that way. | Unresolved | Phase 5 |
 | **Real WebCargo transit-time source.** Must be verified before production implementation. Demo transit times are supplied by the mock adapter. The real adapter does not invent a source and assumes no field carries one. | Unresolved for production; resolved for the demo | Real adapter only |
 | **`RateQuery.date` — where the search date comes from.** A rate query requires a date, but no approved project document establishes a business rule for its origin. Not defaulted to today, tomorrow, next available, shipment date, or quote date. | **Unresolved — blocking** | Phase 8 |
 | **Carrier eligibility rules and their input data.** The one documented restriction concerns liquid products, but nothing maps a commodity to its physical form. | Unresolved | Phase 9 |
@@ -350,6 +351,14 @@ The suite covers:
 - **Extraction** — contract invariants, malformed and impossible model output,
   the four absence states, mapping into the canonical record, eight worked
   examples against the real fixtures, and the prompt-injection boundary
+- **Adapter** — request shape, JSON mode, retries and status handling against a
+  mock HTTP server, API-key hygiene, and the injection boundary at the wire
+
+A live extraction against OpenRouter is opt-in and skipped by default:
+
+```bash
+TRANSLOG_OPENROUTER__API_KEY=sk-or-... .venv/bin/python -m pytest -m live
+```
 
 Type checking, linting, and formatting:
 
@@ -367,8 +376,8 @@ Type checking, linting, and formatting:
 | **2** | Canonical shipment normalization, merging, conflict detection, and deterministic validation | ✅ **COMPLETE** |
 | **3** | Email fixtures, conversation fixture data, deterministic fixture source | ✅ **COMPLETE** |
 | **4** | Qwen 3.7 Flash extraction contract | ✅ **COMPLETE** |
-| **5** | Qwen 3.7 Flash + OpenRouter adapter | **NEXT** |
-| **6** | Extraction → canonical shipment → validation pipeline, and clarification decision loop | Planned |
+| **5** | Qwen 3.7 Flash + OpenRouter adapter | ✅ **COMPLETE** |
+| **6** | Extraction → canonical shipment → validation pipeline, and clarification decision loop | **NEXT** |
 | **7** | Email/thread correlation and clarification reply handling | Planned |
 | **8** | Mock WebCargo adapter for deterministic demo behaviour | Planned |
 | **9** | Rate normalization and eligibility filtering | Planned |
