@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "translog-quote"
+version = "0.1.0"
+description = "AI-assisted cargo quotation workflow — demonstration / proof of concept"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # Canonical schemas, value objects, and strict validation of model output.
+    "pydantic>=2.9",
+    # Environment-backed configuration. Companion to pydantic for settings.
+    "pydantic-settings>=2.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "mypy>=1.11",
+    "ruff>=0.6",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/translog_quote"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q --strict-markers"
+markers = [
+    "phase2: awaits Phase 2 (extraction, ingestion, validation)",
+    "phase3: awaits Phase 3 (rate pipeline)",
+    "phase4: awaits Phase 4 (mock WebCargo adapter)",
+]
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+packages = ["translog_quote"]
+strict = true
+warn_unreachable = true
+
+[tool.ruff]
+src = ["src", "tests"]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "RET", "SIM", "TCH"]
+
+[tool.ruff.lint.flake8-type-checking]
+# Pydantic resolves annotations at runtime, so its models' imports must stay at
+# module scope. Protocols are listed for the same reason: keeping port contracts
+# readable as six-line files beats hiding their types behind TYPE_CHECKING.
+runtime-evaluated-base-classes = ["pydantic.BaseModel", "typing.Protocol"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+# The failure taxonomy names outcomes, not "Errors": ContractViolation and
+# UnresolvedFieldMapping say what went wrong far better than an -Error suffix.
+"src/translog_quote/errors/taxonomy.py" = ["N818"]
+# Ports are the project's published contracts and are read far more often than
+# they are imported. Hiding their types behind TYPE_CHECKING to save an import
+# makes a six-line interface harder to read for no runtime benefit.
+"src/translog_quote/ports/*.py" = ["TC001", "TC003"]
+"src/translog_quote/domain/conversation/model.py" = ["TC001"]
