@@ -1,6 +1,7 @@
 # Architecture — AI-Assisted Cargo Quotation Demo
 
-**Status:** Design frozen. No application code written.
+**Design status:** Frozen during Phase 0. Unchanged since.
+**Implementation status:** Phases 1-3 implemented. Phase 4 next. See §17.
 **Scope:** Demonstration / proof of concept. Not the production system.
 **Supersedes:** nothing. This is the first architecture document in the repository.
 
@@ -19,6 +20,23 @@ guess later whether their absence was an oversight or a decision.
 
 Three things are out of scope and must not appear in the codebase: a frontend, any
 authentication, and automatic booking.
+
+### Design decision vs. implementation status
+
+This document records **architecture and design decisions**, which were frozen
+during Phase 0 and have not been revised since. It is written in the present
+tense throughout — "the port returns normalised rates", "filtering never scores" —
+and that tense describes *the design*, not what is built.
+
+Phases 1-3 have been implemented incrementally without abandoning any of those
+boundaries. Where a section below describes a component that does not exist yet,
+the design still stands; only the code is absent. **§17 is the single place this
+document states what is actually built.** Nothing else here should be read as an
+implementation claim.
+
+The design is not revised merely because implementation has advanced, and it is
+not revised to match code that drifted. Where the two genuinely disagree, that is
+a defect in one of them and is recorded, not quietly reconciled.
 
 ---
 
@@ -71,14 +89,20 @@ Consequences, which the rest of this document is built on:
 The demo is not blocked by this. Everything downstream of normalisation is fully
 implementable today.
 
+### AMB-14 — Language and stack (resolved in Phase 1)
+
+Python with pydantic for schemas, pytest for tests, mypy in strict mode and ruff
+for lint and format. The layer model was stack-independent and remains so; the
+contract sketches in §6 are now backed by real Python of the same shape.
+
 ### Decisions still open that affect structure
 
 | Ref | Question | How the architecture absorbs it |
 |---|---|---|
 | AMB-3 | Carrier restriction rules and their input data | Restrictions are a config-driven filter over a `RateRestrictions` value on the `Rate` model. Changing the rule set is a config edit. |
 | AMB-4 | Does client rejection loop back to selection? | The state machine treats `DECLINED` as terminal, with the loop edge specified but not wired. Adding it is one transition. |
+| AMB-8 | Where `RateQuery.date` comes from | Nothing produces it yet. Not defaulted to today, tomorrow, next available, shipment date or quote date — no approved document specifies a rule. **Blocking for Phase 8.** |
 | AMB-11 | Thread correlation strategy | Correlation is a named policy object behind an interface, not inline logic. |
-| AMB-14 | Language and stack | Contract sketches below are Python-flavoured pseudocode. The layer model maps unchanged onto TypeScript. |
 
 ---
 
@@ -278,11 +302,31 @@ is visible to any other module.
 The merge function implements BR-8 and is the subtlest code in the module:
 
 ```
-merge(existing: ShipmentRecord, incoming: ExtractedFields) -> ShipmentRecord
+merge_shipment(existing: ShipmentRecord, incoming: ExtractedFields) -> MergeResult
+MergeResult = { record, changed[], unchanged[], conflicts[] }
+FieldConflict = { field, existing_value, new_value }
 ```
 
 It fills nulls and never overwrites a known value with a null. A later reply that
 mentions only commodity and piece count must leave the other nine fields untouched.
+
+Three rules, applied independently per field:
+
+| Existing | Incoming | Result |
+|---|---|---|
+| missing | present | fill → `changed` |
+| present | identical | retain → `unchanged` |
+| present | different | **conflict** → `conflicts`; record unmodified |
+
+The conflict rule extends the Phase 0 design rather than contradicting it. Phase 0
+said a known value is never overwritten by a null; Phase 2's approved requirement
+added that a known value is never overwritten by a *contradicting value* either.
+Both are the same principle — the merge does not discard information on its own.
+
+Retaining the existing value on a conflict is not a resolution. The merge makes no
+claim that the older value is correct, and **no conflict-resolution policy exists
+or has been specified**; resolving a conflict is a future workflow responsibility,
+and `FieldConflict` carries both values so that layer has what it needs.
 
 `cargo_type` and `is_chemical` are independent fields (BR-12). The type system
 should make it impossible to derive one from the other.
@@ -297,16 +341,36 @@ should make it impossible to derive one from the other.
 | **Never** | sends anything, phrases a question, or knows about rates |
 
 ```
-validate(record: ShipmentRecord) -> ValidationResult
-ValidationResult = Complete | Incomplete(missing: list[FieldName])
+validate_shipment(record: ShipmentRecord) -> ValidationResult
+ValidationResult   = { issues[] }
+ValidationIssue    = { rule_id, field, severity, message }
+ValidationSeverity = MISSING | INVALID | WARNING
 ```
+
+with derived views `is_valid`, `missing_fields`, `invalid_fields`, `warnings`.
+
+Every issue carries a stable machine-readable `rule_id`, so a caller can group,
+filter or route on the rule without parsing a message string — which is what lets
+a later phase build one batched clarification from one result. The validator
+reports *every* applicable failure in one pass; it never stops at the first.
+
+`WARNING` is supported by the result type but **no rule produces one today**. It
+exists so a future non-blocking rule needs no redesign. A result carrying only
+warnings is still `is_valid`.
 
 Nine unconditional rules, two conditional: `msds_attached` required only when
 `is_chemical` is true; `delivery_address` required only when `delivery_type` is
 `"door"`. Each rule is a separate named predicate so that a failing test points at
 one rule rather than at a boolean expression.
 
-Validation returns a result. It does not raise — an incomplete shipment is a normal
+Eleven business rules, thirteen `ValidationRuleId` values: weight and pieces each
+carry a separate identifier for their `INVALID` case (`WEIGHT_INVALID`,
+`PCS_INVALID`), so "absent" and "present but nonsensical" are distinguishable.
+There is no `DIMENSIONS_INVALID` — `CargoDimensions` enforces positivity at
+construction, so the validator only ever sees dimensions present or absent.
+
+Validation is deterministic and **never calls a language model**. It does not
+mutate the record, and it does not raise — an incomplete shipment is a normal
 business outcome, not an error (§12).
 
 ### 6.5 Clarification
@@ -996,9 +1060,81 @@ listed; the full set lives with the requirements.
 | **AMB-2** | model id in config | Extraction adapter needs the exact OpenRouter slug before it runs. |
 | **AMB-3** | `DropRestrictedCarrier` rule set and its inputs | Demo uses config-driven fixture restrictions; the real rule set is unconfirmed. |
 | **AMB-4** | `DECLINED` terminal vs. loop | Built terminal. One edge to add. |
-| **AMB-11** | correlation policy | Default policy implemented behind an interface. |
-| **AMB-14** | language and stack | Layer model is stack-independent; sketches are Python-flavoured. |
+| **AMB-8** | `RateQuery.date` source | **Blocking for Phase 8.** The type requires a date; no rule says where it comes from. |
+| **AMB-11** | correlation policy | Declared as a Protocol. No concrete policy implemented — Phase 7. |
+| **AMB-14** | language and stack | **Resolved** in Phase 1: Python, pydantic, pytest, mypy, ruff. |
 
 ---
 
-*Architecture frozen. No application code written.*
+## 17. Implementation status
+
+**This section is the only implementation claim in this document.** Every other
+section describes the frozen design, in the present tense, regardless of whether
+the code exists.
+
+### Built and tested
+
+| §  | Component | Module |
+|---|---|---|
+| 4, 7 | Five-layer structure; the dependency rule, enforced by a test that fails the build | `src/translog_quote/`, `tests/architecture/test_layering.py` |
+| 6.1 | `RawEmail` DTO; `FixtureEmailSource` | `domain/email/`, `adapters/email/fixtures.py` |
+| 6.3 | `ShipmentRecord`, value objects, normalization, `merge_shipment` with conflict detection | `domain/shipment/` |
+| 6.4 | `validate_shipment` and all eleven rules | `domain/validation/` |
+| 6.6 | `Thread`; fixture-level thread grouping | `domain/conversation/`, `EmailFixtureScenario` |
+| 6.14 | Typed settings, safe with nothing configured | `config/` |
+| 6.15 | Application logging | `observability/` |
+| 10 | 12-state transition table and its enforcement | `domain/workflow/`, `pipeline/state_machine.py` |
+| 11 | All seven ports, as Protocols | `ports/` |
+| 12 | The failure taxonomy | `errors/` |
+
+Types exist for components whose behaviour does not: `domain/rates/`,
+`domain/quotation/`, `domain/decision/` and `domain/clarification/` hold their
+models and vocabulary, and `pipeline/audit.py` holds the audit event types.
+
+### Designed, not built
+
+| §  | Component | Phase |
+|---|---|---|
+| 6.2 | `ExtractionPort` implementation — OpenRouter, the prompt, schema binding | 4-5 |
+| 6.5 | `ClarificationComposer` | 6 |
+| 6.6 | A concrete `CorrelationPolicy` | 7 |
+| 6.7 | `MockWebCargoAdapter`; `RealWebCargoAdapter` | 8 |
+| 6.8 | `RateMapper` implementations | 8 |
+| 6.9 | The filter chain | 9 |
+| 6.10 | `RateSelector` and the comparator chain | 10 |
+| 6.11 | Quotation composition and the approval gate | 11 |
+| 6.12 | `IntentReader` | 12 |
+| 6.13, 9 | Pipeline stages; demo runners; the four scenarios | 13 |
+| 13 | The mock strategy, beyond the email fixture layer | 8, 13 |
+
+`adapters/` currently contains one implementation — `FixtureEmailSource`. The
+other six adapter packages hold a docstring naming what will implement which
+port, and no code. That is deliberate: a stub that pretends to reach OpenRouter
+or WebCargo would make a smoke test pass while proving nothing.
+
+### Phase roadmap
+
+| Phase | Scope | Status |
+|---|---|---|
+| 1 | Architecture, domain contracts, ports, configuration | ✅ Complete |
+| 2 | Canonical shipment normalization, merging, conflict detection, deterministic validation | ✅ Complete |
+| 3 | Email fixtures, conversation fixture data, deterministic fixture source | ✅ Complete |
+| 4 | Qwen 3.7 Flash extraction contract | Next |
+| 5 | Qwen 3.7 Flash + OpenRouter adapter | Planned |
+| 6 | Extraction → canonical shipment → validation pipeline, and clarification decision loop | Planned |
+| 7 | Email/thread correlation and clarification reply handling | Planned |
+| 8 | Mock WebCargo adapter for deterministic demo behaviour | Planned |
+| 9 | Rate normalization and eligibility filtering | Planned |
+| 10 | Fastest eligible rate selection | Planned |
+| 11 | Quotation-maker approval and quotation sending workflow | Planned |
+| 12 | Client ACCEPT / REJECT workflow | Planned |
+| 13 | End-to-end demo orchestration and demo hardening | Planned |
+
+Intended extraction model: **Qwen 3.7 Flash**. The provider-specific model
+identifier will be configured during the OpenRouter integration phase after
+verification — `openrouter.model` defaults to `None` and no slug is guessed
+(AMB-2).
+
+---
+
+*Architecture frozen during Phase 0 and unchanged since. Implementation status: §17.*

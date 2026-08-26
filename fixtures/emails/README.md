@@ -57,7 +57,9 @@ generate a clarification, or call a model. It only turns fixture files into
 
 Thread grouping (`EmailFixtureScenario.thread`) is fixture metadata, not the
 output of a correlation algorithm — `domain.conversation.CorrelationPolicy` has
-no concrete implementation yet. What this layer guarantees is that the
+no concrete implementation yet (Phase 7). Fixture-assigned request IDs
+(`R-DEMO-A` … `R-DEMO-F`) are demo/test identifiers, not production correlation
+output. What this layer guarantees is that the
 underlying data is correlatable: each reply's `In-Reply-To`/`References`
 correctly chains to the message before it, which is what a real policy will
 need once it exists.

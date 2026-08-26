@@ -8,4 +8,8 @@ cannot drift into being easier to satisfy than reality. Without it, "we swapped 
 the real adapter and everything broke" is discovered at integration time instead
 of at design time.
 
-Empty until Phase 4, when the first adapter exists to run a contract against.
+Still empty. One adapter exists so far — `FixtureEmailSource` (Phase 3) — and its
+conformance to `EmailSource` is currently asserted in
+`tests/unit/test_fixture_email_source.py`. A shared `EmailSource` contract suite
+becomes worthwhile once a second implementation exists to run it against; the
+`RateSearchPort` suite arrives with the mock WebCargo adapter in Phase 8.
