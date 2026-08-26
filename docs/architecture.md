@@ -1,7 +1,7 @@
 # Architecture — AI-Assisted Cargo Quotation Demo
 
 **Design status:** Frozen during Phase 0. Unchanged since.
-**Implementation status:** Phases 1-3 implemented. Phase 4 next. See §17.
+**Implementation status:** Phases 1-4 implemented. Phase 5 next. See §17.
 **Scope:** Demonstration / proof of concept. Not the production system.
 **Supersedes:** nothing. This is the first architecture document in the repository.
 
@@ -28,7 +28,7 @@ during Phase 0 and have not been revised since. It is written in the present
 tense throughout — "the port returns normalised rates", "filtering never scores" —
 and that tense describes *the design*, not what is built.
 
-Phases 1-3 have been implemented incrementally without abandoning any of those
+Phases 1-4 have been implemented incrementally without abandoning any of those
 boundaries. Where a section below describes a component that does not exist yet,
 the design still stands; only the code is absent. **§17 is the single place this
 document states what is actually built.** Nothing else here should be read as an
@@ -274,13 +274,28 @@ call — that belongs in §6.2 or nowhere.
 which reuses the same port. Contract:
 
 ```
-ExtractionPort.extract(text: str) -> ExtractedFields
+ExtractionPort.extract_shipment(text: str) -> ExtractionResult
 ```
 
-`ExtractedFields` carries every canonical field as *present* or *explicitly null*.
-There is no "absent" third state — that distinction is what makes BR-7 testable.
+`ExtractionResult` carries every canonical field as an `ExtractedValue` — a
+status, an optional value, the evidence it came from, and a note. The status
+distinguishes four situations a single null cannot: the email was silent, the
+client explicitly denied the field, the email said something unrepresentable, or
+the value is genuinely stated.
+
+`domain.extraction.to_extracted_fields` narrows that into `ExtractedFields`,
+where a field is present or explicitly null and nothing else. That narrowing is
+lossy and documented as such — see `docs/extraction-contract.md` §8.
+
 A response that does not satisfy the schema is a `ContractViolation`, never a
 partial parse.
+
+> **Phase 4 refinement.** This port originally returned `ExtractedFields`
+> directly. It was widened to `ExtractionResult` when the extraction contract was
+> designed, because collapsing "the client said no" into the same null as "the
+> email was silent" loses information a clarification step needs. No
+> implementation existed at the time, so nothing broke. The canonical
+> `ShipmentRecord` and `ExtractedFields` were **not** changed.
 
 The model id lives in config (AMB-2), the prompt lives in this adapter, and neither
 is visible to any other module.
@@ -671,7 +686,8 @@ assembled.
 
 ```mermaid
 flowchart LR
-    RE["RawEmail"] --> EF["ExtractedFields<br/>every field present or null"]
+    RE["RawEmail"] --> XR["ExtractionResult<br/>status + value per field"]
+    XR --> EF["ExtractedFields<br/>every field present or null"]
     EF --> SR["ShipmentRecord<br/>merged"]
     SR --> VR{"ValidationResult"}
     VR -->|Incomplete| CM["ClarificationMessage"]
@@ -695,7 +711,8 @@ argument rather than widening the type it was handed.
 |---|---|---|---|
 | Ingest | fixture file | `RawEmail` | §6.1 |
 | Correlate | `RawEmail` + index | `RequestId` \| New | §6.6 |
-| Extract | `RawEmail.body_text` | `ExtractedFields` | §6.2 |
+| Extract | `RawEmail.body_text` | `ExtractionResult` | §6.2 |
+| Narrow | `ExtractionResult` | `ExtractedFields` | §6.2 |
 | Merge | `ExtractedFields` + prior | `ShipmentRecord` | §6.3 |
 | Validate | `ShipmentRecord` | `ValidationResult` | §6.4 |
 | Compose clarification | missing fields | `ClarificationMessage` | §6.5 |
@@ -1081,11 +1098,16 @@ the code exists.
 | 6.3 | `ShipmentRecord`, value objects, normalization, `merge_shipment` with conflict detection | `domain/shipment/` |
 | 6.4 | `validate_shipment` and all eleven rules | `domain/validation/` |
 | 6.6 | `Thread`; fixture-level thread grouping | `domain/conversation/`, `EmailFixtureScenario` |
+| 6.2 | The extraction *contract*, mapping and prompt — no provider | `domain/extraction/` |
 | 6.14 | Typed settings, safe with nothing configured | `config/` |
 | 6.15 | Application logging | `observability/` |
 | 10 | 12-state transition table and its enforcement | `domain/workflow/`, `pipeline/state_machine.py` |
 | 11 | All seven ports, as Protocols | `ports/` |
 | 12 | The failure taxonomy | `errors/` |
+
+`domain/extraction/` holds the contract, the deterministic mapping into the
+canonical record, and the prompt — but no provider, no transport and no model
+name. See `docs/extraction-contract.md`.
 
 Types exist for components whose behaviour does not: `domain/rates/`,
 `domain/quotation/`, `domain/decision/` and `domain/clarification/` hold their
@@ -1095,7 +1117,7 @@ models and vocabulary, and `pipeline/audit.py` holds the audit event types.
 
 | §  | Component | Phase |
 |---|---|---|
-| 6.2 | `ExtractionPort` implementation — OpenRouter, the prompt, schema binding | 4-5 |
+| 6.2 | `ExtractionPort` *implementation* — the OpenRouter adapter and its transport | 5 |
 | 6.5 | `ClarificationComposer` | 6 |
 | 6.6 | A concrete `CorrelationPolicy` | 7 |
 | 6.7 | `MockWebCargoAdapter`; `RealWebCargoAdapter` | 8 |
@@ -1119,8 +1141,8 @@ or WebCargo would make a smoke test pass while proving nothing.
 | 1 | Architecture, domain contracts, ports, configuration | ✅ Complete |
 | 2 | Canonical shipment normalization, merging, conflict detection, deterministic validation | ✅ Complete |
 | 3 | Email fixtures, conversation fixture data, deterministic fixture source | ✅ Complete |
-| 4 | Qwen 3.7 Flash extraction contract | Next |
-| 5 | Qwen 3.7 Flash + OpenRouter adapter | Planned |
+| 4 | Qwen 3.7 Flash extraction contract | ✅ Complete |
+| 5 | Qwen 3.7 Flash + OpenRouter adapter | Next |
 | 6 | Extraction → canonical shipment → validation pipeline, and clarification decision loop | Planned |
 | 7 | Email/thread correlation and clarification reply handling | Planned |
 | 8 | Mock WebCargo adapter for deterministic demo behaviour | Planned |

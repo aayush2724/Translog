@@ -5,11 +5,12 @@ concept**. A client emails a shipment request; the system understands the email,
 asks for anything missing, searches for rates, selects the fastest eligible one,
 and stops so a human can approve before the quotation reaches the client.
 
-> **Status: Phase 3 complete.**
+> **Status: Phase 4 complete.**
 > The deterministic core of the workflow exists and is tested: the canonical
 > shipment record, normalization, merging with conflict detection, the eleven
-> validation rules, and a deterministic email fixture layer. **No external
-> service is integrated** — no model provider, no mailbox, no rate provider.
+> validation rules, a deterministic email fixture layer, and the extraction
+> contract a model will later be held to. **No external service is
+> integrated** — no model is ever called, no mailbox, no rate provider.
 > See [What is implemented today](#what-is-implemented-today).
 
 ---
@@ -44,7 +45,7 @@ Client email
     ↓
 Email ingestion
     ↓
-Qwen extraction
+Qwen extraction                       ← contract implemented; adapter not
     ↓
 Canonical shipment                    ← implemented
     ↓
@@ -95,6 +96,9 @@ Everything in this list exists, is typed, and is covered by tests.
 | Deterministic email fixtures, five scenarios | `fixtures/emails/` |
 | Fixture email source implementing `EmailSource` | `adapters/email/fixtures.py` |
 | Conversation/thread fixture relationships | `EmailFixtureScenario.thread` |
+| Extraction contract — four-state fields, evidence, ambiguity | `domain/extraction/` |
+| Deterministic mapping into the canonical record | `to_extracted_fields` |
+| The extraction prompt and its injection boundary | `domain/extraction/prompt.py` |
 
 ## What is not implemented yet
 
@@ -102,7 +106,6 @@ Nothing in this list is stubbed, faked, or partially wired. It does not exist.
 
 | Not implemented | Arrives in |
 |---|---|
-| Qwen extraction contract | Phase 4 |
 | OpenRouter adapter, any model call | Phase 5 |
 | Extraction → shipment → validation pipeline; clarification decision loop | Phase 6 |
 | Clarification message generation | Phase 6 |
@@ -344,6 +347,9 @@ The suite covers:
   passing and failing forms, multi-failure reporting, and determinism
 - **Fixtures** — unique message IDs, thread grouping, deterministic ordering,
   reply-to-parent chaining, `RawEmail` contract conformance, and a secret scan
+- **Extraction** — contract invariants, malformed and impossible model output,
+  the four absence states, mapping into the canonical record, eight worked
+  examples against the real fixtures, and the prompt-injection boundary
 
 Type checking, linting, and formatting:
 
@@ -360,8 +366,8 @@ Type checking, linting, and formatting:
 | **1** | Architecture, domain contracts, ports, configuration | ✅ **COMPLETE** |
 | **2** | Canonical shipment normalization, merging, conflict detection, and deterministic validation | ✅ **COMPLETE** |
 | **3** | Email fixtures, conversation fixture data, deterministic fixture source | ✅ **COMPLETE** |
-| **4** | Qwen 3.7 Flash extraction contract | **NEXT** |
-| **5** | Qwen 3.7 Flash + OpenRouter adapter | Planned |
+| **4** | Qwen 3.7 Flash extraction contract | ✅ **COMPLETE** |
+| **5** | Qwen 3.7 Flash + OpenRouter adapter | **NEXT** |
 | **6** | Extraction → canonical shipment → validation pipeline, and clarification decision loop | Planned |
 | **7** | Email/thread correlation and clarification reply handling | Planned |
 | **8** | Mock WebCargo adapter for deterministic demo behaviour | Planned |
@@ -379,5 +385,6 @@ New integrations arrive as an adapter behind an existing port plus one line in
 | | |
 |---|---|
 | [`docs/architecture.md`](docs/architecture.md) | Module boundaries, dependency rules, data flow, state transitions, failure boundaries, mock strategy, extension points |
+| [`docs/extraction-contract.md`](docs/extraction-contract.md) | What a model may report, field semantics, missing/negative/ambiguous behaviour, error handling, the injection boundary, worked examples |
 | [`fixtures/emails/README.md`](fixtures/emails/README.md) | Fixture format, scenarios, and what the fixture layer does not do |
 | [`docs/reference/`](docs/reference/) | Frozen source documents and a note on what is deliberately not committed |
