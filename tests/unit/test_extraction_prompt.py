@@ -142,3 +142,38 @@ def test_an_empty_body_still_produces_a_well_formed_request() -> None:
 
     assert len(messages) == 3
     assert "----- BEGIN CLIENT EMAIL -----" in messages[-1][1]
+
+
+# --- provider requirement: JSON mode needs the word "json" in the messages ----
+
+
+def test_the_assembled_messages_contain_the_word_json() -> None:
+    """A provider requirement, not a style preference.
+
+    Alibaba (which serves `qwen/qwen3.7-flash` through OpenRouter) rejects a
+    request outright when `response_format` is `json_object` and the messages
+    never mention JSON:
+
+        400 'messages' must contain the word 'json' in some form, to use
+            'response_format' of type 'json_object'.
+
+    The prompt is worded to satisfy that. This test exists so a later tidy-up
+    that removes the word fails here, loudly and offline, rather than as a 400
+    the next time someone runs a live extraction.
+    """
+    assembled = " ".join(content for _, content in build_extraction_messages("body"))
+
+    assert "json" in assembled.lower()
+
+
+def test_the_instructions_themselves_mention_json_not_just_the_email() -> None:
+    """The word has to be in the instructions, not smuggled in via email text —
+    an email that happened to say "json" would otherwise be load-bearing."""
+    instructions = (EXTRACTION_SYSTEM_PROMPT + EXTRACTION_SCHEMA_GUIDE).lower()
+
+    assert "json" in instructions
+
+
+def test_the_prompt_asks_for_json_only_with_no_fence_or_prose() -> None:
+    assert "no code fence" in PROMPT
+    assert "no prose" in PROMPT

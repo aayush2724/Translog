@@ -376,3 +376,32 @@ def test_a_fixture_email_flows_through_to_validation() -> None:
         ValidationRuleId.PCS_REQUIRED,
         ValidationRuleId.DELIVERY_TYPE_REQUIRED,
     }
+
+
+# --- reasoning must stay off ---------------------------------------------------
+
+
+def test_reasoning_is_disabled() -> None:
+    """Qwen 3.7 Flash is a reasoning model and reasoning tokens count against
+    `max_tokens`. Left enabled, it spends the whole budget thinking and returns
+    `finish_reason=length` with zero characters of content — which the adapter
+    then correctly, and uselessly, rejects as truncated.
+
+    Extraction is transcription, not deliberation. This is pinned because the
+    parameter looks removable and is not.
+    """
+    adapter, transport = adapter_for(envelope(json.dumps(VALID_PAYLOAD)))
+
+    adapter.extract_shipment("body")
+
+    assert transport.sent[0]["reasoning"] == {"enabled": False}
+
+
+def test_the_budget_is_large_enough_for_a_full_extraction() -> None:
+    """Eleven fields with evidence strings measured ~440 completion tokens
+    against the live model once reasoning was off."""
+    adapter, transport = adapter_for(envelope(json.dumps(VALID_PAYLOAD)))
+
+    adapter.extract_shipment("body")
+
+    assert transport.sent[0]["max_tokens"] >= 1024

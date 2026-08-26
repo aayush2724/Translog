@@ -13,6 +13,7 @@ import httpx
 import pytest
 
 from translog_quote.adapters.extraction import HttpxChatTransport
+from translog_quote.adapters.extraction.transport import _DETAIL_LIMIT
 from translog_quote.errors import PermanentFailure, TransientFailure
 
 API_KEY = "sk-or-v1-TESTKEYNOTREAL"
@@ -117,6 +118,7 @@ def test_a_bad_request_is_permanent_and_carries_the_provider_message() -> None:
 
 
 def test_an_error_body_excerpt_is_bounded() -> None:
+    """A provider can return a very large body; the exception must not."""
     transport = transport_with(
         lambda request: httpx.Response(400, json={"error": {"message": "x" * 5000}})
     )
@@ -124,7 +126,7 @@ def test_an_error_body_excerpt_is_bounded() -> None:
     with pytest.raises(PermanentFailure) as excinfo:
         transport.post_chat_completion(PAYLOAD)
 
-    assert len(str(excinfo.value)) < 400
+    assert len(str(excinfo.value)) <= _DETAIL_LIMIT + 64  # + the "OpenRouter returned 400: " prefix
 
 
 def test_a_non_json_body_is_permanent() -> None:
@@ -216,3 +218,77 @@ def test_no_httpx_exception_escapes_the_transport() -> None:
         transport_with(handler).post_chat_completion(PAYLOAD)
 
     assert not isinstance(excinfo.value, httpx.HTTPError)
+
+
+# --- provider error unwrapping -----------------------------------------------
+
+
+def test_an_openrouter_wrapped_provider_error_is_unwrapped() -> None:
+    """OpenRouter reports its own flat "Provider returned error" and hides the
+    provider's real complaint in metadata.raw as an SSE-framed JSON string.
+    Reporting only the outer message throws away the one sentence that says
+    what is wrong — which is exactly what happened on the first live run."""
+    body = {
+        "error": {
+            "message": "Provider returned error",
+            "code": 400,
+            "metadata": {
+                "provider_name": "Alibaba",
+                "raw": 'data: {"error":{"code":"invalid_parameter_error",'
+                "\"message\":\"'messages' must contain the word 'json' in some form, "
+                "to use 'response_format' of type 'json_object'.\"}}\n\n",
+            },
+        }
+    }
+    transport = transport_with(lambda request: httpx.Response(400, json=body))
+
+    with pytest.raises(PermanentFailure) as excinfo:
+        transport.post_chat_completion(PAYLOAD)
+
+    message = str(excinfo.value)
+    assert "must contain the word 'json'" in message  # the actionable part
+    assert "provider=Alibaba" in message
+    assert "code=400" in message
+
+
+def test_a_plain_provider_error_without_metadata_still_reports() -> None:
+    body = {"error": {"message": "qwen/nonexistent is not a valid model ID", "code": 400}}
+    transport = transport_with(lambda request: httpx.Response(400, json=body))
+
+    with pytest.raises(PermanentFailure, match="not a valid model ID"):
+        transport.post_chat_completion(PAYLOAD)
+
+
+def test_malformed_metadata_raw_does_not_break_error_reporting() -> None:
+    """A diagnostic helper that throws would replace a useful message with a
+    confusing one."""
+    body = {
+        "error": {
+            "message": "Provider returned error",
+            "code": 400,
+            "metadata": {"provider_name": "Alibaba", "raw": "not json at all {{{"},
+        }
+    }
+    transport = transport_with(lambda request: httpx.Response(400, json=body))
+
+    with pytest.raises(PermanentFailure, match="Provider returned error"):
+        transport.post_chat_completion(PAYLOAD)
+
+
+def test_the_unwrapped_detail_is_still_bounded() -> None:
+    body = {
+        "error": {
+            "message": "Provider returned error",
+            "code": 400,
+            "metadata": {
+                "provider_name": "P",
+                "raw": 'data: {"error":{"message":"' + "x" * 5000 + '"}}',
+            },
+        }
+    }
+    transport = transport_with(lambda request: httpx.Response(400, json=body))
+
+    with pytest.raises(PermanentFailure) as excinfo:
+        transport.post_chat_completion(PAYLOAD)
+
+    assert len(str(excinfo.value)) <= _DETAIL_LIMIT + 64

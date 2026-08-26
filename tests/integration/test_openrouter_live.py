@@ -15,8 +15,6 @@ make the test flaky for no gain.
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from translog_quote.config import Settings
@@ -24,11 +22,25 @@ from translog_quote.domain.extraction import FieldStatus, to_extracted_fields
 from translog_quote.domain.shipment import RequestSource, build_initial_record
 from translog_quote.domain.validation import validate_shipment
 
+
+def _credentials_available() -> bool:
+    """Resolve the key the way the application does, not the way a shell does.
+
+    Reading ``os.environ`` directly would miss a key configured in ``.env``,
+    which is where the project tells people to put it — and the test would then
+    skip while the adapter itself is perfectly able to run.
+    """
+    try:
+        return Settings().openrouter.api_key is not None
+    except Exception:
+        return False
+
+
 pytestmark = [
     pytest.mark.live,
     pytest.mark.skipif(
-        not os.environ.get("TRANSLOG_OPENROUTER__API_KEY"),
-        reason="live test: set TRANSLOG_OPENROUTER__API_KEY to run",
+        not _credentials_available(),
+        reason="live test: configure TRANSLOG_OPENROUTER__API_KEY (environment or .env)",
     ),
 ]
 

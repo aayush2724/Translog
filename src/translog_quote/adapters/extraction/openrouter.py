@@ -111,7 +111,23 @@ class OpenRouterExtractionAdapter:
             # JSON mode. Not `json_schema`: the model does not advertise
             # `structured_outputs`, and asking for an unsupported enforcement
             # mode would be worse than enforcing it ourselves, which we do.
+            #
+            # The instructions must name JSON for this to be accepted at all --
+            # the provider rejects a JSON-mode request whose messages never say
+            # the word. `domain.extraction.prompt` says it, and a test keeps it
+            # said.
             "response_format": {"type": "json_object"},
+            # Qwen 3.7 Flash is a reasoning model, and reasoning tokens are
+            # charged against `max_tokens`. Left on, it spends the entire budget
+            # thinking and returns `finish_reason=length` with empty content --
+            # observed at exactly 2048 reasoning tokens and 0 characters of
+            # answer. Extraction is mechanical transcription, not a problem to
+            # reason about, so reasoning is off: the same request then returns a
+            # complete JSON object in ~440 completion tokens.
+            #
+            # `{"effort": "minimal"}` does not help -- it still spent the full
+            # 2048. Only disabling outright works.
+            "reasoning": {"enabled": False},
         }
         if self._seed is not None:
             payload["seed"] = self._seed

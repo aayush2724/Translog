@@ -12,6 +12,7 @@ edge, so that no ``httpx`` exception escapes ``adapters/``.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Protocol
 
 import httpx
@@ -137,17 +138,78 @@ class HttpxChatTransport:
         return body
 
 
+_DETAIL_LIMIT = 400
+
+
 def _safe_detail(response: httpx.Response) -> str:
-    """A short, bounded excerpt of an error body — never the request, never a header."""
+    """A short, bounded description of an error body.
+
+    Reads only the response. The request, its headers and the API key are never
+    involved, and an OpenRouter error body carries none of them.
+
+    OpenRouter wraps an upstream provider's failure and reports its own message
+    as a flat "Provider returned error", putting the provider's actual complaint
+    in ``error.metadata.raw`` as an SSE-framed JSON string. Surfacing only the
+    outer message throws away the one sentence that says what is wrong — so this
+    unwraps one level when the metadata is there.
+    """
     try:
         payload = response.json()
     except ValueError:
-        return response.text[:200]
+        return response.text[:_DETAIL_LIMIT]
 
-    if isinstance(payload, dict):
-        error = payload.get("error")
-        if isinstance(error, dict):
-            return str(error.get("message", ""))[:200]
-        if error is not None:
-            return str(error)[:200]
-    return str(payload)[:200]
+    if not isinstance(payload, dict):
+        return str(payload)[:_DETAIL_LIMIT]
+
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return str(error)[:_DETAIL_LIMIT] if error is not None else str(payload)[:_DETAIL_LIMIT]
+
+    parts: list[str] = [str(error.get("message", "")).strip() or "unspecified error"]
+
+    code = error.get("code")
+    if code is not None:
+        parts.append(f"code={code}")
+
+    metadata = error.get("metadata")
+    if isinstance(metadata, dict):
+        provider = metadata.get("provider_name")
+        if provider:
+            parts.append(f"provider={provider}")
+        upstream = _upstream_message(metadata.get("raw"))
+        if upstream:
+            parts.append(f"upstream: {upstream}")
+
+    return " | ".join(parts)[:_DETAIL_LIMIT]
+
+
+def _upstream_message(raw: object) -> str:
+    """Pull the provider's own message out of ``metadata.raw``.
+
+    The value arrives as a string, sometimes SSE-framed (``data: {...}``) and
+    sometimes not JSON at all. A malformed one is truncated rather than raised
+    on: this runs while reporting a failure, and a diagnostic helper that throws
+    would replace a useful message with a confusing one.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return ""
+
+    text = raw.strip()
+    if text.startswith("data:"):
+        text = text[len("data:") :].strip()
+
+    try:
+        decoded = json.loads(text)
+    except ValueError:
+        return text[:200]
+
+    if isinstance(decoded, dict):
+        inner = decoded.get("error")
+        if isinstance(inner, dict):
+            message = str(inner.get("message", "")).strip()
+            inner_code = inner.get("code")
+            if message and inner_code:
+                return f"{message} ({inner_code})"
+            if message:
+                return message
+    return text[:200]
