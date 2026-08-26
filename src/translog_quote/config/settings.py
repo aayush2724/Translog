@@ -73,6 +73,14 @@ class WebCargoSettings(BaseModel):
 
 class DemoSettings(BaseModel):
     fixtures_dir: Path = Path("fixtures/scenarios")
+    """Full end-to-end demo bundles (Phase 8): emails, cached model responses
+    and rate sets, grouped per S1-S4 business scenario."""
+
+    email_fixtures_dir: Path = Path("fixtures/emails")
+    """Raw client email fixtures (Phase 3), grouped per named input scenario.
+    Narrower than `fixtures_dir`: just the email/thread layer, independent of
+    which S1-S4 business scenario eventually consumes it."""
+
     outbox_dir: Path = Path("outbox")
     deterministic: bool = True
     """Fixed clock, cached model responses, fixture-assigned request ids.
