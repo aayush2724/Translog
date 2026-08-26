@@ -39,6 +39,27 @@ class CargoDimensions(BaseModel):
     height: float = Field(gt=0)
 
 
+class FieldName(StrEnum):
+    """Every shipment field a validation issue, merge change, or conflict can
+    concern. Lives here, rather than in ``domain.validation``, because it names
+    ``ShipmentRecord``'s own fields — validation and merging both consume this
+    vocabulary, so it belongs with the type it describes, not with either
+    consumer.
+    """
+
+    ORIGIN = "origin"
+    DESTINATION = "destination"
+    WEIGHT_KG = "weight_kg"
+    DIMENSIONS_IN = "dimensions_in"
+    COMMODITY = "commodity"
+    CARGO_TYPE = "cargo_type"
+    IS_CHEMICAL = "is_chemical"
+    MSDS_ATTACHED = "msds_attached"
+    PCS = "pcs"
+    DELIVERY_TYPE = "delivery_type"
+    DELIVERY_ADDRESS = "delivery_address"
+
+
 class ExtractedFields(BaseModel):
     """What the model returned for one email.
 
@@ -87,6 +108,3 @@ class ShipmentRecord(BaseModel):
     pcs: int | None = None
     delivery_type: DeliveryType | None = None
     delivery_address: str | None = None
-
-    # Phase 2 adds `merge(existing, incoming) -> ShipmentRecord` alongside this
-    # class. It fills nulls and never overwrites a known value with a null (BR-8).
