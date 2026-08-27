@@ -7,6 +7,8 @@ the point of Phase 1.
 from __future__ import annotations
 
 import importlib
+import re
+from pathlib import Path
 
 import pytest
 
@@ -112,3 +114,57 @@ def test_openrouter_model_is_the_verified_slug(monkeypatch: pytest.MonkeyPatch) 
     from translog_quote.config import Settings
 
     assert Settings(_env_file=None).openrouter.model == "qwen/qwen3.7-flash"  # type: ignore[call-arg]
+
+
+# --- secret hygiene -----------------------------------------------------------
+
+
+def test_no_file_contains_a_provider_shaped_credential() -> None:
+    """No literal in this repository may look like a real provider API key.
+
+    Added after a secret scanner raised an incident on a *fake* key in a test
+    fixture: the placeholder carried the provider's real prefix, so it matched
+    the detector's pattern even though the payload spelled "NOTREAL".
+
+    A test credential gains nothing from imitating the real format, and the cost
+    of it doing so is a false-positive security incident on every scan — which
+    trains people to wave alerts through. The prefixes below are assembled from
+    fragments so that this guard does not trip itself.
+    """
+    prefixes = [
+        "sk" + "-or-" + "v1-",  # OpenRouter
+        "sk" + "-proj-",  # OpenAI project keys
+        "gh" + "p_",  # GitHub personal access tokens
+        "AKI" + "A",  # AWS access key ids
+        "xox" + "b-",  # Slack bot tokens
+    ]
+    pattern = re.compile("(" + "|".join(re.escape(p) for p in prefixes) + r")[A-Za-z0-9_-]{6,}")
+
+    root = Path(__file__).resolve().parents[2]
+    skip = {
+        ".venv",
+        ".git",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "evaluation",
+    }
+
+    offenders: list[str] = []
+    for path in root.rglob("*"):
+        if not path.is_file() or path.suffix not in {".py", ".md", ".toml", ".json", ".example"}:
+            continue
+        if any(part in skip for part in path.parts):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):  # pragma: no cover - binary or unreadable
+            continue
+        if pattern.search(text):
+            offenders.append(str(path.relative_to(root)))
+
+    assert not offenders, (
+        "provider-shaped credential literal found (use an obviously-fake "
+        f"placeholder instead): {offenders}"
+    )

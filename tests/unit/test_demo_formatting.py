@@ -77,9 +77,15 @@ class StubExtractor:
         raise NotImplementedError
 
 
+#: Stand-in credential for tests. Deliberately does NOT imitate the provider's
+#: real key format: secret scanners match on that shape, and a fake key wearing
+#: it costs a false-positive incident on every scan of the repository.
+FAKE_API_KEY = "test-not-a-real-credential"
+
+
 @pytest.fixture
 def configured(monkeypatch: pytest.MonkeyPatch) -> Settings:
-    monkeypatch.setenv("TRANSLOG_OPENROUTER__API_KEY", "sk-or-v1-NOTREAL")
+    monkeypatch.setenv("TRANSLOG_OPENROUTER__API_KEY", FAKE_API_KEY)
     return Settings()
 
 
@@ -293,7 +299,7 @@ def test_the_api_key_never_reaches_the_output(
 
     _, output = run(configured)
 
-    assert "sk-or-v1-NOTREAL" not in output
+    assert FAKE_API_KEY not in output
     assert "Authorization" not in output
     assert "Bearer" not in output
 

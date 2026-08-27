@@ -16,7 +16,9 @@ from translog_quote.adapters.extraction import HttpxChatTransport
 from translog_quote.adapters.extraction.transport import _DETAIL_LIMIT
 from translog_quote.errors import PermanentFailure, TransientFailure
 
-API_KEY = "sk-or-v1-TESTKEYNOTREAL"
+#: Stand-in credential. Deliberately not shaped like a real provider key, so
+#: secret scanners do not raise an incident on an obviously fake one.
+API_KEY = "test-not-a-real-credential"
 PAYLOAD: dict[str, Any] = {"model": "qwen/qwen3.7-flash", "messages": []}
 
 
