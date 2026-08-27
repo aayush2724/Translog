@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Translog Express — Quotation Desk</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">TE</span>
+      <span class="brand-text">
+        <span class="brand-name">Translog Express</span>
+        <span class="brand-sub">Quotation Desk</span>
+      </span>
+    </div>
+    <span class="badge-demo" title="Proof of concept — simulated integrations are labelled in place">POC / DEMO MODE</span>
+  </header>
+
+  <div class="notice-bar" role="note">
+    Demonstration environment — rate data is demo data and email sending is not connected.
+  </div>
+
+  <main class="container">
+    <section id="view-dashboard">
+      <div class="page-head">
+        <h1>Enquiries</h1>
+        <button id="btn-reset" class="btn btn-ghost" type="button">Restart demo</button>
+      </div>
+      <div id="dashboard-card"></div>
+    </section>
+
+    <section id="view-enquiry" hidden>
+      <nav class="crumbs">
+        <button id="btn-back" class="linklike" type="button">&larr; Enquiries</button>
+      </nav>
+      <div id="detail-header"></div>
+      <ol class="stepper" id="stepper"></ol>
+      <div id="sections"></div>
+    </section>
+
+    <p id="load-error" class="load-error" hidden>
+      Could not reach the demo server. Start it with:
+      <code>python -m translog_quote.interface.web</code>
+    </p>
+  </main>
+
+  <footer class="footer">
+    Translog Express — proof of concept. The scenario, client and correspondence shown are fictional.
+  </footer>
+</body>
+</html>
