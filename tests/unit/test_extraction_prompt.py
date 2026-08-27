@@ -177,3 +177,82 @@ def test_the_instructions_themselves_mention_json_not_just_the_email() -> None:
 def test_the_prompt_asks_for_json_only_with_no_fence_or_prose() -> None:
     assert "no code fence" in PROMPT
     assert "no prose" in PROMPT
+
+
+# --- signature / letterhead protection ----------------------------------------
+#
+# Added after the first real-client evaluation, where the dominant error was the
+# model lifting a sender's own address out of a signature block and reporting it
+# as the shipment origin, or a pickup address as the delivery address.
+#
+# These assert the *semantics* rather than one sentence, so the wording can be
+# rewritten but the protection cannot quietly disappear.
+
+
+@pytest.mark.parametrize(
+    ("protection", "markers"),
+    [
+        ("signature blocks are named as non-evidence", ["signature block"]),
+        ("letterheads are named", ["letterhead"]),
+        ("footers and disclaimers are named", ["footer", "disclaimer"]),
+        (
+            "sender office location is not the origin",
+            ["office location is not the shipment origin"],
+        ),
+        ("line of business is not the commodity", ["line of business is not the commodity"]),
+        ("quoted signatures stay signatures", ["quoted or forwarded signature"]),
+        ("pickup address is not the delivery address", ["never the delivery address"]),
+    ],
+)
+def test_the_prompt_carries_each_signature_protection(protection: str, markers: list[str]) -> None:
+    assert all(m in PROMPT for m in markers), f"prompt lost protection: {protection}"
+
+
+def test_the_prompt_names_the_identifying_details_that_are_not_shipment_facts() -> None:
+    """Phone numbers, emails, websites and registration numbers appear in every
+    signature and none of them describes cargo."""
+    for detail in ("phone number", "email", "website", "registration number"):
+        assert detail in PROMPT, f"prompt does not exclude {detail} from extraction"
+
+
+def test_the_protection_does_not_become_ignore_all_addresses() -> None:
+    """The overcorrection this rule must not turn into.
+
+    A shipment address stated in the request is real information. If the prompt
+    ever tells the model to ignore addresses generally, legitimate delivery
+    addresses start disappearing — a worse failure than the one being fixed.
+    """
+    assert "rule about context, not about addresses" in PROMPT
+    assert "must be extracted" in PROMPT
+
+
+def test_the_two_ends_of_the_journey_are_distinguished() -> None:
+    """Pickup and delivery are different fields; conflating them was the second
+    half of the observed bleed."""
+    assert "pickup or collection address" in PROMPT
+    assert "delivery address is where the client asks" in PROMPT
+
+
+def test_the_prompt_names_no_client_case_or_company() -> None:
+    """Guards against optimising for the evaluation set.
+
+    The rule has to generalise. Naming a company, a city from the corpus, or a
+    case number would tune the prompt to these 45 PDFs and tell us nothing about
+    the next 45.
+    """
+    for leaked in (
+        "case 1",
+        "case 7",
+        "case 18",
+        "case 31",
+        "case 45",
+        "case 49",
+        "ahmedabad",
+        "rajkot",
+        "bahrain",
+        "samiep",
+        "orchev",
+        "aradhya",
+        "sheeba",
+    ):
+        assert leaked not in PROMPT, f"prompt is tuned to the evaluation set: {leaked!r}"

@@ -22,3 +22,12 @@ runs/
 .DS_Store
 .idea/
 .vscode/
+
+# Client-provided evaluation data. Real customer correspondence — never committed.
+# The ZIP as delivered, anything extracted from it, and any report derived from it.
+testcases.zip
+test cases.zip
+evaluation/client_cases/
+evaluation/text/
+evaluation/reports/
+evaluation/ground_truth.json

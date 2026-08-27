@@ -37,6 +37,17 @@ ALLOWED: dict[str, set[str]] = {
         "interface",
         "bootstrap",
     },
+    # Evaluation tooling. An entry-point area like `interface`: it drives the
+    # real system, and reaches adapters only through the composition root.
+    "evaluation": {
+        "domain",
+        "ports",
+        "config",
+        "observability",
+        "errors",
+        "evaluation",
+        "bootstrap",
+    },
     # The package root re-exports nothing and must stay import-free.
     "__init__": set(),
     # The composition root is the single exception: it wires everything.
