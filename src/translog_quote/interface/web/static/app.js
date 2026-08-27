@@ -17,6 +17,10 @@ const STEP_RANK = {
   quotation_acknowledged: 4,
 };
 
+/* Motion is decoration here, never information: every state is also shown in
+   text and chips, and reduced-motion viewers get the same content instantly. */
+const REDUCED = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
 const ui = {
   snap: null,
   view: "dashboard",
@@ -27,7 +31,34 @@ const ui = {
   busy: false,
   error: null,
   revealTarget: null,
+  seenSections: new Set(),
+  extractionSettled: false,
+  extractionTimer: null,
+  processingAnimated: false,
+  ratesAnimated: false,
 };
+
+function resetMotionState() {
+  ui.seenSections.clear();
+  ui.extractionSettled = false;
+  if (ui.extractionTimer) clearTimeout(ui.extractionTimer);
+  ui.extractionTimer = null;
+  ui.processingAnimated = false;
+  ui.ratesAnimated = false;
+}
+
+function flyLetter(anchor, mode) {
+  if (REDUCED || !anchor || !anchor.getBoundingClientRect) return;
+  const rect = anchor.getBoundingClientRect();
+  const glyph = document.createElement("span");
+  glyph.className = `fx-letter ${mode}`;
+  glyph.textContent = "✉";
+  glyph.setAttribute("aria-hidden", "true");
+  glyph.style.left = `${Math.round(rect.left + rect.width / 2)}px`;
+  glyph.style.top = `${Math.round(rect.top)}px`;
+  glyph.addEventListener("animationend", () => glyph.remove());
+  document.body.appendChild(glyph);
+}
 
 /* ------------------------------------------------------------- utilities */
 
@@ -89,6 +120,8 @@ async function refresh() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     ui.snap = await response.json();
     ui.error = null;
+    // A page opened mid-demo (or reloaded) skips the intro pacing beat.
+    if (ui.snap.step !== "enquiry_processed") ui.extractionSettled = true;
   } catch (err) {
     document.getElementById("load-error").hidden = false;
     return;
@@ -123,6 +156,7 @@ async function resetDemo() {
   ui.draftText = null;
   ui.quotationRevealed = false;
   ui.view = "dashboard";
+  resetMotionState();
   await act("reset");
 }
 
@@ -178,7 +212,14 @@ function emailPanel(email, extraMeta) {
 }
 
 function card(id, headChildren, ...body) {
-  return el("article", { class: "card", id }, el("div", { class: "card-head" }, ...headChildren), ...body);
+  const isNew = !ui.seenSections.has(id);
+  ui.seenSections.add(id);
+  return el(
+    "article",
+    { class: isNew && !REDUCED ? "card enter" : "card", id },
+    el("div", { class: "card-head" }, ...headChildren),
+    ...body
+  );
 }
 
 function actionRow(...children) {
@@ -229,7 +270,11 @@ function renderDashboard() {
         fact("Cargo type", fieldValue("cargo_type")),
         fact("Received", new Date(snap.enquiry.received_at).toLocaleString())
       ),
-      actionRow(button("View Enquiry", "primary", () => { ui.view = "detail"; render(); }))
+      actionRow(button("View Enquiry", "primary", () => {
+        ui.view = "detail";
+        window.scrollTo(0, 0);
+        render();
+      }))
     )
   );
 }
@@ -257,7 +302,7 @@ function renderStepper() {
       el(
         "li",
         { class: done ? "done" : current ? "current" : null },
-        el("span", { class: "dot" }),
+        el("span", { class: "dot", "aria-hidden": "true" }, done ? "✓" : ""),
         label
       )
     )
@@ -279,6 +324,36 @@ function sectionPipelineStatus() {
   const snap = ui.snap;
   const validation = ui.snap.merged ? ui.snap.merged.validation : snap.validation;
   const ok = validation.is_valid;
+
+  // The extraction already happened server-side; this brief "analyzing" beat
+  // is presentation pacing only, and reduced motion skips it entirely.
+  if (!ui.extractionSettled) {
+    return card(
+      "sec-pipeline",
+      [el("h2", null, "Processing")],
+      el(
+        "div",
+        { class: "status-lines" },
+        el(
+          "div",
+          { class: "status-line" },
+          el("span", { class: "mark run" }, "●"),
+          el("strong", null, "AI Extraction"),
+          el("span", { class: "muted" }, "Analyzing enquiry"),
+          el("span", { class: "dots", "aria-hidden": "true" },
+            el("span", null, "●"), el("span", null, "●"), el("span", null, "●"))
+        )
+      ),
+      el(
+        "p",
+        { class: "small muted" },
+        "Extraction reads what the client wrote. Whether the shipment can be quoted is decided by fixed business rules, not by the model."
+      )
+    );
+  }
+
+  const firstReveal = !ui.processingAnimated && !REDUCED;
+  ui.processingAnimated = true;
   return card(
     "sec-pipeline",
     [el("h2", null, "Processing")],
@@ -287,7 +362,7 @@ function sectionPipelineStatus() {
       { class: "status-lines" },
       el(
         "div",
-        { class: "status-line" },
+        { class: firstReveal ? "status-line fade-line" : "status-line" },
         el("span", { class: "mark ok" }, "✓"),
         el("strong", null, "AI Extraction"),
         el("span", { class: "muted" },
@@ -295,7 +370,7 @@ function sectionPipelineStatus() {
       ),
       el(
         "div",
-        { class: "status-line" },
+        { class: firstReveal ? "status-line fade-line" : "status-line" },
         el("span", { class: `mark ${ok ? "ok" : "warn"}` }, ok ? "✓" : "⚠"),
         el("strong", null, "Validation"),
         el("span", { class: "muted" }, ok ? "All required information present" : "Information required")
@@ -427,7 +502,10 @@ function sectionClarification() {
           ui.draftEditing = !ui.draftEditing;
           render();
         }),
-        button("Approve & Send", "approve", () => act("approve-clarification")),
+        button("Approve & Send", "approve", (event) => {
+          flyLetter(event.currentTarget, "out");
+          act("approve-clarification");
+        }),
         el("span", { class: "action-note" },
           "Simulated send — this build has no email sender. Approval releases the draft to an internal outbox only.")
       )
@@ -449,7 +527,8 @@ function sectionClarification() {
     if (rank() === 1) {
       children.push(
         actionRow(
-          button("Show Client Reply", "primary", () => {
+          button("Show Client Reply", "primary", (event) => {
+            flyLetter(event.currentTarget, "in");
             reveal("sec-reply");
             act("receive-reply");
           }),
@@ -527,7 +606,23 @@ function sectionRates() {
       el("td", null, r.product),
       el("td", null, r.transit),
       el("td", { class: "num" }, fmtMoney(r.amount, r.currency)),
-      el("td", null, r.recommended ? el("span", { class: "chip chip-known" }, "RECOMMENDED") : "")));
+      el("td", null,
+        r.recommended ? el("span", { class: "chip chip-reco reco-chip" }, "FASTEST ELIGIBLE") : "")));
+
+  // First appearance: rows stagger in, then the backend's selection is
+  // highlighted. The class flip runs on the live table so the highlight is a
+  // transition, and the decision itself is always in the row's text chip.
+  let tableClass = "rates-table settled";
+  if (!ui.ratesAnimated) {
+    ui.ratesAnimated = true;
+    if (!REDUCED) {
+      tableClass = "rates-table reveal";
+      setTimeout(() => {
+        const table = document.querySelector("#sec-rates table");
+        if (table) table.classList.add("settled");
+      }, 900);
+    }
+  }
 
   const children = [
     el("p", { class: "card-sub" },
@@ -535,7 +630,7 @@ function sectionRates() {
       `${rates.query.weight_kg} kg · ${rates.query.date} · ` +
       `${rates.returned} rates returned, ${rates.eligible.length} eligible`),
     el("div", { class: "table-wrap" },
-      el("table", null, el("thead", null, header), el("tbody", null, ...rows))),
+      el("table", { class: tableClass }, el("thead", null, header), el("tbody", null, ...rows))),
   ];
 
   if (rates.excluded.length) {
@@ -678,19 +773,32 @@ function renderDetail() {
   );
   renderStepper();
 
-  const sections = [
-    sectionEnquiry(),
-    sectionPipelineStatus(),
-    sectionShipment(),
-    sectionMissing(),
-    sectionClarification(),
-    sectionReply(),
-    sectionMerged(),
-    sectionRates(),
-    sectionRecommended(),
-    sectionQuotation(),
-    sectionComplete(),
-  ].filter(Boolean);
+  if (!ui.extractionSettled) {
+    if (REDUCED) {
+      ui.extractionSettled = true;
+    } else if (!ui.extractionTimer) {
+      ui.extractionTimer = setTimeout(() => {
+        ui.extractionSettled = true;
+        render();
+      }, 1100);
+    }
+  }
+
+  const sections = ui.extractionSettled
+    ? [
+        sectionEnquiry(),
+        sectionPipelineStatus(),
+        sectionShipment(),
+        sectionMissing(),
+        sectionClarification(),
+        sectionReply(),
+        sectionMerged(),
+        sectionRates(),
+        sectionRecommended(),
+        sectionQuotation(),
+        sectionComplete(),
+      ].filter(Boolean)
+    : [sectionEnquiry(), sectionPipelineStatus()];
 
   if (ui.error) {
     sections.unshift(el("div", { class: "banner banner-amber" }, "⚠ ", ui.error));

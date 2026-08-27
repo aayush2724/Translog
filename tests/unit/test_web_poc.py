@@ -289,7 +289,7 @@ def test_the_static_frontend_contains_no_unsafe_rendering_or_secrets() -> None:
 
 
 def test_the_static_surface_is_a_closed_whitelist() -> None:
-    assert set(_STATIC_FILES) == {"/", "/index.html", "/app.css", "/app.js"}
+    assert set(_STATIC_FILES) == {"/", "/index.html", "/app.css", "/app.js", "/favicon.svg"}
     assert set(_ACTIONS) == {
         "approve-clarification",
         "receive-reply",
