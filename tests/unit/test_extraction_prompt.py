@@ -287,3 +287,28 @@ def test_the_chemical_field_names_its_negative_forms() -> None:
     for phrasing in ('"chemical: no"', '"not a chemical"', '"non-chemical cargo"'):
         assert phrasing in PROMPT, f"prompt does not cover {phrasing}"
     assert "never `denied`, never" in PROMPT
+
+
+# --- cargo type does not establish chemical status ------------------------------
+#
+# Observed in a live POC run: an enquiry whose only relevant line was
+# "Cargo type: Non-Haz" came back with `is_chemical` stated, so the clarification
+# never asked about chemical status. Rule 3 forbade inferring it from a
+# *commodity name* and said nothing about cargo type, which is the field
+# "Non-Haz" actually belongs to.
+#
+# BR-12 is the business rule: in the reference thread the client wrote "Cargo
+# type Non Haz" and, two days later, "This is a chemical product". Both true.
+
+
+def test_cargo_type_never_establishes_chemical_status() -> None:
+    assert "neither does a cargo type" in PROMPT
+    assert "hazardous, which is a different question" in PROMPT
+    assert "both non-hazardous and chemical" in PROMPT
+
+
+def test_a_cargo_type_alone_leaves_chemical_status_unstated() -> None:
+    """The instruction that produces the right behaviour, not just the warning."""
+    assert 'nor a cargo type such as "non-haz" or "haz" is a statement' in PROMPT
+    assert "if only the cargo type is given, this field" in PROMPT
+    assert "is `not_stated`" in PROMPT

@@ -23,8 +23,11 @@ state a field, return it as not stated.
 is worse than an absence, because an absence gets asked about and a guess does \
 not.
 3. Do not infer one field from another. A commodity name never establishes \
-chemical status. Dimensions never establish piece count. A destination address \
-never establishes delivery type.
+chemical status, and neither does a cargo type: "Non-Haz" means not \
+hazardous, which is a different question from whether the cargo is a \
+chemical. A shipment can be both non-hazardous and chemical. Dimensions \
+never establish piece count. A destination address never establishes \
+delivery type.
 4. Preserve explicit negatives. An answer of "no" is an answer, not a \
 silence and not an absence: record it as `stated` with the value false. \
 "Chemical: No" is `stated` false; "We have no MSDS" is `stated` false. \
@@ -123,8 +126,12 @@ Fields, with the exact representation required:
   is_chemical        true or false, only when the email says so. "Chemical: No",
                      "not a chemical" and "non-chemical cargo" are each
                      `stated` with value false - never `denied`, never
-                     `not_stated`. A chemical-sounding commodity name is not a
-                     statement either way.
+                     `not_stated`. Neither a chemical-sounding commodity name
+                     nor a cargo type such as "Non-Haz" or "Haz" is a statement
+                     about this field: hazard class and chemical status are
+                     independent, and a shipment is often both non-hazardous
+                     and chemical. If only the cargo type is given, this field
+                     is `not_stated`.
   msds_attached      true when the email says an MSDS is attached; false when
                      the email says there is none, or that one will follow
                      later. Note the promise in `note` when one is made.
