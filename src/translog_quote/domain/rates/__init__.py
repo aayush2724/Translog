@@ -11,6 +11,12 @@ selection changes order but never membership. They are separate components so ea
 can be tested for the property it is supposed to preserve.
 """
 
+from translog_quote.domain.rates.filters import (
+    drop_incomplete_rate,
+    drop_restricted_carrier,
+    drop_unrankable_rate,
+    filter_rates,
+)
 from translog_quote.domain.rates.model import (
     ExcludedRate,
     ExclusionReason,
@@ -22,10 +28,12 @@ from translog_quote.domain.rates.model import (
     TransitTime,
     TransitUnit,
 )
+from translog_quote.domain.rates.selection import select_rate
 from translog_quote.domain.rates.strategy import (
     FASTEST_ELIGIBLE,
     Selection,
     SelectionStrategy,
+    SortField,
     SortKey,
     SortOrder,
 )
@@ -41,8 +49,14 @@ __all__ = [
     "RateSearchResult",
     "Selection",
     "SelectionStrategy",
+    "SortField",
     "SortKey",
     "SortOrder",
     "TransitTime",
     "TransitUnit",
+    "drop_incomplete_rate",
+    "drop_restricted_carrier",
+    "drop_unrankable_rate",
+    "filter_rates",
+    "select_rate",
 ]

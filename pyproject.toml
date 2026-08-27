@@ -65,6 +65,9 @@ runtime-evaluated-base-classes = ["pydantic.BaseModel", "typing.Protocol"]
 # The failure taxonomy names outcomes, not "Errors": ContractViolation and
 # UnresolvedFieldMapping say what went wrong far better than an -Error suffix.
 "src/translog_quote/errors/taxonomy.py" = ["N818"]
+# `UnknownPlace` reads better at the raise site than `UnknownPlaceError`,
+# and matches the naming already used by the failure taxonomy.
+"src/translog_quote/domain/routing/iata.py" = ["N818"]
 # Ports are the project's published contracts and are read far more often than
 # they are imported. Hiding their types behind TYPE_CHECKING to save an import
 # makes a six-line interface harder to read for no runtime benefit.

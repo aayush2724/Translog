@@ -11,6 +11,18 @@ from translog_quote.pipeline.clarification_loop import (
     ClarificationWorkflow,
     TurnOutcome,
 )
+from translog_quote.pipeline.rate_search import (
+    RateSearchOutcome,
+    RateSearchStage,
+    build_query,
+)
 from translog_quote.pipeline.state_machine import StateMachine
 
-__all__ = ["ClarificationWorkflow", "StateMachine", "TurnOutcome"]
+__all__ = [
+    "ClarificationWorkflow",
+    "RateSearchOutcome",
+    "RateSearchStage",
+    "StateMachine",
+    "TurnOutcome",
+    "build_query",
+]

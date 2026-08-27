@@ -20,12 +20,20 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from translog_quote.pipeline import ClarificationWorkflow
-    from translog_quote.ports import ClockPort, EmailSink, EmailSource, ExtractionPort, StorePort
+    from translog_quote.ports import (
+        ClockPort,
+        EmailSink,
+        EmailSource,
+        ExtractionPort,
+        RateSearchPort,
+        StorePort,
+    )
 
 __all__ = [
     "Settings",
     "build_clarification_workflow",
     "build_extractor",
+    "build_rate_provider",
     "build_fixed_clock",
     "build_fixture_email_source",
     "build_memory_store",
@@ -99,3 +107,22 @@ def build_clarification_workflow(
         store=store or build_memory_store(),
         clock=build_fixed_clock(),
     )
+
+
+def build_rate_provider(settings: Settings) -> RateSearchPort:
+    """The configured rate provider.
+
+    `mock` yields fixture rates and labels them as such; `real` yields an adapter
+    that refuses with the reason, because no WebCargo API contract has been
+    provided. This is the only place either concrete class is named.
+    """
+    from translog_quote.config import WebCargoMode
+
+    if settings.webcargo.mode is WebCargoMode.REAL:
+        from translog_quote.adapters.webcargo import RealWebCargoAdapter
+
+        return RealWebCargoAdapter(base_url=settings.webcargo.base_url)
+
+    from translog_quote.adapters.webcargo import MockWebCargoAdapter
+
+    return MockWebCargoAdapter()
