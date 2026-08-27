@@ -22,7 +22,7 @@ from translog_quote.domain.rates.strategy import (
 )
 
 if TYPE_CHECKING:
-    from translog_quote.domain.rates.model import Rate
+    from translog_quote.domain.rates.model import Rate, TransitTime
 
 #: Sorts before every real value, so a missing optional never wins by accident.
 _ABSENT_NUMBER = Decimal("-1")
@@ -84,13 +84,19 @@ def _describe(winner: Rate, strategy: SelectionStrategy) -> str:
 
     lead = strategy.keys[0].field
     if lead is SortField.TRANSIT:
-        headline = f"fastest eligible transit at {winner.transit.value} {winner.transit.unit.value}"
+        headline = f"fastest eligible transit at {_spell_transit(winner.transit)}"
     elif lead is SortField.TOTAL_AMOUNT:
         headline = f"lowest eligible total at {winner.total_amount} {winner.currency}"
     else:
         headline = f"first eligible by {lead.value}"
 
     return f"{winner.carrier_name} {winner.product} — {headline}"
+
+
+def _spell_transit(transit: TransitTime) -> str:
+    """ "1 day", not "1 days". This string reaches a quotation maker."""
+    unit = transit.unit.value
+    return f"{transit.value} {unit.rstrip('s') if transit.value == 1 else unit}"
 
 
 def select_rate(eligible: tuple[Rate, ...], strategy: SelectionStrategy) -> Selection | None:

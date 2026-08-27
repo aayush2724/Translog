@@ -22,7 +22,7 @@ from translog_quote.domain.shipment import (
 )
 from translog_quote.domain.validation import validate_shipment
 from translog_quote.errors import TranslogError
-from translog_quote.interface.demo.formatting import RULE, THIN
+from translog_quote.interface.demo.formatting import RULE, THIN, render_transit
 from translog_quote.pipeline import RateSearchStage
 
 if TYPE_CHECKING:
@@ -112,7 +112,7 @@ def run_demo(
 
     print(f"\nRATES RETURNED ({outcome.returned})\n{THIN}", file=out)
     for r in (*outcome.filtered.eligible, *(e.rate for e in outcome.filtered.excluded)):
-        transit = f"{r.transit.value} {r.transit.unit.value}" if r.transit else "—"
+        transit = render_transit(r.transit)
         total = f"{r.total_amount} {r.currency}" if r.total_amount else "—"
         print(f"  {r.carrier_code:<4} {r.carrier_name:<20} {total:>16}  {transit:>8}", file=out)
 
@@ -133,7 +133,7 @@ def run_demo(
     print(f"\nSELECTED — FASTEST ELIGIBLE\n{THIN}", file=out)
     print(f"  Carrier      {chosen.carrier_name} ({chosen.carrier_code})", file=out)
     print(f"  Service      {chosen.product}", file=out)
-    print(f"  Transit      {chosen.transit.value} {chosen.transit.unit.value}", file=out)  # type: ignore[union-attr]
+    print(f"  Transit      {render_transit(chosen.transit)}", file=out)
     print(f"  Total        {chosen.total_amount} {chosen.currency}", file=out)
     print(f"  Why          {outcome.selection.reason}", file=out)
     cheaper = [

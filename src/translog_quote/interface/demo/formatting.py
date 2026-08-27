@@ -80,6 +80,19 @@ def render_evidence(evidence: str) -> str:
     return collapsed
 
 
+def render_transit(transit: object) -> str:
+    """A transit time as a person writes it: "1 day", not "1 days".
+
+    Shared so the rate demo and the quotation preview cannot drift apart on
+    something a reader will notice immediately.
+    """
+    if transit is None:
+        return "—"
+    value = transit.value  # type: ignore[attr-defined]
+    unit = transit.unit.value  # type: ignore[attr-defined]
+    return f"{value} {unit.rstrip('s') if value == 1 else unit}"
+
+
 def format_email(email: RawEmail) -> str:
     """The input, shown the way it arrived."""
     body_lines = email.body_text.strip().splitlines()

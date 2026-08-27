@@ -256,3 +256,34 @@ def test_the_prompt_names_no_client_case_or_company() -> None:
         "sheeba",
     ):
         assert leaked not in PROMPT, f"prompt is tuned to the evaluation set: {leaked!r}"
+
+
+# --- explicit boolean negatives -------------------------------------------------
+#
+# Added after a live run where the model returned `is_chemical` as
+# {status: denied, value: false} for a reply reading "Chemical: No". The contract
+# rejected it correctly — DENIED may not carry a value — but the prompt invited
+# the mistake: it defined `denied` as "the client explicitly stated the field has
+# no value" while separately instructing "preserve explicit negatives". A factual
+# "no" matched both descriptions.
+
+
+def test_a_factual_no_is_a_stated_value_not_a_denial() -> None:
+    """The distinction the model got wrong. An answer of "no" is a value."""
+    assert 'an answer of "no" is an answer' in PROMPT
+    assert "record it as `stated` with the value false" in PROMPT
+    assert "neither is `denied`" in PROMPT
+
+
+def test_denied_is_excluded_from_yes_no_fields() -> None:
+    """`denied` must not read as the natural home for a negative answer."""
+    assert "never for a yes/no field" in PROMPT
+    # Asserted within one line: the guide wraps this sentence.
+    assert "is a value, so it is `stated` with value false" in PROMPT
+
+
+def test_the_chemical_field_names_its_negative_forms() -> None:
+    """The field the failure occurred on, with the phrasings clients actually use."""
+    for phrasing in ('"chemical: no"', '"not a chemical"', '"non-chemical cargo"'):
+        assert phrasing in PROMPT, f"prompt does not cover {phrasing}"
+    assert "never `denied`, never" in PROMPT

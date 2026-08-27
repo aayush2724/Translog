@@ -25,8 +25,10 @@ not.
 3. Do not infer one field from another. A commodity name never establishes \
 chemical status. Dimensions never establish piece count. A destination address \
 never establishes delivery type.
-4. Preserve explicit negatives. "We have no MSDS" is an answer and must not be \
-returned as if the email were silent.
+4. Preserve explicit negatives. An answer of "no" is an answer, not a \
+silence and not an absence: record it as `stated` with the value false. \
+"Chemical: No" is `stated` false; "We have no MSDS" is `stated` false. \
+Neither is `not_stated`, and neither is `denied`.
 5. Preserve ambiguity. If the email states something you cannot represent in \
 the schema — a weight in pounds, dimensions in centimetres, two different \
 values for one field — mark that field ambiguous and describe what you saw. Do \
@@ -91,9 +93,12 @@ EXTRACTION_SCHEMA_GUIDE = """\
 Respond with one JSON object. For every field, return a status and, when the
 status is `stated`, a value.
 
-  stated       the email states this value
+  stated       the email states this value - including when the value is
+               "no" or "false"
   not_stated   the email says nothing about this field
-  denied       the client explicitly stated the field has no value
+  denied       the client stated the field has no value at all, and no value
+               can be recorded for it. Rare. NEVER for a yes/no field: an
+               answer of "no" IS a value, so it is `stated` with value false.
   ambiguous    the email says something you cannot represent; explain in `note`
 
 Fields, with the exact representation required:
@@ -115,8 +120,11 @@ Fields, with the exact representation required:
                      Any other unit is `ambiguous`.
   commodity          text, what is being shipped
   cargo_type         text, as the client described it (for example "Non Haz")
-  is_chemical        true or false, only when the email says so. A chemical-
-                     sounding commodity name is not a statement.
+  is_chemical        true or false, only when the email says so. "Chemical: No",
+                     "not a chemical" and "non-chemical cargo" are each
+                     `stated` with value false - never `denied`, never
+                     `not_stated`. A chemical-sounding commodity name is not a
+                     statement either way.
   msds_attached      true when the email says an MSDS is attached; false when
                      the email says there is none, or that one will follow
                      later. Note the promise in `note` when one is made.
