@@ -1,9 +1,9 @@
 """One live extraction against OpenRouter.
 
-**Skipped by default.** It runs only when TRANSLOG_OPENROUTER__API_KEY is set,
-so the ordinary suite stays offline, hermetic and free.
+**Skipped by default.** It runs only on an explicit opt-in, so the ordinary
+suite stays offline, hermetic and free even on a machine that has credentials.
 
-    TRANSLOG_OPENROUTER__API_KEY=sk-or-... .venv/bin/python -m pytest -m live
+    TRANSLOG_RUN_LIVE_TESTS=1 .venv/bin/python -m pytest -m live
 
 What it proves that the offline tests cannot: that the configured model slug
 resolves, that the request is accepted as constructed, and that a real model
@@ -14,6 +14,8 @@ make the test flaky for no gain.
 """
 
 from __future__ import annotations
+
+import os
 
 import pytest
 
@@ -27,8 +29,7 @@ def _credentials_available() -> bool:
     """Resolve the key the way the application does, not the way a shell does.
 
     Reading ``os.environ`` directly would miss a key configured in ``.env``,
-    which is where the project tells people to put it — and the test would then
-    skip while the adapter itself is perfectly able to run.
+    which is where the project tells people to put it.
     """
     try:
         return Settings().openrouter.api_key is not None
@@ -36,11 +37,25 @@ def _credentials_available() -> bool:
         return False
 
 
+def _opted_in() -> bool:
+    """An explicit opt-in, on top of having credentials.
+
+    Credentials live in ``.env`` on any machine that has ever run the demo, so
+    gating on them alone means a plain ``pytest`` spends money and hits upstream
+    rate limits. Running the live suite has to be something you chose:
+
+        TRANSLOG_RUN_LIVE_TESTS=1 pytest -m live
+    """
+    return os.environ.get("TRANSLOG_RUN_LIVE_TESTS", "").strip().lower() in {"1", "true", "yes"}
+
+
 pytestmark = [
     pytest.mark.live,
     pytest.mark.skipif(
-        not _credentials_available(),
-        reason="live test: configure TRANSLOG_OPENROUTER__API_KEY (environment or .env)",
+        not (_opted_in() and _credentials_available()),
+        reason=(
+            "live test: set TRANSLOG_RUN_LIVE_TESTS=1 and configure TRANSLOG_OPENROUTER__API_KEY"
+        ),
     ),
 ]
 

@@ -13,16 +13,67 @@ edge, so that no ``httpx`` exception escapes ``adapters/``.
 from __future__ import annotations
 
 import json
-from typing import Any, Protocol
+import random
+import time
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 
 from translog_quote.errors import PermanentFailure, TransientFailure
 from translog_quote.observability import get_logger
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 _log = get_logger("adapters.extraction.transport")
 
 _RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
+
+#: Never wait longer than this for one retry, whatever a provider asks for. A
+#: `Retry-After` of an hour is a signal to give up and report, not to hang.
+MAX_RETRY_WAIT_SECONDS = 30.0
+
+
+class _Throttled(TransientFailure):
+    """A transient failure that told us how long to wait.
+
+    A `TransientFailure` to everything outside this module — the port's error
+    contract is unchanged — but it carries the provider's own `Retry-After` so
+    the retry loop can honour it instead of guessing.
+    """
+
+    def __init__(self, message: str, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+def _parse_retry_after(raw: str | None) -> float | None:
+    """Read a `Retry-After` header. Seconds, or an HTTP date.
+
+    Returns None for anything absent, malformed, or outside a sane range —
+    a bad header should degrade to our own backoff, never to a hang or a
+    negative sleep.
+    """
+    if not raw:
+        return None
+
+    value = raw.strip()
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        seconds = (when - datetime.now(UTC)).total_seconds()
+
+    if seconds <= 0:
+        return None
+    return min(seconds, MAX_RETRY_WAIT_SECONDS)
 
 
 class ChatTransport(Protocol):
@@ -52,7 +103,10 @@ class HttpxChatTransport:
         base_url: str,
         timeout_seconds: int,
         max_retries: int,
+        backoff_seconds: float = 1.0,
         client: httpx.Client | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        jitter: Callable[[], float] = random.random,
     ) -> None:
         if not api_key:
             raise PermanentFailure(
@@ -62,7 +116,10 @@ class HttpxChatTransport:
         self._url = f"{base_url.rstrip('/')}/chat/completions"
         self._timeout = timeout_seconds
         self._max_retries = max_retries
+        self._backoff = max(0.0, backoff_seconds)
         self._client = client
+        self._sleep = sleep
+        self._jitter = jitter
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -74,6 +131,12 @@ class HttpxChatTransport:
         }
 
     def post_chat_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Send, retrying transient failures a bounded number of times.
+
+        Retries wait. The previous version fired all three attempts inside a
+        second, which cannot succeed against a provider that has just said
+        "retry shortly" and adds load to something already struggling.
+        """
         attempts = self._max_retries + 1
         last_transient: TransientFailure | None = None
 
@@ -85,9 +148,26 @@ class HttpxChatTransport:
                 _log.warning(
                     "extraction request failed (attempt %d/%d): %s", attempt, attempts, exc
                 )
+                if attempt < attempts:
+                    self._sleep(self._delay_before_retry(attempt, exc))
 
         assert last_transient is not None  # only reachable via the except branch
         raise last_transient
+
+    def _delay_before_retry(self, attempt: int, exc: TransientFailure) -> float:
+        """How long to wait before the next attempt.
+
+        The provider's own `Retry-After` wins when it gives one — it knows when
+        it will be ready and we do not. Otherwise: exponential backoff with
+        jitter, so a fleet of clients recovering from the same outage does not
+        return in lockstep. Capped either way.
+        """
+        if isinstance(exc, _Throttled) and exc.retry_after is not None:
+            return min(exc.retry_after, MAX_RETRY_WAIT_SECONDS)
+
+        base: float = self._backoff * float(2 ** (attempt - 1))
+        spread: float = self._jitter() * self._backoff
+        return min(base + spread, MAX_RETRY_WAIT_SECONDS)
 
     def _attempt(self, payload: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -114,7 +194,10 @@ class HttpxChatTransport:
         status = response.status_code
 
         if status in _RETRYABLE_STATUS:
-            raise TransientFailure(f"OpenRouter returned {status}")
+            raise _Throttled(
+                f"OpenRouter returned {status}: {_safe_detail(response)}",
+                retry_after=_parse_retry_after(response.headers.get("Retry-After")),
+            )
 
         if status == 401 or status == 403:
             raise PermanentFailure(

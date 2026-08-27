@@ -7,13 +7,17 @@ an API key.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 import pytest
 
 from translog_quote.adapters.extraction import HttpxChatTransport
-from translog_quote.adapters.extraction.transport import _DETAIL_LIMIT
+from translog_quote.adapters.extraction.transport import (
+    _DETAIL_LIMIT,
+    MAX_RETRY_WAIT_SECONDS,
+)
 from translog_quote.errors import PermanentFailure, TransientFailure
 
 #: Stand-in credential. Deliberately not shaped like a real provider key, so
@@ -22,13 +26,22 @@ API_KEY = "test-not-a-real-credential"
 PAYLOAD: dict[str, Any] = {"model": "qwen/qwen3.7-flash", "messages": []}
 
 
+#: Every delay the transport asks for, recorded instead of taken. A retry test
+#: that really sleeps turns a fast suite into a slow one and tests the clock.
+SLEPT: list[float] = []
+
+
 def transport_with(handler: Any, *, max_retries: int = 0) -> HttpxChatTransport:
+    SLEPT.clear()
     return HttpxChatTransport(
         api_key=API_KEY,
         base_url="https://openrouter.ai/api/v1",
         timeout_seconds=5,
         max_retries=max_retries,
+        backoff_seconds=1.0,
         client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=SLEPT.append,
+        jitter=lambda: 0.5,
     )
 
 
@@ -294,3 +307,148 @@ def test_the_unwrapped_detail_is_still_bounded() -> None:
         transport.post_chat_completion(PAYLOAD)
 
     assert len(str(excinfo.value)) <= _DETAIL_LIMIT + 64
+
+
+# --- backoff and Retry-After ---------------------------------------------------
+#
+# Added after the upstream provider began answering with 429 "retry shortly".
+# The previous loop fired all three attempts inside a second, which cannot
+# succeed against a provider asking for time and adds load to something already
+# struggling.
+
+
+def test_retries_wait_between_attempts() -> None:
+    transport = transport_with(lambda request: httpx.Response(429, json={}), max_retries=2)
+
+    with pytest.raises(TransientFailure):
+        transport.post_chat_completion(PAYLOAD)
+
+    assert len(SLEPT) == 2, "one wait between each pair of attempts, none after the last"
+    assert all(delay > 0 for delay in SLEPT)
+
+
+def test_backoff_grows_between_attempts() -> None:
+    """A provider that is still busy after one second may not be after three."""
+    transport = transport_with(lambda request: httpx.Response(503, json={}), max_retries=2)
+
+    with pytest.raises(TransientFailure):
+        transport.post_chat_completion(PAYLOAD)
+
+    assert SLEPT[1] > SLEPT[0]
+
+
+def test_a_successful_retry_does_not_wait_afterwards() -> None:
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(429, json={})
+        return httpx.Response(200, json={"choices": []})
+
+    transport_with(handler, max_retries=2).post_chat_completion(PAYLOAD)
+
+    assert len(SLEPT) == 1
+
+
+def test_a_permanent_failure_never_waits() -> None:
+    transport = transport_with(lambda request: httpx.Response(401, json={}), max_retries=3)
+
+    with pytest.raises(PermanentFailure):
+        transport.post_chat_completion(PAYLOAD)
+
+    assert SLEPT == []
+
+
+def test_a_provider_retry_after_header_is_honoured() -> None:
+    """The provider knows when it will be ready; we do not."""
+    transport = transport_with(
+        lambda request: httpx.Response(429, json={}, headers={"Retry-After": "7"}),
+        max_retries=1,
+    )
+
+    with pytest.raises(TransientFailure):
+        transport.post_chat_completion(PAYLOAD)
+
+    assert SLEPT == [7.0]
+
+
+def test_an_absurd_retry_after_is_capped() -> None:
+    """A `Retry-After` of an hour is a signal to give up and report, not to hang."""
+    transport = transport_with(
+        lambda request: httpx.Response(429, json={}, headers={"Retry-After": "3600"}),
+        max_retries=1,
+    )
+
+    with pytest.raises(TransientFailure):
+        transport.post_chat_completion(PAYLOAD)
+
+    assert SLEPT == [MAX_RETRY_WAIT_SECONDS]
+
+
+@pytest.mark.parametrize("header", ["", "soon", "-5", "0", "not-a-date"])
+def test_a_malformed_retry_after_falls_back_to_our_own_backoff(header: str) -> None:
+    """A bad header degrades to backoff, never to a hang or a negative sleep."""
+    transport = transport_with(
+        lambda request: httpx.Response(429, json={}, headers={"Retry-After": header}),
+        max_retries=1,
+    )
+
+    with pytest.raises(TransientFailure):
+        transport.post_chat_completion(PAYLOAD)
+
+    assert len(SLEPT) == 1
+    assert 0 < SLEPT[0] <= MAX_RETRY_WAIT_SECONDS
+
+
+def test_an_http_date_retry_after_is_understood() -> None:
+    from email.utils import format_datetime
+
+    when = datetime.now(UTC) + timedelta(seconds=5)
+    transport = transport_with(
+        lambda request: httpx.Response(
+            429, json={}, headers={"Retry-After": format_datetime(when)}
+        ),
+        max_retries=1,
+    )
+
+    with pytest.raises(TransientFailure):
+        transport.post_chat_completion(PAYLOAD)
+
+    assert len(SLEPT) == 1
+    assert 0 < SLEPT[0] <= 6
+
+
+def test_the_upstream_429_message_survives_into_the_error() -> None:
+    """The provider's own explanation is the actionable part, and it was
+    previously discarded for retryable statuses."""
+    body = {
+        "error": {
+            "message": "Provider returned error",
+            "code": 429,
+            "metadata": {
+                "provider_name": "Alibaba",
+                "raw": 'data: {"error":{"message":"temporarily rate-limited upstream"}}',
+            },
+        }
+    }
+    transport = transport_with(lambda request: httpx.Response(429, json=body))
+
+    with pytest.raises(TransientFailure) as excinfo:
+        transport.post_chat_completion(PAYLOAD)
+
+    message = str(excinfo.value)
+    assert "429" in message
+    assert "rate-limited upstream" in message
+    assert "provider=Alibaba" in message
+
+
+def test_no_secret_reaches_a_throttling_error() -> None:
+    transport = transport_with(
+        lambda request: httpx.Response(429, json={}, headers={"Retry-After": "3"})
+    )
+
+    with pytest.raises(TransientFailure) as excinfo:
+        transport.post_chat_completion(PAYLOAD)
+
+    assert API_KEY not in str(excinfo.value)

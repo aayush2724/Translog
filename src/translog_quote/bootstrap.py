@@ -17,12 +17,19 @@ from typing import TYPE_CHECKING
 from translog_quote.config import Settings, load_settings
 
 if TYPE_CHECKING:
-    from translog_quote.ports import EmailSource, ExtractionPort
+    from pathlib import Path
+
+    from translog_quote.pipeline import ClarificationWorkflow
+    from translog_quote.ports import ClockPort, EmailSink, EmailSource, ExtractionPort, StorePort
 
 __all__ = [
     "Settings",
+    "build_clarification_workflow",
     "build_extractor",
+    "build_fixed_clock",
     "build_fixture_email_source",
+    "build_memory_store",
+    "build_outbox_sink",
     "load_settings",
 ]
 
@@ -48,3 +55,47 @@ def build_fixture_email_source(settings: Settings, scenario: str) -> EmailSource
     from translog_quote.adapters.email import FixtureEmailSource
 
     return FixtureEmailSource(settings.demo.email_fixtures_dir / scenario)
+
+
+def build_memory_store() -> StorePort:
+    """The demo's request store. In memory; nothing survives the process."""
+    from translog_quote.adapters.store import InMemoryStore
+
+    return InMemoryStore()
+
+
+def build_outbox_sink(directory: Path | None = None) -> EmailSink:
+    """Where clarifications go. Collected in memory, and written to a directory
+    when one is given. No mail is sent."""
+    from translog_quote.adapters.email import CollectingEmailSink, FileOutboxSink
+
+    return FileOutboxSink(directory) if directory is not None else CollectingEmailSink()
+
+
+def build_fixed_clock(moment: object | None = None) -> ClockPort:
+    """A clock that does not move, so an audit trail is diffable across runs."""
+    from translog_quote.adapters.clock import FixedClock
+
+    return FixedClock(moment)  # type: ignore[arg-type]
+
+
+def build_clarification_workflow(
+    settings: Settings,
+    *,
+    sink: EmailSink | None = None,
+    store: StorePort | None = None,
+    extractor: ExtractionPort | None = None,
+) -> ClarificationWorkflow:
+    """The clarification loop, wired to live extraction unless told otherwise.
+
+    Every collaborator is injectable so a test can drive the real workflow with
+    a stub extractor and no network.
+    """
+    from translog_quote.pipeline import ClarificationWorkflow
+
+    return ClarificationWorkflow(
+        extractor=extractor or build_extractor(settings),
+        sink=sink or build_outbox_sink(),
+        store=store or build_memory_store(),
+        clock=build_fixed_clock(),
+    )

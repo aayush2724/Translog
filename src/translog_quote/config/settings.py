@@ -60,6 +60,14 @@ class OpenRouterSettings(BaseModel):
 
     timeout_seconds: int = Field(default=60, gt=0)
     max_retries: int = Field(default=2, ge=0)
+    retry_backoff_seconds: float = Field(default=2.0, ge=0)
+    """Base delay before the first retry, doubling thereafter with jitter.
+
+    Only used when the provider does not send a `Retry-After` of its own. The
+    upstream this project talks to answers a 429 with "retry shortly" and no
+    header, so some backoff of our own is the difference between waiting and
+    hammering.
+    """
 
 
 class WebCargoSettings(BaseModel):

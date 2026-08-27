@@ -22,6 +22,7 @@ class AuditEventType(StrEnum):
     RECORD_MERGED = "record_merged"
     VALIDATED = "validated"
     CLARIFICATION_SENT = "clarification_sent"
+    CONFLICT_DETECTED = "conflict_detected"
     RATES_FETCHED = "rates_fetched"
     RATES_NORMALIZED = "rates_normalized"
     RATES_FILTERED = "rates_filtered"

@@ -1,0 +1,276 @@
+"""The clarification loop: one client message in, one decision out.
+
+    RawEmail -> ExtractionPort -> ExtractionResult -> ExtractedFields
+             -> merge into the existing ShipmentRecord
+             -> validate
+             -> identify what is still unresolved
+             -> ask, finish, or hand to a person
+
+Called once per inbound client message. It holds no loop of its own: a thread
+that needs three rounds is three calls, which is what lets a real mailbox, a
+fixture, or a test drive it identically.
+
+The division this module exists to protect: **the model reports what the client
+said; deterministic code decides whether that is enough.** No model is consulted
+about completeness, and none can be — the only port this class calls is
+`ExtractionPort.extract_shipment`, which takes text and returns fields.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from translog_quote.domain.clarification import (
+    UnresolvedAnalysis,
+    compose_clarification,
+    identify_unresolved,
+)
+from translog_quote.domain.email import OutboundMessage
+from translog_quote.domain.extraction import FieldStatus, to_extracted_fields
+from translog_quote.domain.shipment import RequestSource, ShipmentRecord, merge_shipment
+from translog_quote.domain.validation import validate_shipment
+from translog_quote.domain.workflow import QuotationRequest, RequestState
+from translog_quote.pipeline.audit import AuditEvent, AuditEventType
+from translog_quote.pipeline.state_machine import StateMachine
+
+if TYPE_CHECKING:
+    from translog_quote.domain.clarification import ClarificationMessage
+    from translog_quote.domain.email import RawEmail
+    from translog_quote.domain.extraction import ExtractionResult
+    from translog_quote.domain.shipment import MergeResult
+    from translog_quote.domain.validation import ValidationResult
+    from translog_quote.pipeline.audit import AuditSink
+    from translog_quote.ports import ClockPort, EmailSink, ExtractionPort, StorePort
+
+DEFAULT_MAX_ROUNDS = 3
+
+
+@dataclass(frozen=True, slots=True)
+class TurnOutcome:
+    """Everything one inbound message produced. Nothing hidden in the object."""
+
+    request_id: str
+    state: RequestState
+    record: ShipmentRecord
+    extraction: ExtractionResult
+    merge: MergeResult
+    validation: ValidationResult
+    analysis: UnresolvedAnalysis
+    clarification: ClarificationMessage | None
+    round_number: int
+
+    @property
+    def is_complete(self) -> bool:
+        return self.state is RequestState.VALIDATED
+
+    @property
+    def asked_for_more(self) -> bool:
+        return self.state is RequestState.CLARIFICATION_SENT
+
+    @property
+    def needs_a_person(self) -> bool:
+        """Handed over, or stuck in a way that only a person can settle.
+
+        `is_stuck` is included because the approved transition table has no
+        EXTRACTED -> MANUAL_REVIEW edge, so a shipment blocked by an explicit
+        client denial cannot currently *move* to manual review. It reports the
+        condition instead of pretending otherwise.
+        """
+        return self.state is RequestState.MANUAL_REVIEW or self.analysis.is_stuck
+
+
+class ClarificationWorkflow:
+    """Drives one request through as many clarification rounds as it needs."""
+
+    def __init__(
+        self,
+        *,
+        extractor: ExtractionPort,
+        sink: EmailSink,
+        store: StorePort,
+        clock: ClockPort,
+        audit: AuditSink | None = None,
+        max_rounds: int = DEFAULT_MAX_ROUNDS,
+    ) -> None:
+        self._extractor = extractor
+        self._sink = sink
+        self._store = store
+        self._clock = clock
+        self._audit = audit
+        self._machine = StateMachine()
+        self._max_rounds = max_rounds
+        self._rounds: dict[str, int] = {}
+
+    # ------------------------------------------------------------------ api --
+
+    def handle(self, request_id: str, email: RawEmail) -> TurnOutcome:
+        """Process one client message for one request.
+
+        The first call for a ``request_id`` starts the shipment; every later
+        call merges into what is already known. The reply is never treated as
+        the whole shipment — a client who writes "20 bags, non-hazardous" has
+        not retracted their origin.
+        """
+        self._emit(request_id, AuditEventType.EMAIL_RECEIVED, {"message_id": email.message_id})
+
+        existing = self._store.get_request(request_id)
+        record = existing.record if existing else self._blank(request_id)
+        state = existing.state if existing else RequestState.RECEIVED
+
+        # A thread that has not converged after this many asks will not converge
+        # by asking again. Decided here, before the turn advances, because the
+        # approved table allows CLARIFICATION_SENT -> MANUAL_REVIEW but not
+        # EXTRACTED -> MANUAL_REVIEW: handing over has to happen from the state
+        # the thread is actually in. The message is still extracted and recorded
+        # below, so whoever takes over can see what it said.
+        abandoned = (
+            state is RequestState.CLARIFICATION_SENT
+            and self._rounds.get(request_id, 0) >= self._max_rounds
+        )
+        if abandoned:
+            state = self._advance(request_id, state, RequestState.MANUAL_REVIEW)
+
+        # --- the model's only involvement -------------------------------------
+        extraction = self._extractor.extract_shipment(email.body_text)
+        self._emit(
+            request_id,
+            AuditEventType.EXTRACTION_CALLED,
+            {"stated_fields": len(extraction.fields_by_status(FieldStatus.STATED))},
+        )
+        if not abandoned:
+            state = self._advance(request_id, state, RequestState.EXTRACTED)
+
+        # --- everything below is deterministic --------------------------------
+        merge = merge_shipment(record, to_extracted_fields(extraction))
+        self._emit(
+            request_id,
+            AuditEventType.RECORD_MERGED,
+            {"changed": [f.value for f in merge.changed], "conflicts": len(merge.conflicts)},
+        )
+        if merge.has_conflicts:
+            self._emit(
+                request_id,
+                AuditEventType.CONFLICT_DETECTED,
+                {"fields": [c.field.value for c in merge.conflicts]},
+            )
+
+        validation = validate_shipment(merge.record)
+        self._emit(
+            request_id,
+            AuditEventType.VALIDATED,
+            {"valid": validation.is_valid, "missing": len(validation.missing_fields)},
+        )
+
+        analysis = identify_unresolved(validation, extraction, merge.conflicts)
+
+        clarification: ClarificationMessage | None = None
+        if not abandoned:
+            state, clarification = self._decide(request_id, state, email, analysis)
+
+        self._store.save_request(
+            QuotationRequest(
+                request_id=request_id,
+                state=state,
+                record=merge.record,
+                client_address=email.from_address,
+            )
+        )
+
+        return TurnOutcome(
+            request_id=request_id,
+            state=state,
+            record=merge.record,
+            extraction=extraction,
+            merge=merge,
+            validation=validation,
+            analysis=analysis,
+            clarification=clarification,
+            round_number=self._rounds.get(request_id, 0),
+        )
+
+    # ------------------------------------------------------------- decision --
+
+    def _decide(
+        self,
+        request_id: str,
+        state: RequestState,
+        email: RawEmail,
+        analysis: UnresolvedAnalysis,
+    ) -> tuple[RequestState, ClarificationMessage | None]:
+        if not analysis.needs_clarification:
+            if analysis.is_stuck:
+                # The client has explicitly said they cannot supply something
+                # required. Asking again would be rude and useless, and whether
+                # to quote anyway is a person's call.
+                #
+                # The request stays at EXTRACTED and reports `is_stuck`: the
+                # approved table has no EXTRACTED -> MANUAL_REVIEW edge, and
+                # adding one changes the state model, which needs sign-off.
+                return state, None
+
+            return self._advance(request_id, state, RequestState.VALIDATED), None
+
+        state = self._advance(request_id, state, RequestState.NEEDS_INFO)
+        clarification = compose_clarification(request_id, analysis)
+        assert clarification is not None  # needs_clarification guarantees one
+
+        self._sink.send(
+            OutboundMessage(
+                to_address=email.from_address,
+                subject=_reply_subject(email.subject, clarification.subject),
+                body_text=clarification.body_text,
+                in_reply_to=email.message_id,
+            )
+        )
+        self._rounds[request_id] = self._rounds.get(request_id, 0) + 1
+        self._emit(
+            request_id,
+            AuditEventType.CLARIFICATION_SENT,
+            {
+                "round": self._rounds[request_id],
+                "fields": [u.field.value for u in clarification.unresolved],
+                "reasons": sorted(r.value for r in clarification.reasons),
+            },
+        )
+        return self._advance(request_id, state, RequestState.CLARIFICATION_SENT), clarification
+
+    # -------------------------------------------------------------- helpers --
+
+    def _advance(
+        self, request_id: str, current: RequestState, target: RequestState
+    ) -> RequestState:
+        if current is target:
+            return current
+        self._machine.assert_transition(current, target)
+        self._emit(
+            request_id,
+            AuditEventType.STATE_CHANGED,
+            {"from": current.value, "to": target.value},
+        )
+        return target
+
+    def _blank(self, request_id: str) -> ShipmentRecord:
+        return ShipmentRecord(request_id=request_id, source=RequestSource.EMAIL)
+
+    def _emit(self, request_id: str, event: AuditEventType, detail: dict[str, object]) -> None:
+        """Record what happened.
+
+        The audit trail is this layer's only observability channel — `pipeline`
+        may not reach the application logger, and does not need to: everything
+        worth recording here is a workflow event, not a diagnostic.
+
+        Details carry field names, counts and states. Never the email body,
+        never an address, never a credential. This is evidence that the workflow
+        ran as designed, not a copy of the client's correspondence.
+        """
+        if self._audit is None:
+            return
+        self._audit.record(
+            AuditEvent(request_id=request_id, event=event, at=self._clock.now(), detail=detail)
+        )
+
+
+def _reply_subject(inbound: str, fallback: str) -> str:
+    subject = inbound.strip() or fallback
+    return subject if subject.lower().startswith("re:") else f"Re: {subject}"

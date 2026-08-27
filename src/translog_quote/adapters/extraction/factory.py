@@ -40,5 +40,6 @@ def build_openrouter_extractor(settings: Settings) -> OpenRouterExtractionAdapte
         base_url=openrouter.base_url,
         timeout_seconds=openrouter.timeout_seconds,
         max_retries=openrouter.max_retries,
+        backoff_seconds=openrouter.retry_backoff_seconds,
     )
     return OpenRouterExtractionAdapter(transport=transport, model=openrouter.model)
