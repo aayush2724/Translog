@@ -28,9 +28,11 @@ from translog_quote.domain.clarification import (
 )
 from translog_quote.domain.email import OutboundMessage
 from translog_quote.domain.extraction import FieldStatus, to_extracted_fields
+from translog_quote.domain.quotation import Approved
 from translog_quote.domain.shipment import RequestSource, ShipmentRecord, merge_shipment
 from translog_quote.domain.validation import validate_shipment
 from translog_quote.domain.workflow import QuotationRequest, RequestState
+from translog_quote.errors import IllegalTransition
 from translog_quote.pipeline.audit import AuditEvent, AuditEventType
 from translog_quote.pipeline.state_machine import StateMachine
 
@@ -44,6 +46,16 @@ if TYPE_CHECKING:
     from translog_quote.ports import ClockPort, EmailSink, ExtractionPort, StorePort
 
 DEFAULT_MAX_ROUNDS = 3
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingDraft:
+    """A clarification written but not released, and where it would go."""
+
+    message: ClarificationMessage
+    to_address: str
+    subject: str
+    in_reply_to: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,8 +77,14 @@ class TurnOutcome:
         return self.state is RequestState.VALIDATED
 
     @property
+    def awaiting_approval(self) -> bool:
+        """A draft exists and is waiting on a person. Nothing has been sent."""
+        return self.clarification is not None and self.state is RequestState.NEEDS_INFO
+
+    @property
     def asked_for_more(self) -> bool:
-        return self.state is RequestState.CLARIFICATION_SENT
+        """A clarification was drafted this turn — sent or not."""
+        return self.clarification is not None
 
     @property
     def needs_a_person(self) -> bool:
@@ -101,6 +119,7 @@ class ClarificationWorkflow:
         self._machine = StateMachine()
         self._max_rounds = max_rounds
         self._rounds: dict[str, int] = {}
+        self._pending: dict[str, _PendingDraft] = {}
 
     # ------------------------------------------------------------------ api --
 
@@ -215,25 +234,79 @@ class ClarificationWorkflow:
         clarification = compose_clarification(request_id, analysis)
         assert clarification is not None  # needs_clarification guarantees one
 
-        self._sink.send(
-            OutboundMessage(
-                to_address=email.from_address,
-                subject=_reply_subject(email.subject, clarification.subject),
-                body_text=clarification.body_text,
-                in_reply_to=email.message_id,
-            )
+        # Drafted, not sent. The system never mails a client on its own: it
+        # shows what is missing, shows the draft, and waits for a person. The
+        # request stops at NEEDS_INFO, which already means "gaps found,
+        # clarification not yet sent" — no new state is needed to say this.
+        #
+        # Nothing is handed to the EmailSink here. Releasing the draft happens
+        # in `approve_clarification`, and only a person can call it.
+        self._pending[request_id] = _PendingDraft(
+            message=clarification,
+            to_address=email.from_address,
+            subject=_reply_subject(email.subject, clarification.subject),
+            in_reply_to=email.message_id,
         )
         self._rounds[request_id] = self._rounds.get(request_id, 0) + 1
         self._emit(
             request_id,
-            AuditEventType.CLARIFICATION_SENT,
+            AuditEventType.CLARIFICATION_DRAFTED,
             {
                 "round": self._rounds[request_id],
                 "fields": [u.field.value for u in clarification.unresolved],
                 "reasons": sorted(r.value for r in clarification.reasons),
+                "sent": False,
+                "awaiting": "human approval",
             },
         )
-        return self._advance(request_id, state, RequestState.CLARIFICATION_SENT), clarification
+        return state, clarification
+
+    # ------------------------------------------------------------- approval --
+
+    def pending_draft(self, request_id: str) -> ClarificationMessage | None:
+        """The draft waiting on a person, if there is one."""
+        held = self._pending.get(request_id)
+        return held.message if held else None
+
+    def approve_clarification(self, request_id: str, *, by: str) -> Approved:
+        """A person approved the draft. The only path out of NEEDS_INFO.
+
+        This is the business control the stakeholder asked for: the system
+        drafts and shows; a human decides. There is no timeout into approval and
+        no caller that can reach this without naming who approved.
+
+        Releasing the draft means handing it to the `EmailSink`. In this build
+        that sink collects in memory and performs no I/O — **no email is sent by
+        any code in this repository.** The call site exists so that a future
+        real sender plugs in behind the approval gate rather than in front of it.
+        """
+        held = self._pending.pop(request_id, None)
+        if held is None:
+            raise IllegalTransition(f"no clarification draft is awaiting approval for {request_id}")
+
+        stored = self._store.get_request(request_id)
+        if stored is None:  # pragma: no cover - a draft implies a stored request
+            raise IllegalTransition(f"no request {request_id} to approve against")
+
+        approval = Approved(by=by, at=self._clock.now())
+        self._emit(
+            request_id,
+            AuditEventType.CLARIFICATION_APPROVED,
+            {"by": by, "fields": [u.field.value for u in held.message.unresolved]},
+        )
+
+        self._sink.send(
+            OutboundMessage(
+                to_address=held.to_address,
+                subject=held.subject,
+                body_text=held.message.body_text,
+                in_reply_to=held.in_reply_to,
+            )
+        )
+        state = self._advance(request_id, stored.state, RequestState.CLARIFICATION_SENT)
+        self._emit(request_id, AuditEventType.CLARIFICATION_SENT, {"approved_by": by})
+        self._store.save_request(stored.model_copy(update={"state": state}))
+        return approval
 
     # -------------------------------------------------------------- helpers --
 

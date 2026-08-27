@@ -36,6 +36,25 @@ if TYPE_CHECKING:
 
 REQUEST_ID = "R-POC-001"
 
+#: Who approves the draft in the demonstration. A real deployment reads this
+#: from the signed-in platform user; nothing here invents an identity.
+APPROVER = "demo.operator (simulated)"
+
+#: Client-facing titles for the missing-information list.
+FIELD_TITLES: dict[str, str] = {
+    "origin": "Origin",
+    "destination": "Destination",
+    "weight_kg": "Weight",
+    "dimensions_in": "Dimensions",
+    "commodity": "Commodity",
+    "cargo_type": "Cargo type",
+    "is_chemical": "Chemical status",
+    "msds_attached": "MSDS",
+    "pcs": "Number of pieces",
+    "delivery_type": "Delivery type",
+    "delivery_address": "Delivery address",
+}
+
 RULE = "=" * 70
 THIN = "-" * 70
 
@@ -177,7 +196,7 @@ def run_demo(*, settings: Settings | None = None, out: TextIO = sys.stdout) -> i
     print("  Clarification     REAL   deterministic wording", file=out)
     print("  Merge             REAL   deterministic", file=out)
     print("  Rate data         MOCK   no WebCargo request is made", file=out)
-    print("  Email sending     NONE   nothing leaves this process", file=out)
+    print("  Email sending     NONE   drafts only; a human approves, nothing sends", file=out)
 
     if settings.openrouter.api_key is None:
         print("\n  Cannot run: no OpenRouter API key configured.", file=out)
@@ -209,13 +228,27 @@ def run_demo(*, settings: Settings | None = None, out: TextIO = sys.stdout) -> i
         print("\n   Nothing to clarify — this demo needs an incomplete enquiry.\n", file=out)
         return EXIT_STILL_INCOMPLETE
 
-    _heading(4, "CLARIFICATION REQUIRED", out, note="(generated, not sent)")
+    _heading(4, "CLARIFICATION DRAFT GENERATED", out, note="NOT SENT — REQUIRES HUMAN APPROVAL")
+    print("   Missing information:", file=out)
     for i, item in enumerate(first.clarification.unresolved, start=1):
-        print(f"   {i}. {item.question}", file=out)
-    print("\n   CLARIFICATION SENT  — simulated; no email left this process", file=out)
-    print(f"   {THIN}", file=out)
+        print(f"     {i}. {FIELD_TITLES.get(item.field.value, item.field.value)}", file=out)
+
+    print(f"\n   CLARIFICATION DRAFT\n   {THIN}", file=out)
     for line in first.clarification.body_text.splitlines():
         print(f"   | {line}", file=out)
+    print(f"   {THIN}", file=out)
+    print("   STATUS:          DRAFT — NOT SENT", file=out)
+    print("   HUMAN APPROVAL:  REQUIRED", file=out)
+    print("\n   [ REVIEW / APPROVE DRAFT ]   <- the platform shows this to the", file=out)
+    print("                                 shipping company. The system never", file=out)
+    print("                                 mails a client on its own.", file=out)
+
+    # The gate, exercised. Nothing reaches a client either way: approval hands
+    # the draft to an in-memory outbox, and no sender exists in this build.
+    approval = workflow.approve_clarification(REQUEST_ID, by=APPROVER)
+    print("\n   ...simulating that approval, so the demonstration can continue.", file=out)
+    print(f"   Approved by {approval.by} — draft released to the outbox.", file=out)
+    print("   No email was sent: there is no sender in this build.", file=out)
 
     # --- 5-6. reply, merge, revalidation ---------------------------------------
     _heading(5, "CLIENT REPLY", out, note="(simulated demonstration input)")
@@ -329,6 +362,7 @@ def run_demo(*, settings: Settings | None = None, out: TextIO = sys.stdout) -> i
     print("   Clarification     real, deterministic", file=out)
     print("   Merge             real, deterministic", file=out)
     print("   Rate data         MOCK — not WebCargo", file=out)
+    print("   Clarification     DRAFTED, approved by a human, never sent", file=out)
     print("   Emails sent       none", file=out)
     print("   Quotation sent    none", file=out)
     print(RULE, file=out)

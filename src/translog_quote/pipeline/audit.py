@@ -21,6 +21,8 @@ class AuditEventType(StrEnum):
     EXTRACTION_CALLED = "extraction_called"
     RECORD_MERGED = "record_merged"
     VALIDATED = "validated"
+    CLARIFICATION_DRAFTED = "clarification_drafted"
+    CLARIFICATION_APPROVED = "clarification_approved"
     CLARIFICATION_SENT = "clarification_sent"
     CONFLICT_DETECTED = "conflict_detected"
     RATES_FETCHED = "rates_fetched"

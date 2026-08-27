@@ -94,14 +94,30 @@ def test_the_initial_enquiry_is_incomplete_and_triggers_clarification(
 
     assert code == EXIT_OK
     assert "Result: INCOMPLETE" in output
-    assert "CLARIFICATION REQUIRED" in output
+    assert "CLARIFICATION DRAFT GENERATED" in output
+    assert "NOT SENT — REQUIRES HUMAN APPROVAL" in output
     # The four fields the enquiry left out, and only those.
     for asked in ("commodity", "chemical", "pieces", "door delivery"):
         assert asked in output.lower()
     # Never re-asks what the enquiry already gave.
-    clarification = output.split("CLARIFICATION REQUIRED")[1].split("5. CLIENT REPLY")[0]
+    clarification = output.split("CLARIFICATION DRAFT GENERATED")[1].split("5. CLIENT REPLY")[0]
     assert "origin" not in clarification.lower()
     assert "destination" not in clarification.lower()
+
+
+def test_the_demo_never_claims_the_clarification_was_sent(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stakeholder requirement, as an assertion on what a client sees."""
+    _, output = run(settings, FIRST, REPLY, monkeypatch=monkeypatch)
+
+    assert "STATUS:          DRAFT — NOT SENT" in output
+    assert "HUMAN APPROVAL:  REQUIRED" in output
+    assert "[ REVIEW / APPROVE DRAFT ]" in output
+    assert "never" in output and "mails a client on its own" in output
+    assert "No email was sent" in output
+    assert "CLARIFICATION SENT" not in output
+    assert "Emails sent       none" in output
 
 
 def test_an_incomplete_shipment_never_reaches_a_quotation(

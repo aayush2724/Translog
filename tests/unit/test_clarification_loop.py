@@ -21,6 +21,7 @@ from translog_quote.domain.email import RawEmail
 from translog_quote.domain.extraction import ExtractedValue, ExtractionResult
 from translog_quote.domain.shipment import CargoDimensions, DeliveryType, FieldName
 from translog_quote.domain.workflow import RequestState
+from translog_quote.errors import IllegalTransition
 from translog_quote.pipeline import ClarificationWorkflow
 
 REQ = "R-TEST"
@@ -61,6 +62,15 @@ def workflow(*results: ExtractionResult, max_rounds: int = 3):  # type: ignore[n
         max_rounds=max_rounds,
     )
     return wf, sink
+
+
+def approve(wf: ClarificationWorkflow) -> None:
+    """Play the person at the approval gate.
+
+    Required between rounds: a drafted clarification leaves the request at
+    NEEDS_INFO, and only approval moves it on so the next reply can be handled.
+    """
+    wf.approve_clarification(REQ, by="test.operator")
 
 
 def complete(**overrides: object) -> ExtractionResult:
@@ -104,10 +114,10 @@ def test_b_one_missing_field_produces_one_question() -> None:
 
     outcome = wf.handle(REQ, email("no piece count"))
 
-    assert outcome.asked_for_more
+    assert outcome.awaiting_approval
     assert outcome.clarification is not None
     assert outcome.clarification.asked_for == (FieldName.PCS,)
-    assert len(sink.sent) == 1
+    assert sink.sent == [], "drafted, not sent"
 
 
 # --- C. Missing several -> ONE message containing all -------------------------
@@ -124,14 +134,14 @@ def test_c_several_missing_fields_go_in_a_single_message() -> None:
 
     outcome = wf.handle(REQ, email("sparse"))
 
-    assert len(sink.sent) == 1, "one batched message, never one per field"
+    assert sink.sent == [], "drafted, not sent"
     assert outcome.clarification is not None
     assert set(outcome.clarification.asked_for) == {
         FieldName.COMMODITY,
         FieldName.PCS,
         FieldName.DELIVERY_TYPE,
     }
-    body = sink.sent[0].body_text
+    body = outcome.clarification.body_text
     assert "1." in body and "2." in body and "3." in body
 
 
@@ -149,11 +159,12 @@ def test_d_a_reply_completes_the_shipment() -> None:
     wf, sink = workflow(initial, reply)
 
     first = wf.handle(REQ, email("sparse", n=1))
+    approve(wf)
     second = wf.handle(REQ, email("Commodity industrial adhesive, 15 pieces", n=2))
 
-    assert first.asked_for_more
+    assert first.awaiting_approval
     assert second.is_complete
-    assert len(sink.sent) == 1, "no clarification sent once complete"
+    assert len(sink.sent) == 1, "only the approved draft was released"
 
 
 def test_d_existing_values_survive_a_partial_reply() -> None:
@@ -163,6 +174,7 @@ def test_d_existing_values_survive_a_partial_reply() -> None:
     wf, _ = workflow(initial, reply)
 
     wf.handle(REQ, email("sparse", n=1))
+    approve(wf)
     second = wf.handle(REQ, email("Commodity is industrial adhesive", n=2))
 
     assert second.record.origin == "Ahmedabad"
@@ -180,6 +192,7 @@ def test_d_only_the_reply_text_is_extracted() -> None:
     extractor = wf._extractor  # type: ignore[attr-defined]
 
     wf.handle(REQ, email("first message", n=1))
+    approve(wf)
     wf.handle(REQ, email("second message", n=2))
 
     assert extractor.calls == ["first message", "second message"]
@@ -202,14 +215,16 @@ def test_e_a_partial_reply_triggers_a_second_round() -> None:
     wf, sink = workflow(initial, partial_reply, final_reply)
 
     first = wf.handle(REQ, email("no weight or dims", n=1))
+    approve(wf)
     second = wf.handle(REQ, email("weight is 500 kg", n=2))
+    approve(wf)
     third = wf.handle(REQ, email("dims 34x24x6 inches", n=3))
 
     assert set(first.clarification.asked_for) == {  # type: ignore[union-attr]
         FieldName.WEIGHT_KG,
         FieldName.DIMENSIONS_IN,
     }
-    assert second.asked_for_more
+    assert second.awaiting_approval
     assert second.clarification.asked_for == (FieldName.DIMENSIONS_IN,)  # type: ignore[union-attr]
     assert third.is_complete
     assert len(sink.sent) == 2
@@ -227,9 +242,11 @@ def test_e_the_second_round_does_not_re_ask_what_was_answered() -> None:
     )
 
     wf.handle(REQ, email("nothing", n=1))
-    wf.handle(REQ, email("500 kg", n=2))
+    approve(wf)
+    second = wf.handle(REQ, email("500 kg", n=2))
 
-    second_body = sink.sent[1].body_text.lower()
+    assert second.clarification is not None
+    second_body = second.clarification.body_text.lower()
     assert "weight" not in second_body
     assert "dimensions" in second_body
 
@@ -246,14 +263,15 @@ def test_f_a_conflicting_reply_is_never_silently_resolved() -> None:
     )
 
     wf.handle(REQ, email("500 kg, no piece count", n=1))
+    approve(wf)
     second = wf.handle(REQ, email("actually 700 kg", n=2))
 
     assert second.merge.has_conflicts
     assert second.record.weight_kg == 500.0, "existing value not overwritten"
-    assert second.asked_for_more
+    assert second.awaiting_approval
     assert second.clarification is not None
     assert second.clarification.unresolved[0].reason is UnresolvedReason.CONFLICT
-    body = sink.sent[1].body_text
+    body = second.clarification.body_text
     assert "500" in body and "700" in body
     assert "which is correct" in body.lower()
 
@@ -272,7 +290,8 @@ def test_g_ambiguous_information_asks_for_the_form_we_need() -> None:
     item = outcome.clarification.unresolved[0]
     assert item.field is FieldName.DIMENSIONS_IN
     assert item.reason is UnresolvedReason.AMBIGUOUS
-    assert "inches" in sink.sent[0].body_text
+    assert "inches" in outcome.clarification.body_text
+    assert sink.sent == [], "a draft is never sent on its own"
 
 
 def test_g_ambiguity_is_never_converted_on_our_side() -> None:
@@ -289,9 +308,10 @@ def test_g_ambiguity_is_never_converted_on_our_side() -> None:
 def test_h_known_fields_never_appear_in_a_question() -> None:
     wf, sink = workflow(complete(pcs=ExtractedValue[int].not_stated()))
 
-    wf.handle(REQ, email("everything but pieces"))
+    outcome = wf.handle(REQ, email("everything but pieces"))
 
-    body = sink.sent[0].body_text.lower()
+    assert outcome.clarification is not None
+    body = outcome.clarification.body_text.lower()
     for known in ("origin", "destination", "commodity", "chemical"):
         assert known not in body, f"asked about {known}, which the client already gave"
 
@@ -335,7 +355,9 @@ def test_a_thread_that_will_not_converge_goes_to_a_person() -> None:
     wf, sink = workflow(sparse, sparse, sparse, max_rounds=2)
 
     wf.handle(REQ, email("a", n=1))
+    approve(wf)
     wf.handle(REQ, email("b", n=2))
+    approve(wf)
     third = wf.handle(REQ, email("c", n=3))
 
     assert third.needs_a_person
@@ -346,9 +368,10 @@ def test_a_thread_that_will_not_converge_goes_to_a_person() -> None:
 def test_the_clarification_body_contains_no_internal_vocabulary() -> None:
     wf, sink = workflow(complete(pcs=ExtractedValue[int].not_stated()))
 
-    wf.handle(REQ, email("x"))
+    outcome = wf.handle(REQ, email("x"))
 
-    body = sink.sent[0].body_text
+    assert outcome.clarification is not None
+    body = outcome.clarification.body_text
     for leaked in (
         "PCS_REQUIRED",
         "ValidationResult",
@@ -367,6 +390,8 @@ def test_the_outbound_message_carries_correlation() -> None:
     wf, sink = workflow(complete(pcs=ExtractedValue[int].not_stated()))
 
     wf.handle(REQ, email("x", n=7))
+    assert sink.sent == [], "nothing leaves before a person approves"
+    approve(wf)
 
     sent = sink.sent[0]
     assert sent.to_address == "buyer@clientco.example"
@@ -409,9 +434,10 @@ def test_audit_records_the_workflow_without_the_email_body() -> None:
         "extraction_called",
         "record_merged",
         "validated",
-        "clarification_sent",
+        "clarification_drafted",
         "state_changed",
     } <= kinds
+    assert "clarification_sent" not in kinds, "nothing is sent without approval"
     dumped = " ".join(str(e.detail) for e in audit.events)  # type: ignore[attr-defined]
     assert "sensitive client text" not in dumped
 
@@ -436,14 +462,146 @@ def test_a_conflict_is_audited() -> None:
         audit=audit,
     )
     wf.handle(REQ, email("500", n=1))
+    wf.approve_clarification(REQ, by="test.operator")
     wf.handle(REQ, email("700", n=2))
 
     assert "conflict_detected" in {e.event.value for e in audit.events}  # type: ignore[attr-defined]
 
 
-@pytest.mark.parametrize("state", [RequestState.VALIDATED, RequestState.CLARIFICATION_SENT])
+@pytest.mark.parametrize("state", [RequestState.VALIDATED, RequestState.NEEDS_INFO])
 def test_every_state_the_loop_reaches_is_legal(state: RequestState) -> None:
     """The loop uses the approved transition table and adds no state to it."""
     from translog_quote.domain.workflow import TRANSITIONS
 
     assert state in TRANSITIONS
+
+
+# --- the human approval gate ----------------------------------------------------
+#
+# Stakeholder requirement: the system must never mail a client on its own. It
+# drafts, shows what is missing, and waits for a person. These treat that as a
+# security control, not a preference.
+
+
+def test_drafting_sends_nothing() -> None:
+    """The core guarantee. A draft exists; the outbox is empty."""
+    wf, sink = workflow(complete(pcs=ExtractedValue[int].not_stated()))
+
+    outcome = wf.handle(REQ, email("no pieces"))
+
+    assert outcome.clarification is not None
+    assert outcome.awaiting_approval
+    assert outcome.state is RequestState.NEEDS_INFO
+    assert sink.sent == []
+
+
+def test_the_draft_is_held_until_a_person_approves() -> None:
+    wf, sink = workflow(complete(pcs=ExtractedValue[int].not_stated()))
+    wf.handle(REQ, email("no pieces"))
+
+    assert wf.pending_draft(REQ) is not None
+    assert sink.sent == []
+
+    wf.approve_clarification(REQ, by="ops.user")
+
+    assert len(sink.sent) == 1
+    assert wf.pending_draft(REQ) is None
+
+
+def test_approval_records_who_approved() -> None:
+    """An approval nobody signed is not an approval."""
+    wf, _ = workflow(complete(pcs=ExtractedValue[int].not_stated()))
+    wf.handle(REQ, email("no pieces"))
+
+    approval = wf.approve_clarification(REQ, by="ops.user")
+
+    assert approval.by == "ops.user"
+    assert approval.at is not None
+
+
+def test_approval_cannot_be_called_without_a_draft() -> None:
+    """No caller can release something that was never drafted."""
+    wf, sink = workflow(complete())
+    wf.handle(REQ, email("complete"))
+
+    with pytest.raises(IllegalTransition, match="awaiting approval"):
+        wf.approve_clarification(REQ, by="ops.user")
+
+    assert sink.sent == []
+
+
+def test_a_draft_cannot_be_released_twice() -> None:
+    wf, sink = workflow(complete(pcs=ExtractedValue[int].not_stated()))
+    wf.handle(REQ, email("no pieces"))
+    wf.approve_clarification(REQ, by="ops.user")
+
+    with pytest.raises(IllegalTransition):
+        wf.approve_clarification(REQ, by="ops.user")
+
+    assert len(sink.sent) == 1
+
+
+def test_approval_requires_naming_the_approver() -> None:
+    """`by` is keyword-only with no default: an anonymous approval is not
+    expressible."""
+    wf, _ = workflow(complete(pcs=ExtractedValue[int].not_stated()))
+    wf.handle(REQ, email("no pieces"))
+
+    with pytest.raises(TypeError):
+        wf.approve_clarification(REQ)  # type: ignore[call-arg]
+
+
+def test_the_clarification_path_opens_no_socket() -> None:
+    """Instrumented, not assumed: drafting must perform zero network I/O.
+
+    A `CollectingEmailSink` holds messages in memory, so even approval sends
+    nothing over a wire — but drafting must not so much as construct a client.
+    """
+    import socket
+
+    opened: list[object] = []
+    original = socket.socket.connect
+
+    def spy(self: socket.socket, address: object) -> None:  # pragma: no cover
+        opened.append(address)
+        original(self, address)  # type: ignore[arg-type]
+
+    socket.socket.connect = spy  # type: ignore[method-assign]
+    try:
+        wf, sink = workflow(complete(pcs=ExtractedValue[int].not_stated()))
+        wf.handle(REQ, email("no pieces"))
+        wf.approve_clarification(REQ, by="ops.user")
+    finally:
+        socket.socket.connect = original  # type: ignore[method-assign]
+
+    assert opened == [], "the clarification path made a network connection"
+    assert len(sink.sent) == 1
+
+
+def test_no_smtp_client_is_ever_constructed() -> None:
+    import smtplib
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise AssertionError("an SMTP client was constructed")
+
+    original_smtp, original_ssl = smtplib.SMTP, smtplib.SMTP_SSL
+    smtplib.SMTP = boom  # type: ignore[misc, assignment]
+    smtplib.SMTP_SSL = boom  # type: ignore[misc, assignment]
+    try:
+        wf, _ = workflow(complete(pcs=ExtractedValue[int].not_stated()))
+        wf.handle(REQ, email("no pieces"))
+        wf.approve_clarification(REQ, by="ops.user")
+    finally:
+        smtplib.SMTP, smtplib.SMTP_SSL = original_smtp, original_ssl  # type: ignore[misc]
+
+
+def test_validation_and_wording_are_unchanged_by_the_gate() -> None:
+    """The gate changed when a draft is released, not what it says."""
+    wf, _ = workflow(complete(pcs=ExtractedValue[int].not_stated()))
+
+    outcome = wf.handle(REQ, email("no pieces"))
+
+    assert outcome.clarification is not None
+    assert not outcome.validation.is_valid
+    assert outcome.validation.missing_fields == (FieldName.PCS,)
+    assert "The number of pieces" in outcome.clarification.body_text
