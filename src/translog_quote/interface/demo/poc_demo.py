@@ -195,7 +195,7 @@ def run_demo(*, settings: Settings | None = None, out: TextIO = sys.stdout) -> i
     print("  Validation        REAL   deterministic rules", file=out)
     print("  Clarification     REAL   deterministic wording", file=out)
     print("  Merge             REAL   deterministic", file=out)
-    print("  Rate data         MOCK   no WebCargo request is made", file=out)
+    print("  Rate data         SIMULATED   no WebCargo request is made", file=out)
     print("  Email sending     NONE   drafts only; a human approves, nothing sends", file=out)
 
     if settings.openrouter.api_key is None:
@@ -282,16 +282,16 @@ def run_demo(*, settings: Settings | None = None, out: TextIO = sys.stdout) -> i
 
     # --- 7-8. rate search and selection ----------------------------------------
     stage = RateSearchStage(
-        provider=bootstrap.build_rate_provider(settings), strategy=FASTEST_ELIGIBLE
+        provider=bootstrap.build_demo_rate_provider(), strategy=FASTEST_ELIGIBLE
     )
     rates: RateSearchOutcome = stage.run(
         REQUEST_ID, second.record, on_date=SEARCH_DATE, cargo_is_liquid=CARGO_IS_LIQUID
     )
 
     label = (
-        "MOCK WEBCARGO DATA — POC ONLY. No WebCargo request was made."
+        "SIMULATED WEBCARGO DATA — DEMO ONLY. No WebCargo request was made."
         if rates.uses_mock_data
-        else f"PROVIDER DATA — {rates.adapter_id}"
+        else f"LIVE PROVIDER DATA — {rates.adapter_id}"
     )
     _heading(7, "RATE SEARCH", out, note=label)
     print(
@@ -350,7 +350,7 @@ def run_demo(*, settings: Settings | None = None, out: TextIO = sys.stdout) -> i
         selection=rates.selection,
     )
 
-    _heading(9, "QUOTATION PREVIEW", out, note="POC QUOTATION PREVIEW — MOCK RATE DATA")
+    _heading(9, "QUOTATION PREVIEW", out, note="POC QUOTATION PREVIEW — SIMULATED WEBCARGO DATA")
     _quotation_preview(packet, out)
     print("\n   [ APPROVE QUOTATION ]   <- not wired. A quotation is only sent", file=out)
     print("                            after a quotation maker approves it,", file=out)
@@ -361,7 +361,7 @@ def run_demo(*, settings: Settings | None = None, out: TextIO = sys.stdout) -> i
     print("   Validation        real, deterministic", file=out)
     print("   Clarification     real, deterministic", file=out)
     print("   Merge             real, deterministic", file=out)
-    print("   Rate data         MOCK — not WebCargo", file=out)
+    print("   Rate data         SIMULATED — not WebCargo", file=out)
     print("   Clarification     DRAFTED, approved by a human, never sent", file=out)
     print("   Emails sent       none", file=out)
     print("   Quotation sent    none", file=out)

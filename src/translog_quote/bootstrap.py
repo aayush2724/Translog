@@ -38,6 +38,7 @@ __all__ = [
     "authorize_gmail",
     "build_clarification_workflow",
     "build_correlation_policy",
+    "build_demo_rate_provider",
     "build_extractor",
     "build_gmail_email_source",
     "build_inbound_router",
@@ -225,6 +226,22 @@ def build_rate_provider(settings: Settings) -> RateSearchPort:
 
         return RealWebCargoAdapter(base_url=settings.webcargo.base_url)
 
+    if settings.webcargo.mode is WebCargoMode.DEMO:
+        return build_demo_rate_provider()
+
     from translog_quote.adapters.webcargo import MockWebCargoAdapter
 
     return MockWebCargoAdapter()
+
+
+def build_demo_rate_provider() -> RateSearchPort:
+    """Simulated WebCargo-shaped rates, priced from the shipment being quoted.
+
+    For the client-facing demo. Every result it returns is flagged
+    `is_simulated`, so nothing downstream can present these as live rates.
+    Requested explicitly by the demo entry points rather than reached by
+    default, which keeps the tests on the fixture adapter.
+    """
+    from translog_quote.adapters.webcargo import DemoRateProvider
+
+    return DemoRateProvider()

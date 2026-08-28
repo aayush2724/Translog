@@ -257,7 +257,7 @@ def quotation_json(packet: ReviewPacket, *, uses_mock_data: bool) -> Json:
     ]
     flags = ["POC QUOTATION PREVIEW", "NOT SENT", "NOT APPROVED"]
     if uses_mock_data:
-        flags.insert(1, "MOCK RATE DATA")
+        flags.insert(1, "SIMULATED WEBCARGO DATA")
     return {
         "reference": packet.request_id,
         "flags": flags,

@@ -105,6 +105,20 @@ class RateSearchResult(BaseModel):
     adapter_id: str
     raw_payload: Any = None  # audit only — never read by domain logic
 
+    is_simulated: bool = True
+    """Whether these rates were invented rather than obtained from a provider.
+
+    Defaults to ``True`` so that *not declaring* provenance means "assume
+    simulated". Presenting invented rates as live is the expensive mistake;
+    presenting live rates as simulated is merely conservative — so the safe
+    value is the default, and only an adapter that actually called a provider
+    sets this ``False``.
+
+    Nothing in the domain reads it — selection still cannot see provenance
+    (AMB-1, consequence 5). It exists so the *presentation* layer can disclose
+    what a viewer is looking at.
+    """
+
 
 class ExclusionReason(StrEnum):
     """Why a rate did not survive filtering.

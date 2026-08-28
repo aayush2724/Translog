@@ -99,7 +99,7 @@ class DemoSession:
             raise DemoSequenceError("the shipment did not validate; rates are not searched")
 
         stage = RateSearchStage(
-            provider=bootstrap.build_rate_provider(self._settings), strategy=FASTEST_ELIGIBLE
+            provider=bootstrap.build_demo_rate_provider(), strategy=FASTEST_ELIGIBLE
         )
         self.rates = stage.run(
             scenario.REQUEST_ID,

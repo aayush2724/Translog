@@ -192,13 +192,15 @@ def test_the_merged_shipment_carries_provenance(session: DemoSession) -> None:
 # --- mock rate data is labelled --------------------------------------------------
 
 
-def test_rates_are_labelled_as_mock_and_never_as_a_providers(session: DemoSession) -> None:
+def test_rates_are_labelled_as_simulated_and_never_as_a_providers(
+    session: DemoSession,
+) -> None:
     complete(session)
 
     rates = snap(session)["rates"]
     assert isinstance(rates, dict)
     assert rates["uses_mock_data"] is True
-    assert rates["adapter_id"] == "mock-webcargo"
+    assert rates["adapter_id"] == "demo-webcargo"
     assert rates["returned"] == 6
     assert len(rates["eligible"]) == 4
     assert len(rates["excluded"]) == 2
@@ -232,7 +234,12 @@ def test_the_quotation_preview_is_flagged_and_invents_nothing(session: DemoSessi
 
     quotation = snap(session)["quotation"]
     assert isinstance(quotation, dict)
-    for flag in ("POC QUOTATION PREVIEW", "MOCK RATE DATA", "NOT SENT", "NOT APPROVED"):
+    for flag in (
+        "POC QUOTATION PREVIEW",
+        "SIMULATED WEBCARGO DATA",
+        "NOT SENT",
+        "NOT APPROVED",
+    ):
         assert flag in quotation["flags"]
     rows = {row["label"]: row["value"] for row in quotation["shipment_rows"]}
     assert rows["Delivery address"] == "Not specified in POC"

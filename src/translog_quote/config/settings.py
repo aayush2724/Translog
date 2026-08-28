@@ -36,6 +36,12 @@ class WebCargoMode(StrEnum):
     """
 
     MOCK = "mock"
+    """Fixture rates, identical for every query. What the tests run on."""
+
+    DEMO = "demo"
+    """Simulated WebCargo-shaped rates, priced from the shipment being quoted.
+    What the client-facing demo runs on. Still invented, still disclosed."""
+
     REAL = "real"
 
 

@@ -222,8 +222,8 @@ def test_no_eligible_rate_stops_before_the_quotation(
     unpriced = Rate(carrier_code="XX", carrier_name="No Price Air", product="GEN")
     monkeypatch.setattr(
         poc_demo.bootstrap,
-        "build_rate_provider",
-        lambda s: MockWebCargoAdapter(rates=(unpriced,)),
+        "build_demo_rate_provider",
+        lambda: MockWebCargoAdapter(rates=(unpriced,)),
     )
 
     code, output = run(settings, FIRST, REPLY, monkeypatch=monkeypatch)
@@ -285,16 +285,18 @@ def test_a_preview_cannot_be_mistaken_for_a_quotation_by_the_type_system() -> No
 # --- 11. mock data is labelled -------------------------------------------------
 
 
-def test_mock_rate_data_is_labelled_everywhere_it_appears(
+def test_simulated_rate_data_is_labelled_everywhere_it_appears(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Fixture rates must never read as a provider's."""
+    """Invented rates must never read as a provider's."""
     _, output = run(settings, FIRST, REPLY, monkeypatch=monkeypatch)
 
-    assert "MOCK WEBCARGO DATA — POC ONLY" in output
+    assert "SIMULATED WEBCARGO DATA — DEMO ONLY" in output
     assert "No WebCargo request was made" in output
-    assert "MOCK RATE DATA" in output
-    assert "Rate data         MOCK" in output
+    assert "POC QUOTATION PREVIEW — SIMULATED WEBCARGO DATA" in output
+    assert "Rate data         SIMULATED" in output
+    # The one phrasing that would be a lie.
+    assert "LIVE PROVIDER DATA" not in output
 
 
 # --- failure paths --------------------------------------------------------------

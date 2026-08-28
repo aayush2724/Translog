@@ -49,6 +49,7 @@ class RateSearchOutcome:
     returned: int
     filtered: FilterOutcome
     selection: Selection | None
+    is_simulated: bool = True
 
     @property
     def has_selection(self) -> bool:
@@ -56,12 +57,17 @@ class RateSearchOutcome:
 
     @property
     def uses_mock_data(self) -> bool:
-        """Whether these rates are fixture data rather than a provider's.
+        """Whether these rates were invented rather than obtained from a provider.
 
         Surfaced so a demo or a review view can say so plainly. Nothing in the
         domain reads it — selection cannot see provenance at all.
+
+        Reads the adapter's own declaration rather than inspecting its name. It
+        previously tested ``adapter_id.startswith("mock")``, which quietly
+        treated *anything* not named "mock" as real data — so a second
+        simulated adapter would have been presented as a provider's rates.
         """
-        return self.adapter_id.startswith("mock")
+        return self.is_simulated
 
 
 def build_query(record: ShipmentRecord, *, on_date: datetime.date) -> RateQuery:
@@ -175,6 +181,7 @@ class RateSearchStage:
             returned=len(result.rates),
             filtered=filtered,
             selection=selection,
+            is_simulated=result.is_simulated,
         )
 
     def _emit(self, request_id: str, event: AuditEventType, detail: dict[str, object]) -> None:
