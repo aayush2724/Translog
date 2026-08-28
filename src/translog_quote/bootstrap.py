@@ -31,8 +31,10 @@ if TYPE_CHECKING:
 
 __all__ = [
     "Settings",
+    "authorize_gmail",
     "build_clarification_workflow",
     "build_extractor",
+    "build_gmail_email_source",
     "build_rate_provider",
     "build_fixed_clock",
     "build_fixture_email_source",
@@ -63,6 +65,52 @@ def build_fixture_email_source(settings: Settings, scenario: str) -> EmailSource
     from translog_quote.adapters.email import FixtureEmailSource
 
     return FixtureEmailSource(settings.demo.email_fixtures_dir / scenario)
+
+
+def build_gmail_email_source(settings: Settings) -> EmailSource:
+    """An `EmailSource` over the configured Gmail **test** mailbox (Phase 10.3).
+
+    Receive-only, and never built implicitly: the fixture source stays the
+    default everywhere, and only the explicit `gmail-test` command asks for
+    this one. Refuses to build without a configured test address, and the
+    transport refuses without the git-ignored OAuth token file.
+    """
+    from translog_quote.adapters.email import GmailEmailSource, HttpxGmailTransport
+    from translog_quote.errors import PermanentFailure
+
+    gmail = settings.gmail
+    if not gmail.test_address:
+        raise PermanentFailure(
+            "No Gmail test mailbox configured. Set TRANSLOG_GMAIL__TEST_ADDRESS "
+            "in .env (see .env.example)."
+        )
+
+    transport = HttpxGmailTransport(
+        token_path=gmail.token_path,
+        timeout_seconds=gmail.timeout_seconds,
+        max_retries=gmail.max_retries,
+        backoff_seconds=gmail.retry_backoff_seconds,
+    )
+    return GmailEmailSource(
+        transport,
+        mailbox_address=gmail.test_address,
+        query=gmail.query,
+        max_results=gmail.max_results,
+    )
+
+
+def authorize_gmail(settings: Settings) -> Path:
+    """Run the one-time interactive Gmail OAuth consent; returns the token path.
+
+    Only ever called by the explicit `gmail-auth` command — nothing authorizes
+    automatically.
+    """
+    from translog_quote.adapters.email.gmail_auth import run_consent_flow
+
+    return run_consent_flow(
+        client_secret_path=settings.gmail.client_secret_path,
+        token_path=settings.gmail.token_path,
+    )
 
 
 def build_memory_store() -> StorePort:

@@ -10,10 +10,18 @@ documents the names.
 
 from translog_quote.config.settings import (
     Environment,
+    GmailSettings,
     LogLevel,
     Settings,
     WebCargoMode,
     load_settings,
 )
 
-__all__ = ["Environment", "LogLevel", "Settings", "WebCargoMode", "load_settings"]
+__all__ = [
+    "Environment",
+    "GmailSettings",
+    "LogLevel",
+    "Settings",
+    "WebCargoMode",
+    "load_settings",
+]

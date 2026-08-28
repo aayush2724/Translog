@@ -24,6 +24,11 @@ dev = [
     "mypy>=1.11",
     "ruff>=0.6",
 ]
+# Only for the one-time `gmail-auth` consent command (Phase 10.3). The runtime
+# Gmail adapter needs nothing beyond httpx; this stays out of the core deps.
+gmail = [
+    "google-auth-oauthlib>=1.2",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/translog_quote"]
@@ -45,6 +50,13 @@ mypy_path = "src"
 packages = ["translog_quote"]
 strict = true
 warn_unreachable = true
+
+# Optional dependency, imported inside one function of the one-time Gmail
+# consent command and absent from a normal install. Its absence must not fail
+# a type check of the runtime code, which does not import it at all.
+[[tool.mypy.overrides]]
+module = ["google_auth_oauthlib.*"]
+ignore_missing_imports = true
 
 [tool.ruff]
 src = ["src", "tests"]

@@ -84,6 +84,41 @@ class WebCargoSettings(BaseModel):
     password: SecretStr | None = None
 
 
+class GmailSettings(BaseModel):
+    """Gmail test-mailbox configuration (Phase 10.3 — receive-only).
+
+    Everything here is **temporary test plumbing** for one personal test
+    mailbox, not the production mailbox integration. No address is written in
+    source; no password is ever asked for anywhere — authentication is OAuth
+    2.0, and the OAuth files live at git-ignored paths outside version control.
+    """
+
+    test_address: str | None = None
+    """The test mailbox to read. TRANSLOG_GMAIL__TEST_ADDRESS. No default,
+    ever: absent means the Gmail source refuses to build, and the adapter
+    additionally refuses to run against any mailbox other than this one."""
+
+    client_secret_path: Path = Path(".secrets/gmail_client_secret.json")
+    """The OAuth client file downloaded from Google Cloud console (Desktop
+    app). Read only by the one-time `gmail-auth` consent command."""
+
+    token_path: Path = Path(".secrets/gmail_token.json")
+    """Where the consent command stores the authorized-user token (refresh
+    token + client id/secret). Created chmod 0600; `.secrets/` is git-ignored."""
+
+    query: str = "in:inbox"
+    """Gmail search scope for the test fetch. Deliberately narrow: the inbox
+    only — never sent mail, never the whole mailbox."""
+
+    max_results: int = Field(default=1, ge=1, le=10)
+    """How many messages one fetch may retrieve. The Phase 10.3 test needs
+    exactly one."""
+
+    timeout_seconds: int = Field(default=30, gt=0)
+    max_retries: int = Field(default=2, ge=0)
+    retry_backoff_seconds: float = Field(default=2.0, ge=0)
+
+
 class DemoSettings(BaseModel):
     fixtures_dir: Path = Path("fixtures/scenarios")
     """Full end-to-end demo bundles (Phase 8): emails, cached model responses
@@ -122,6 +157,7 @@ class Settings(BaseSettings):
 
     openrouter: OpenRouterSettings = OpenRouterSettings()
     webcargo: WebCargoSettings = WebCargoSettings()
+    gmail: GmailSettings = GmailSettings()
     demo: DemoSettings = DemoSettings()
 
 

@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+# Gmail OAuth client file and authorized-user token (Phase 10.3). Never committed.
+.secrets/
 
 # Python
 __pycache__/
