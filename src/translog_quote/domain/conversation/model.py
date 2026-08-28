@@ -27,8 +27,25 @@ class NewRequest:
         return "NewRequest()"
 
 
-CorrelationResult = str | NewRequest
-"""Either an existing ``request_id`` or ``NewRequest``."""
+class AmbiguousCorrelation:
+    """Sentinel: the headers place this email in more than one known request.
+
+    Distinct from ``NewRequest`` because the two demand opposite handling. A
+    ``NewRequest`` is safe to start; an ambiguous reply is not safe to do
+    anything automatic with — it is real correspondence about an existing
+    shipment, and picking one of the candidates would merge a client's answer
+    into the wrong record, where it would validate and be quoted. It goes to a
+    person.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - trivial
+        return "AmbiguousCorrelation()"
+
+
+CorrelationResult = str | NewRequest | AmbiguousCorrelation
+"""An existing ``request_id``, ``NewRequest``, or a refusal to choose."""
 
 
 class CorrelationPolicy(Protocol):

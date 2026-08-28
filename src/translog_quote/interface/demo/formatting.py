@@ -14,7 +14,9 @@ from translog_quote.domain.shipment import CargoDimensions
 from translog_quote.domain.validation import ValidationResult, ValidationSeverity
 
 if TYPE_CHECKING:
+    from translog_quote.domain.clarification import UnresolvedField
     from translog_quote.domain.email import RawEmail
+    from translog_quote.domain.shipment import ShipmentRecord
 
 RULE = "=" * 66
 THIN = "-" * 66
@@ -133,6 +135,34 @@ def format_extraction(result: ExtractionResult, *, show_evidence: bool = True) -
     stated = len(result.fields_by_status(FieldStatus.STATED))
     lines.extend(["", f"{stated} of {len(FIELD_LABELS)} fields stated by the email."])
     return "\n".join(lines)
+
+
+def format_record(record: ShipmentRecord) -> str:
+    """The canonical record, rendered the way extraction fields are rendered.
+
+    A known record value is by definition a stated one, so it is wrapped back
+    into an `ExtractedValue` and handed to the shared renderer — same units,
+    same labelled dimensions, one place to change the formatting.
+    """
+    width = _LABEL_WIDTH + 1
+    lines = []
+    for field, label in FIELD_LABELS:
+        value = getattr(record, field)
+        shown = (
+            "— not known"
+            if value is None
+            else render_value(field, ExtractedValue[object].stated(value))
+        )
+        lines.append(f"{(label + ':').ljust(width)} {shown}")
+    return "\n".join(lines)
+
+
+def format_unresolved(unresolved: tuple[UnresolvedField, ...]) -> str:
+    """What still needs the client's input, and why. Not the question text —
+    that belongs to the draft, which is shown in full alongside it."""
+    if not unresolved:
+        return "  (nothing outstanding)"
+    return "\n".join(f"  - {u.field.value}  [{u.reason.value}]" for u in unresolved)
 
 
 def format_validation(validation: ValidationResult) -> str:

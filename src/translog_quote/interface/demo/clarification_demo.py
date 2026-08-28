@@ -15,19 +15,17 @@ from typing import TYPE_CHECKING, TextIO
 from translog_quote import bootstrap
 from translog_quote.config import load_settings
 from translog_quote.domain.email import RawEmail
-from translog_quote.domain.extraction import ExtractedValue
 from translog_quote.errors import TranslogError
 from translog_quote.interface.demo.formatting import (
-    FIELD_LABELS,
     RULE,
     THIN,
+    format_record,
+    format_unresolved,
     format_validation,
-    render_value,
 )
 
 if TYPE_CHECKING:
     from translog_quote.config import Settings
-    from translog_quote.pipeline import TurnOutcome
 
 REQUEST_ID = "R-DEMO-CLARIFY"
 
@@ -70,34 +68,6 @@ EXIT_EXTRACTION = 4
 EXIT_INCOMPLETE = 5
 
 
-def _shipment_block(outcome: TurnOutcome) -> str:
-    """The canonical record, rendered the way the extraction demo renders fields.
-
-    A known record value is by definition a stated one, so it is wrapped back
-    into an `ExtractedValue` and handed to the shared renderer — same units,
-    same labelled dimensions, one place to change the formatting.
-    """
-    width = max(len(label) for _, label in FIELD_LABELS) + 2
-    lines = []
-    for field, label in FIELD_LABELS:
-        value = getattr(outcome.record, field)
-        shown = (
-            "— not known"
-            if value is None
-            else render_value(field, ExtractedValue[object].stated(value))
-        )
-        lines.append(f"{(label + ':').ljust(width)} {shown}")
-    return "\n".join(lines)
-
-
-def _unresolved_block(outcome: TurnOutcome) -> str:
-    if not outcome.analysis.unresolved:
-        return "  (nothing outstanding)"
-    return "\n".join(
-        f"  - {u.field.value}  [{u.reason.value}]" for u in outcome.analysis.unresolved
-    )
-
-
 def run_demo(*, settings: Settings | None = None, out: TextIO = sys.stdout) -> int:
     settings = settings or load_settings()
 
@@ -129,10 +99,10 @@ def run_demo(*, settings: Settings | None = None, out: TextIO = sys.stdout) -> i
         print(f"  {line}", file=out)
 
     print(f"\nEXTRACTED SHIPMENT\n{THIN}", file=out)
-    print(_shipment_block(first), file=out)
+    print(format_record(first.record), file=out)
     print(f"\n{format_validation(first.validation)}", file=out)
     print(f"\nUNRESOLVED\n{THIN}", file=out)
-    print(_unresolved_block(first), file=out)
+    print(format_unresolved(first.analysis.unresolved), file=out)
 
     if first.clarification is None:
         print("\n  (no clarification needed — nothing to demonstrate)\n", file=out)
@@ -153,7 +123,7 @@ def run_demo(*, settings: Settings | None = None, out: TextIO = sys.stdout) -> i
         print(f"  {line}", file=out)
 
     print(f"\nUPDATED SHIPMENT\n{THIN}", file=out)
-    print(_shipment_block(second), file=out)
+    print(format_record(second.record), file=out)
     kept = [f for f in ("origin", "destination", "weight_kg") if getattr(second.record, f)]
     print(f"\n  carried over from the first email: {', '.join(kept)}", file=out)
     print(f"  filled by the reply: {', '.join(f.value for f in second.merge.changed)}", file=out)
