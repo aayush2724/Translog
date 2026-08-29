@@ -17,7 +17,7 @@ Three further ports exist for determinism rather than integration: ClockPort,
 StorePort and ApprovalPort.
 """
 
-from translog_quote.ports.approval import ApprovalPort
+from translog_quote.ports.approval import ApprovalPort, DeferredApprovalPort
 from translog_quote.ports.clock import ClockPort
 from translog_quote.ports.email import EmailSink, EmailSource
 from translog_quote.ports.extraction import ExtractionPort
@@ -26,6 +26,7 @@ from translog_quote.ports.store import StorePort
 
 __all__ = [
     "ApprovalPort",
+    "DeferredApprovalPort",
     "ClockPort",
     "EmailSink",
     "EmailSource",

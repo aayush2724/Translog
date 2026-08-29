@@ -276,3 +276,160 @@ merging.
 | `Gmail refused the send (403)` | consent did not grant `gmail.send`, or the `From` address is not the authenticated account |
 | `Re-run the gmail-auth-send consent command` | the send token is missing, expired or revoked |
 | The run tries to extract a shipment from an approval request | the Gmail query is not excluding `[TRANSLOG INTERNAL]` — see step 2 |
+
+
+---
+
+# The visual demo (browser instead of terminal)
+
+Everything above still applies — the same two credentials, the same
+`runs/state/` persistence, the same two human gates. The browser replaces the
+CLI as the way you *operate* it; it does not replace any of the behaviour.
+
+## 1. Scope the Gmail query
+
+The query excludes Translog's own internal approval mail and nothing else.
+Ordinary inbox messages are retrieved normally:
+
+```
+TRANSLOG_GMAIL__QUERY=in:inbox -subject:"[TRANSLOG INTERNAL]"
+```
+
+**There is no subject or sender allowlist.** Whether a message is a quotation
+enquiry is decided by the pipeline that already runs on it. Extraction may not
+fill a field the email did not state (BR-7), so a newsletter or a service
+notification yields zero shipment fields — no origin, no destination, no
+weight, no commodity. That count is the classification.
+
+The dashboard therefore shows two groups:
+
+- **Quotation enquiries** — extraction found shipment details. Actionable.
+- **Not recognised as enquiries** — it found none. Listed, openable, and each
+  card says exactly why it is grouped there.
+
+Unrecognised messages are muted, never hidden: the operator has to be able to
+check the classification rather than trust it, and to pick the request they
+mean. A message in that group is never offered a "send clarification" button,
+which is what stops a cargo questionnaire reaching a noreply address without
+anybody maintaining a list.
+
+Two consequences worth knowing:
+
+- Every inbox message costs one extraction call, once. The thread anchor is
+  recorded for unrecognised messages, so they are never re-extracted on a later
+  poll — but no request is persisted for them, so they leave nothing behind.
+- A reply polled *before* its own clarification has been sent is deferred and
+  costs one extra extraction call, because the clarification loop calls the
+  model before it checks the transition. Approve the clarification first and
+  the window never opens.
+
+## 2. Reset the local demo state
+
+```
+.venv/bin/python -m translog_quote.interface.demo reset-state          # shows what it would clear
+.venv/bin/python -m translog_quote.interface.demo reset-state --yes    # clears it
+```
+
+Removes exactly three files under the configured state directory —
+`requests.json`, `threads.json`, `audit.jsonl` — by exact name. No glob, no
+recursive delete. It imports no mailbox client, reads no credential and makes
+no network call, so **it cannot touch Gmail, any message in any mailbox, or
+`.secrets/`**. It refuses without `--yes`, because clearing it forgets what has
+already been sent and a request that was quoted could be quoted again.
+
+## 3. Start it
+
+```
+.venv/bin/python -m translog_quote.interface.web --live
+```
+
+Then open <http://127.0.0.1:8765/>. Binds to localhost only.
+
+It refuses to start — before binding the port — if the OpenRouter key,
+`TRANSLOG_GMAIL__SEND_ENABLED` or `TRANSLOG_GMAIL__APPROVER_ADDRESS` is
+missing, so a misconfiguration surfaces before an audience rather than as a
+failed click. Without `--live` the same command serves the original scripted
+POC, which needs no credentials and is worth keeping in a second tab.
+
+## 4. Running the presentation
+
+| Step | In the browser | What actually happens |
+|---|---|---|
+| 1 | Open the dashboard | One card: subject, lane, weight, client, received time |
+| 2 | Press **Check mail** | Real Gmail read; out-of-scope mail reported as ignored |
+| 3 | **Open request** | The full story top to bottom, with a live timeline down the left |
+| 4 | Type your name, **Approve & send to client** | A real clarification email leaves the Translog mailbox |
+| 5 | *(client replies)* **Check mail** | Reply correlates by RFC headers, merges, validates; rates run |
+| 6 | Read the rate card | Returned / eligible / excluded + reasons, selected carrier — every simulated figure carries the banner |
+| 7 | Type your name, **APPROVE** or **DECLINE** | The click is the decision the approval port carries |
+| 8 | Read the result | `APPROVED — quotation sent` or `DECLINED — quotation not sent` |
+| 9 | Open the client's Gmail | The real quotation email |
+
+### Timestamps
+
+Every completed timeline row shows the real moment it happened, in IST. The
+enquiry and reply rows use the message's own `Date` header — when the client
+actually wrote — and the rest come from the pipeline's audit trail, which the
+live session runs on the **wall clock** rather than the fixed demo clock. A
+stage with no recorded event shows as pending; nothing is ever given a
+plausible-looking time it did not have.
+
+The audit trail is persisted to `runs/state/audit.jsonl`, so restarting the
+server mid-demo does not blank the timeline of a request that has progressed.
+
+## What the browser can and cannot do
+
+| | |
+|---|---|
+| Approve a clarification or a quotation | yes — with a name, required for either button |
+| Approve anything by itself | **no** — buttons disabled until a name is typed; the server refuses anonymous or unrecognised decisions |
+| Send a quotation after DECLINE | **no** — the decline path never reaches the client sink |
+| Send anything from the frontend | **no** — the browser posts a decision; the server-side `QuotationStage` sends |
+| See a credential | **no** — the serialisers cannot import `Settings`; a test asserts no auth material appears in any snapshot |
+| Show a fabricated timestamp | **no** — a stage with no audit event is rendered as pending |
+| Decide the same request twice | **no** — refused in memory and by the persisted state |
+
+The approval gate is not re-implemented for the browser. `ApprovalPort` is a
+halt; in a terminal the halt is a blocking prompt, and here it is the HTTP
+round trip. `RecordedDecisionGate` carries one decision, consumes it once, and
+**raises** if consulted with nothing recorded.
+
+
+## The clean demonstration procedure
+
+A mailbox used for testing accumulates history, and during a presentation that
+history competes with the one enquiry the room should be following. A
+**demonstration** is the answer: everything that arrived *after you pressed
+Start*.
+
+That definition is deliberately not a list of approved subjects or senders.
+Nothing is hardcoded, nothing is deleted, and an old reply cannot attach itself
+to a new demonstration because it predates the cutoff — structural, rather than
+a rule anyone has to remember.
+
+```
+.venv/bin/python -m translog_quote.interface.web --live
+```
+
+| Step | Where | What happens |
+|---|---|---|
+| 1 | Browser: **Start new demonstration** | Records a cutoff. Deletes nothing — no Gmail message, no persisted request, no audit entry. Older mail stops being read at all, so the first Check mail is fast |
+| 2 | Send the enquiry from the client account | Real mail to the Translog mailbox |
+| 3 | Browser: **Check mail** | Reads the real mailbox; only post-cutoff mail is extracted. The card appears under **This demonstration** with a green **NEW REQUEST** badge and its real received time |
+| 4 | Browser: **Open request** | The one-request timeline, timestamps beside each event |
+| 5 | Type your name → **Approve & send to client** | The real clarification email leaves the send-only credential. Timeline: `✓ Clarification sent` then `⏳ Waiting for client reply` |
+| 6 | Reply from the client account | Answer the questions the clarification asked |
+| 7 | Browser: **Check mail** | `✓ Client reply received` with the reply's own Date header, then extraction → merge → validation → rate search → rate selected, all automatic and all real |
+| 8 | Type your name → **APPROVE** | The quotation reaches the client. **DECLINE** sends nothing |
+
+Earlier work is still on the page, under **Earlier enquiries**, dimmed. The
+scope line above the list states outright how many earlier requests are kept
+and how many older mailbox messages were not read — the goal is focus, not
+concealment.
+
+Timeline markers: `✓` done, `⏳` waiting on the client, `●` waiting on you,
+`○` not yet reached. Email rows carry the message's own `Date` header; every
+other row carries the moment the pipeline actually ran.
+
+`runs/state/demonstration.json` records the cutoff and which requests the
+demonstration follows, so a restarted server keeps the same focus.

@@ -17,10 +17,18 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import unquote
 
+from translog_quote.domain.quotation import NotADecision
 from translog_quote.errors import TranslogError
-from translog_quote.interface.web import serialize
+from translog_quote.interface.web import live_serialize, serialize
+from translog_quote.interface.web.live_session import (
+    LiveSequenceError,
+    LiveSession,
+    build_live_session,
+)
 from translog_quote.interface.web.session import DemoSequenceError, DemoSession
+from translog_quote.observability import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -29,6 +37,8 @@ if TYPE_CHECKING:
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+
+_log = get_logger("interface.web.server")
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -42,6 +52,18 @@ _STATIC_FILES: dict[str, tuple[str, str]] = {
     "/favicon.svg": ("favicon.svg", "image/svg+xml"),
 }
 
+#: The live view's own files. A second table rather than entries in the first,
+#: so the scripted POC's static surface is unchanged and the "closed whitelist"
+#: test keeps meaning exactly what it meant.
+_LIVE_FILES: dict[str, tuple[str, str]] = {
+    "/": ("live.html", "text/html; charset=utf-8"),
+    "/live.html": ("live.html", "text/html; charset=utf-8"),
+    "/app.css": ("app.css", "text/css; charset=utf-8"),
+    "/live.css": ("live.css", "text/css; charset=utf-8"),
+    "/live.js": ("live.js", "text/javascript; charset=utf-8"),
+    "/favicon.svg": ("favicon.svg", "image/svg+xml"),
+}
+
 #: Every action a browser may take. Each advances the session through the same
 #: methods the tests drive; the approval boundary lives in the session and the
 #: workflow behind it, never in this table.
@@ -51,6 +73,75 @@ _ACTIONS: dict[str, Callable[[DemoSession], None]] = {
     "search-rates": DemoSession.search_rates,
     "approve-quotation": DemoSession.acknowledge_quotation,
 }
+
+#: The largest body a live action may send. A decision is a few dozen bytes; a
+#: ceiling keeps a stray request from being read into memory unbounded.
+_MAX_BODY_BYTES = 4096
+
+
+def _str_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _selected(query: str) -> str | None:
+    """The `request_id` from a query string, if there is exactly one.
+
+    Parsed rather than pattern-matched, and never used to build a path: it is
+    a dictionary key on the session and nothing else.
+    """
+    for part in query.split("&"):
+        key, _, value = part.partition("=")
+        if key == "request_id" and value:
+            return unquote(value)
+    return None
+
+
+def _live_poll(session: LiveSession, body: dict[str, object]) -> None:
+    session.poll()
+
+
+def _live_start_demonstration(session: LiveSession, body: dict[str, object]) -> None:
+    """Begin a fresh demonstration from this moment.
+
+    Deletes nothing: not a Gmail message, not a persisted request, not an audit
+    entry. It records a cutoff, and earlier work stops being what the interface
+    leads with.
+    """
+    session.start_demonstration()
+
+
+def _live_approve_clarification(session: LiveSession, body: dict[str, object]) -> None:
+    """Release a held clarification. Requires a named person; no default."""
+    session.approve_clarification(by=str(body.get("by", "")))
+
+
+def _live_decide(session: LiveSession, body: dict[str, object]) -> None:
+    """Apply one human decision to the quotation gate.
+
+    Every value comes from the request body and none has a default. An absent
+    or unrecognised `decision` reaches `decision_from_choice`, which raises
+    rather than resolving to either outcome — so a malformed request can no
+    more approve a quotation than it can decline one.
+    """
+    request_id = _str_or_none(body.get("request_id"))
+    if request_id is None:
+        raise LiveSequenceError("A decision must name the request it applies to.")
+    session.decide(
+        request_id,
+        choice=str(body.get("decision", "")),
+        by=str(body.get("by", "")),
+        reason=str(body.get("reason", "")),
+    )
+
+
+#: Every live action a browser may take. A literal table, like the static one.
+_LIVE_ACTIONS: dict[str, Callable[[LiveSession, dict[str, object]], None]] = {
+    "poll": _live_poll,
+    "demonstration/start": _live_start_demonstration,
+    "clarification/approve": _live_approve_clarification,
+    "quotation/decide": _live_decide,
+}
+
 
 _SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
     (
@@ -65,15 +156,32 @@ _SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
 
 
 class DemoServer(ThreadingHTTPServer):
-    """The HTTP server plus the single demonstration session it serves."""
+    """The HTTP server plus the single demonstration session it serves.
+
+    Two modes, one server. The scripted POC (`live_session=None`) is unchanged.
+    In live mode the same process additionally serves the real-Gmail view; the
+    session it drives is built by the caller, so a misconfigured credential
+    fails before anything binds a port rather than as a 500 in front of a room.
+    """
 
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        address: tuple[str, int],
+        settings: Settings | None = None,
+        *,
+        live_session: LiveSession | None = None,
+    ) -> None:
         super().__init__(address, DemoRequestHandler)
         self._settings = settings
         self.lock = threading.Lock()
         self.session = DemoSession(settings)
+        self.live = live_session
+
+    @property
+    def is_live(self) -> bool:
+        return self.live is not None
 
     def reset_session(self) -> None:
         self.session = DemoSession(self._settings)
@@ -90,12 +198,25 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------- routing --
 
     def do_GET(self) -> None:  # noqa: N802 - fixed by http.server
-        path = self.path.split("?", 1)[0]
+        raw_path, _, query = self.path.partition("?")
+        path = raw_path
+
         if path == "/api/state":
             with self._demo.lock:
                 self._send_json(serialize.snapshot(self._demo.session))
             return
-        static = _STATIC_FILES.get(path)
+
+        if path == "/api/live/state":
+            live = self._demo.live
+            if live is None:
+                self._send_json({"error": "not found"}, status=404)
+                return
+            with self._demo.lock:
+                self._send_json(live_serialize.snapshot(live, selected=_selected(query)))
+            return
+
+        table = _LIVE_FILES if self._demo.is_live else _STATIC_FILES
+        static = table.get(path)
         if static is None:
             self._send_json({"error": "not found"}, status=404)
             return
@@ -104,6 +225,10 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - fixed by http.server
         path = self.path.split("?", 1)[0]
+        if path.startswith("/api/live/"):
+            self._do_live_post(path.removeprefix("/api/live/"))
+            return
+
         prefix = "/api/action/"
         if not path.startswith(prefix):
             self._send_json({"error": "not found"}, status=404)
@@ -127,6 +252,63 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             # carry provider detail that does not belong in a browser.
             self._send_json({"error": type(exc).__name__}, status=500)
 
+    # ---------------------------------------------------------------- live --
+
+    def _do_live_post(self, name: str) -> None:
+        """The three live actions. Each is a person doing something.
+
+        `poll` reads the mailbox and sends nothing. `clarification/approve` and
+        `quotation/decide` are the two human gates, and neither has a default:
+        both require a named person in the request body, and the decision is
+        applied by the existing pipeline, not by this handler.
+        """
+        live = self._demo.live
+        if live is None or name not in _LIVE_ACTIONS:
+            self._send_json({"error": "not found"}, status=404)
+            return
+
+        try:
+            body = self._read_json()
+        except ValueError:
+            self._send_json({"error": "request body must be a JSON object"}, status=400)
+            return
+
+        try:
+            with self._demo.lock:
+                _LIVE_ACTIONS[name](live, body)
+                self._send_json(
+                    live_serialize.snapshot(live, selected=_str_or_none(body.get("request_id")))
+                )
+        except (LiveSequenceError, NotADecision) as exc:
+            # A client error: the operator asked for something out of order, or
+            # sent something that is not a decision. Its text is written for a
+            # person and carries no provider detail.
+            self._send_json({"error": str(exc)}, status=409)
+        except TranslogError as exc:
+            # The class of failure, never its contents: adapter messages can
+            # carry provider detail that does not belong in a browser.
+            self._send_json({"error": type(exc).__name__}, status=500)
+        except Exception as exc:  # noqa: BLE001 - the boundary of the process
+            # Not every failure below is a TranslogError. `UnknownPlace`, for
+            # one, is a ValueError raised by the routing table for a lane
+            # nobody has added. Left uncaught it escapes as an empty 500 with
+            # no JSON body, the browser's `response.json()` throws, and the
+            # page reports that the server did not respond — which is both
+            # wrong and unactionable. The class name is safe and says enough.
+            _log.exception("Unhandled failure in live action %s", name)
+            self._send_json({"error": type(exc).__name__}, status=500)
+
+    def _read_json(self) -> dict[str, object]:
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0:
+            return {}
+        if length > _MAX_BODY_BYTES:
+            raise ValueError("body too large")
+        loaded = json.loads(self.rfile.read(length).decode("utf-8"))
+        if not isinstance(loaded, dict):
+            raise ValueError("body is not an object")
+        return loaded
+
     # ----------------------------------------------------------- responses --
 
     def _send_json(self, payload: dict[str, object], *, status: int = 200) -> None:
@@ -147,13 +329,41 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
 
 
 def run(
-    host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, settings: Settings | None = None
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    settings: Settings | None = None,
+    *,
+    live: bool = False,
 ) -> int:
-    """Serve the demonstration until interrupted."""
-    with DemoServer((host, port), settings) as server:
-        print(f"Translog POC — http://{host}:{port}/")
-        print("  Rates: demo data (no WebCargo request is made)")
-        print("  Email: not connected (drafts only; nothing can send)")
+    """Serve the demonstration until interrupted.
+
+    `live` swaps the scripted scenario for the real Gmail workflow. The session
+    is built *before* the port is bound, so a missing credential or approver
+    address stops the process with a readable sentence rather than serving a
+    page that fails on its first click.
+    """
+    live_session = None
+    if live:
+        from translog_quote.config import load_settings
+
+        try:
+            live_session = build_live_session(settings or load_settings())
+        except TranslogError as exc:
+            print(f"Cannot start the live demo: {exc}")
+            return 2
+
+    with DemoServer((host, port), settings, live_session=live_session) as server:
+        if live_session is None:
+            print(f"Translog POC — http://{host}:{port}/")
+            print("  Rates: demo data (no WebCargo request is made)")
+            print("  Email: not connected (drafts only; nothing can send)")
+        else:
+            print(f"Translog LIVE — http://{host}:{port}/")
+            print("  Inbound:  real Gmail (read-only credential)")
+            print("  Outbound: real Gmail (separate send-only credential)")
+            print("  Rates:    SIMULATED WEBCARGO DATA — DEMO ONLY")
+            print(f"  Approver: {live_session.approver_address}")
+            print("  Approval: human — nothing sends without an explicit click")
         print("  Ctrl+C stops the server.")
         try:
             server.serve_forever()

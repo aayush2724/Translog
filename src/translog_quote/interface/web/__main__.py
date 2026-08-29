@@ -13,8 +13,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--host", default=DEFAULT_HOST, help="bind address (default: local only)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help=(
+            "drive the real Gmail workflow instead of the scripted scenario "
+            "(requires the inbound and outbound credentials and an approver address)"
+        ),
+    )
     args = parser.parse_args(argv)
-    return run(host=args.host, port=args.port)
+    return run(host=args.host, port=args.port, live=args.live)
 
 
 if __name__ == "__main__":

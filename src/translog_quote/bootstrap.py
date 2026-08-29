@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from translog_quote.ports import (
         ApprovalPort,
         ClockPort,
+        DeferredApprovalPort,
         EmailSink,
         EmailSource,
         ExtractionPort,
@@ -44,6 +45,7 @@ __all__ = [
     "authorize_gmail_send",
     "build_clarification_workflow",
     "build_console_approval",
+    "build_recorded_approval",
     "build_correlation_policy",
     "build_demo_rate_provider",
     "build_extractor",
@@ -52,13 +54,16 @@ __all__ = [
     "build_inbound_router",
     "build_rate_provider",
     "build_fixed_clock",
+    "build_system_clock",
     "build_fixture_email_source",
     "build_memory_store",
     "build_persistent_store",
     "build_outbox_sink",
     "build_quotation_stage",
     "commit_request",
+    "commit_thread",
     "load_settings",
+    "persistent_state_files",
     "seed_store",
 ]
 
@@ -173,6 +178,7 @@ def build_inbound_router(
     extractor: ExtractionPort | None = None,
     audit: AuditSink | None = None,
     sink: EmailSink | None = None,
+    clock: ClockPort | None = None,
 ) -> InboundRouter:
     """Correlation plus the clarification loop, over **one shared store**.
 
@@ -193,7 +199,7 @@ def build_inbound_router(
     return InboundRouter(
         policy=build_correlation_policy(),
         workflow=build_clarification_workflow(
-            settings, store=shared, extractor=extractor, audit=audit, sink=sink
+            settings, store=shared, extractor=extractor, audit=audit, sink=sink, clock=clock
         ),
         store=shared,
         new_request_id=new_request_id,
@@ -218,6 +224,18 @@ def build_persistent_store(settings: Settings) -> StorePort:
     return JsonFileStore(settings.demo.state_dir)
 
 
+def persistent_state_files() -> tuple[str, ...]:
+    """The file names the durable store writes, for a caller that clears them.
+
+    Named here because `bootstrap` is the only module allowed to know which
+    store implementation is behind the port, and a reset command has no
+    business importing an adapter to learn what to delete.
+    """
+    from translog_quote.adapters.store import REQUESTS_FILE, THREADS_FILE
+
+    return (REQUESTS_FILE, THREADS_FILE)
+
+
 def seed_store(target: StorePort, source: StorePort) -> None:
     """Copy everything `source` knows into `target`.
 
@@ -234,6 +252,20 @@ def seed_store(target: StorePort, source: StorePort) -> None:
         request = source.get_request(thread.request_id)
         if request is not None:
             target.save_request(request)
+
+
+def commit_thread(source: StorePort, target: StorePort, request_id: str) -> None:
+    """Persist only that a request's messages were seen, not the request itself.
+
+    For a message the workflow processed and nothing wants to advance — an
+    ordinary inbox email that turned out to carry no shipment at all. Recording
+    the thread stops it being extracted again on every poll; deliberately *not*
+    recording the request keeps a dead `NEEDS_INFO` row out of the store, where
+    it could neither advance nor be explained.
+    """
+    thread = next((t for t in source.all_threads() if t.request_id == request_id), None)
+    if thread is not None:
+        target.save_thread(thread)
 
 
 def commit_request(source: StorePort, target: StorePort, request_id: str) -> None:
@@ -333,6 +365,24 @@ def build_console_approval(
     return ConsoleApprovalGate(**kwargs)  # type: ignore[arg-type]
 
 
+def build_recorded_approval() -> DeferredApprovalPort:
+    """A gate whose decision is placed from outside, then consumed by the halt.
+
+    What a user interface needs: the person clicks on one request, and the
+    pipeline runs on that same request, so the decision has to be recorded
+    before `QuotationStage` consults it. Returns the port, so no caller comes
+    to depend on the decision having arrived over HTTP rather than from
+    anywhere else.
+
+    It is not a weaker gate. Consulted with nothing recorded it raises, and a
+    recorded decision is single-use — so a second run without a fresh decision
+    fails rather than silently reapplying the last person's answer.
+    """
+    from translog_quote.adapters.approval import RecordedDecisionGate
+
+    return RecordedDecisionGate()
+
+
 def build_quotation_stage(
     settings: Settings,
     *,
@@ -340,6 +390,7 @@ def build_quotation_stage(
     approval: ApprovalPort,
     store: StorePort | None = None,
     audit: AuditSink | None = None,
+    clock: ClockPort | None = None,
 ) -> QuotationStage:
     """The approval gate and the only path to a client quotation.
 
@@ -364,11 +415,25 @@ def build_quotation_stage(
     return QuotationStage(
         sink=sink,
         approval=approval,
-        clock=build_fixed_clock(),
+        clock=clock or build_fixed_clock(),
         approver_address=approver_address,
         store=store,
         audit=audit,
     )
+
+
+def build_system_clock() -> ClockPort:
+    """The wall clock. What the live demonstration runs on.
+
+    The fixed clock exists so an audit trail is diffable across runs, which is
+    right for a scripted demo and wrong for a real one: a live run's evidence
+    trail is a record of when things actually happened, and freezing it would
+    stamp every event with the same invented moment. Nothing about the pipeline
+    changes — only which `ClockPort` the composition root hands it.
+    """
+    from translog_quote.adapters.clock import SystemClock
+
+    return SystemClock()
 
 
 def build_fixed_clock(moment: object | None = None) -> ClockPort:
@@ -385,6 +450,7 @@ def build_clarification_workflow(
     store: StorePort | None = None,
     extractor: ExtractionPort | None = None,
     audit: AuditSink | None = None,
+    clock: ClockPort | None = None,
 ) -> ClarificationWorkflow:
     """The clarification loop, wired to live extraction unless told otherwise.
 
@@ -399,7 +465,10 @@ def build_clarification_workflow(
         extractor=extractor or build_extractor(settings),
         sink=sink or build_outbox_sink(),
         store=store or build_memory_store(),
-        clock=build_fixed_clock(),
+        # Fixed unless a caller says otherwise, so a scripted demo stays
+        # diffable. A live run passes the wall clock, because its audit trail
+        # is a record of when things actually happened.
+        clock=clock or build_fixed_clock(),
         audit=audit,
     )
 

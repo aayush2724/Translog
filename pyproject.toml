@@ -84,6 +84,9 @@ runtime-evaluated-base-classes = ["pydantic.BaseModel", "typing.Protocol"]
 # `UnknownPlace` reads better at the raise site than `UnknownPlaceError`,
 # and matches the naming already used by the failure taxonomy.
 "src/translog_quote/domain/routing/iata.py" = ["N818"]
+# Same reasoning: `NotADecision` says what went wrong at the raise site far
+# better than `NotADecisionError`, and reads as the sentence it is.
+"src/translog_quote/domain/quotation/decide.py" = ["N818"]
 # Ports are the project's published contracts and are read far more often than
 # they are imported. Hiding their types behind TYPE_CHECKING to save an import
 # makes a six-line interface harder to read for no runtime benefit.

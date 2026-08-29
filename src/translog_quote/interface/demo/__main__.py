@@ -16,6 +16,7 @@ from translog_quote.interface.demo.gmail_quote import run_gmail_quote
 from translog_quote.interface.demo.gmail_thread import run_gmail_thread
 from translog_quote.interface.demo.poc_demo import run_demo as run_poc_demo
 from translog_quote.interface.demo.rate_demo import run_demo as run_rate_demo
+from translog_quote.interface.demo.reset_state import run_reset_state
 
 
 def _approved_by(args: list[str]) -> str | None:
@@ -30,7 +31,7 @@ def _approved_by(args: list[str]) -> str | None:
 def main(argv: list[str] | None = None) -> int:
     """``python -m translog_quote.interface.demo
     [poc|scenario|clarification|rates|gmail-test|gmail-process|gmail-thread
-     |gmail-quote|gmail-auth|gmail-auth-send]``."""
+     |gmail-quote|gmail-auth|gmail-auth-send|reset-state]``."""
     args = sys.argv[1:] if argv is None else argv
     if args and args[0] == "clarification":
         return run_clarification_demo()
@@ -48,6 +49,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_gmail_auth()
     if args and args[0] == "gmail-auth-send":
         return run_gmail_auth_send()
+    if args and args[0] == "reset-state":
+        return run_reset_state(confirmed="--yes" in args)
     if args and args[0] in {"poc", "full"}:
         return run_poc_demo()
     scenario = args[0] if args else DEFAULT_SCENARIO
