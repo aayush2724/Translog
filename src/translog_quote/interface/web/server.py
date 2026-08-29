@@ -187,6 +187,13 @@ class DemoServer(ThreadingHTTPServer):
         self.session = DemoSession(self._settings)
 
 
+#: Host header values a browser may legitimately send to a loopback server.
+#: Anything else is a DNS-rebinding attempt: an attacker domain resolved to
+#: 127.0.0.1 so a page it serves can reach this server from the victim's
+#: browser. The port is appended at check time.
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
+
+
 class DemoRequestHandler(BaseHTTPRequestHandler):
     server_version = "TranslogPOC/0.1"
 
@@ -223,7 +230,34 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         filename, content_type = static
         self._send_bytes((_STATIC_DIR / filename).read_bytes(), content_type)
 
+    def _rejects_cross_site(self) -> bool:
+        """Whether this request must be refused as not same-origin.
+
+        Two cheap, standard defences for a localhost-only server, and nothing
+        that a legitimate same-origin `fetch` from the served page ever trips:
+
+        - **Host must be loopback.** Defeats DNS rebinding, where an attacker
+          domain resolves to 127.0.0.1 so its page can reach this server.
+        - **State-changing POSTs must be `application/json`.** A cross-site HTML
+          form can only send `text/plain`, form-encoded or multipart bodies
+          without provoking a CORS preflight; this server sends no CORS headers,
+          so a preflight fails and the browser never sends the real request.
+          Requiring JSON therefore turns away the one CSRF shape that needs no
+          preflight. The page's own `fetch` sets this header already.
+
+        Refused requests get a 403 with a fixed body — the reason is not worth
+        teaching an attacker to satisfy.
+        """
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip().lower()
+        if host not in _LOOPBACK_HOSTS:
+            return True
+        content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        return content_type != "application/json"
+
     def do_POST(self) -> None:  # noqa: N802 - fixed by http.server
+        if self._rejects_cross_site():
+            self._send_json({"error": "forbidden"}, status=403)
+            return
         path = self.path.split("?", 1)[0]
         if path.startswith("/api/live/"):
             self._do_live_post(path.removeprefix("/api/live/"))

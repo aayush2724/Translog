@@ -1908,3 +1908,116 @@ def test_a_demonstration_can_be_started_from_the_browser(
     assert status == 200
     assert snap["demonstration"]["active"] is True  # type: ignore[index]
     assert sink.sent == [], "starting a demonstration sends nothing"
+
+
+# --- same-origin guard: CSRF and DNS rebinding ----------------------------------
+
+
+def raw_post(server: DemoServer, path: str, *, headers: dict[str, str], body: bytes = b"{}") -> int:
+    """A POST with fully controlled headers, for probing the request guard."""
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+    try:
+        connection.request("POST", path, body=body, headers=headers)
+        return connection.getresponse().status
+    finally:
+        connection.close()
+
+
+def test_a_cross_site_form_post_is_refused(live_server: DemoServer) -> None:
+    """text/plain is the one body a cross-site HTML form can send without a
+    CORS preflight. Refusing it turns away the CSRF shape that would otherwise
+    let a page the operator visits forge an approval."""
+    status = raw_post(
+        live_server,
+        "/api/live/poll",
+        headers={"Host": "127.0.0.1", "Content-Type": "text/plain", "Content-Length": "2"},
+    )
+
+    assert status == 403
+
+
+def test_a_form_encoded_post_is_refused(live_server: DemoServer) -> None:
+    status = raw_post(
+        live_server,
+        "/api/live/quotation/decide",
+        headers={
+            "Host": "127.0.0.1",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Length": "2",
+        },
+    )
+
+    assert status == 403
+
+
+def test_a_forged_host_is_refused(live_server: DemoServer) -> None:
+    """DNS rebinding: an attacker domain resolved to 127.0.0.1 so its page can
+    reach this server. The Host header still names the attacker."""
+    status = raw_post(
+        live_server,
+        "/api/live/poll",
+        headers={
+            "Host": "attacker.example",
+            "Content-Type": "application/json",
+            "Content-Length": "2",
+        },
+    )
+
+    assert status == 403
+
+
+def test_a_forged_host_cannot_forge_an_approval(
+    awaiting_server: tuple[DemoServer, CollectingEmailSink, str],
+) -> None:
+    """The guarantee that matters: a rebinding attempt cannot send a client
+    email, because the request is refused before the gate is reached."""
+    server, sink, request_id = awaiting_server
+
+    status = raw_post(
+        server,
+        "/api/live/clarification/approve",
+        headers={
+            "Host": "attacker.example",
+            "Content-Type": "application/json",
+            "Content-Length": "40",
+        },
+        body=b'{"by":"attacker","request_id":"%b"}' % request_id.encode(),
+    )
+
+    assert status == 403
+    assert sink.sent == [], "a forged-origin request must not send anything"
+
+
+def test_a_same_origin_json_post_is_accepted(live_server: DemoServer) -> None:
+    """The served page's own fetch sets application/json and a loopback Host,
+    so the guard must never turn away a legitimate request."""
+    status = raw_post(
+        live_server,
+        "/api/live/poll",
+        headers={"Host": "127.0.0.1", "Content-Type": "application/json", "Content-Length": "2"},
+    )
+
+    assert status == 200
+
+
+def test_a_loopback_host_with_a_port_is_accepted(live_server: DemoServer) -> None:
+    """Browsers send Host as name:port. The port must not defeat the check."""
+    status = raw_post(
+        live_server,
+        "/api/live/poll",
+        headers={
+            "Host": "localhost:8765",
+            "Content-Type": "application/json",
+            "Content-Length": "2",
+        },
+    )
+
+    assert status == 200
+
+
+def test_reads_are_not_gated_by_the_post_guard(live_server: DemoServer) -> None:
+    """GET is safe by construction — it mutates nothing — so it stays reachable
+    with whatever headers a browser sends."""
+    status, _ = call(live_server, "GET", "/api/live/state")
+
+    assert status == 200

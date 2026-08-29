@@ -29,6 +29,7 @@ from translog_quote import bootstrap
 from translog_quote.config import load_settings
 from translog_quote.interface.demo.formatting import RULE, THIN
 from translog_quote.interface.web.audit_log import AUDIT_FILE
+from translog_quote.interface.web.demonstration import DEMONSTRATION_FILE
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -40,7 +41,7 @@ EXIT_REFUSED = 2
 
 #: Every file this command may remove, by exact name. Not a glob and not a
 #: directory walk: the list of what it can delete is readable here in full.
-REMOVABLE = (*bootstrap.persistent_state_files(), AUDIT_FILE)
+REMOVABLE = (*bootstrap.persistent_state_files(), AUDIT_FILE, DEMONSTRATION_FILE)
 
 
 def run_reset_state(

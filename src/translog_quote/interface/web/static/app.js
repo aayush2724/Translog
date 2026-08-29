@@ -135,7 +135,13 @@ async function act(name) {
   ui.busy = true;
   render();
   try {
-    const response = await fetch(`/api/action/${name}`, { method: "POST" });
+    // Content-Type is required by the server's same-origin guard: a
+    // cross-site form cannot set application/json without a preflight the
+    // server refuses, which is what turns away CSRF.
+    const response = await fetch(`/api/action/${name}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
     const payload = await response.json();
     if (!response.ok) {
       ui.error = payload.error || `Action failed (HTTP ${response.status})`;

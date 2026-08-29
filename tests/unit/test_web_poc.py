@@ -321,7 +321,10 @@ def server(settings: Settings) -> Iterator[DemoServer]:
 def request(server: DemoServer, method: str, path: str) -> tuple[int, dict[str, str], bytes]:
     connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
     try:
-        connection.request(method, path)
+        # A POST must look same-origin to the server's guard: application/json,
+        # which is what the served page's own fetch sends.
+        headers = {"Content-Type": "application/json"} if method == "POST" else {}
+        connection.request(method, path, headers=headers)
         response = connection.getresponse()
         return response.status, dict(response.getheaders()), response.read()
     finally:
