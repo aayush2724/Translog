@@ -317,3 +317,51 @@
   font-weight: 700;
   letter-spacing: 0.06em;
 }
+
+/* --- "Start new demonstration" -------------------------------------------
+   It reads as the primary action of the page, so it has to look like one.
+   It previously borrowed `.btn-ghost` — transparent, muted grey text — which
+   is the house style for a secondary control and made the button look
+   disabled.
+
+   Given its own class rather than a change to `.btn-ghost`, because that class
+   is shared with the scripted POC's "Restart demo" button, where muted is
+   correct. `live.css` is loaded only by the live view, so this cannot reach it.
+
+   Shape, padding, transition and the hover lift all still come from `.btn` in
+   app.css; only colour is set here.
+
+   Contrast against white, measured: base 7.10:1, hover 8.98:1 — both clear
+   WCAG AAA for normal text, not merely AA. */
+
+.btn-demo {
+  background: #6d28d9;
+  color: #fff;
+  border-color: #6d28d9;
+}
+
+.btn-demo:hover:not(:disabled) {
+  background: #5b21b6;
+  border-color: #5b21b6;
+}
+
+.btn-demo:active:not(:disabled) {
+  background: #4c1d95;
+  border-color: #4c1d95;
+}
+
+/* A visible keyboard focus ring. The lift on hover is mouse-only feedback, so
+   without this the button is markedly harder to use from the keyboard than
+   with a pointer. */
+.btn-demo:focus-visible {
+  outline: 2px solid #4c1d95;
+  outline-offset: 2px;
+}
+
+/* A text glyph, matching the ✓ ⏳ ● ○ the timeline already uses — no icon
+   font or SVG set is introduced for one button. */
+.btn-demo .btn-icon {
+  margin-right: 0.4rem;
+  font-size: 0.72em;
+  vertical-align: 0.08em;
+}
