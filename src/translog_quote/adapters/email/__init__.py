@@ -3,8 +3,12 @@
 Implements EmailSource twice: FixtureEmailSource reads .eml-style files from a
 scenario directory under fixtures/emails/ (the demo default), and
 GmailEmailSource reads one narrowly scoped test mailbox over the Gmail API
-(Phase 10.3, receive-only). An outbound sink that actually sends mail still
-does not exist — CollectingEmailSink/FileOutboxSink deliver nothing.
+(Phase 10.3, receive-only).
+
+Implements EmailSink three times: CollectingEmailSink and FileOutboxSink
+deliver nothing, and GmailEmailSink actually sends over a *separate*
+send-scoped credential (Phase 11). The two Gmail halves share no token and no
+scope — the inbound credential cannot send and the outbound one cannot read.
 """
 
 from translog_quote.adapters.email.fixtures import (
@@ -21,16 +25,30 @@ from translog_quote.adapters.email.gmail import (
     HttpxGmailTransport,
     parse_gmail_message,
 )
+from translog_quote.adapters.email.gmail_send import (
+    GMAIL_SEND_SCOPE,
+    SEND_PATH,
+    GmailEmailSink,
+    GmailSendTransport,
+    HttpxGmailSendTransport,
+    build_mime,
+)
 from translog_quote.adapters.email.outbox import CollectingEmailSink, FileOutboxSink
 
 __all__ = [
+    "GMAIL_SEND_SCOPE",
+    "SEND_PATH",
     "CollectingEmailSink",
     "EmailFixtureScenario",
     "FileOutboxSink",
     "FixtureEmailSource",
+    "GmailEmailSink",
     "GmailEmailSource",
     "GmailMessageMetadata",
+    "GmailSendTransport",
+    "HttpxGmailSendTransport",
     "HttpxGmailTransport",
+    "build_mime",
     "load_all_scenarios",
     "load_fixture_emails",
     "load_scenario",

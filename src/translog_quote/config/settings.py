@@ -124,6 +124,43 @@ class GmailSettings(BaseModel):
     max_retries: int = Field(default=2, ge=0)
     retry_backoff_seconds: float = Field(default=2.0, ge=0)
 
+    # --- outbound (Phase 11 — sending) -------------------------------------
+    #
+    # Deliberately a second set of fields behind a second token file. The
+    # inbound credential holds `gmail.readonly` and *cannot* send whatever the
+    # code does; the outbound credential holds `gmail.send` and cannot read.
+    # Keeping them apart is what makes "inbound processing is separate from the
+    # outbound sink" a property of the credentials rather than of the code.
+
+    send_enabled: bool = False
+    """Master switch for outbound Gmail. Off unless explicitly turned on.
+
+    Off is the safe default: with it off `build_gmail_email_sink` refuses, and
+    every demo falls back to the outbox sink that delivers nothing. Nobody
+    mails a real client because a token file happened to be present.
+    """
+
+    send_token_path: Path = Path(".secrets/gmail_send_token.json")
+    """Where the `gmail-auth-send` consent command stores the send-scoped
+    authorized-user token. A *different* file from `token_path`, so the
+    read-only credential and the send credential are never the same object."""
+
+    sender_address: str | None = None
+    """The mailbox outbound messages are sent from — Translog's own account.
+
+    Written into the `From` header, which Gmail itself validates against the
+    authenticated user: a mismatch is rejected by the provider rather than
+    silently sent from somewhere else. Falls back to `test_address` in the
+    composition root when unset, because in this demo Translog reads and sends
+    from one mailbox."""
+
+    approver_address: str | None = None
+    """The internal mailbox the quotation review packet is sent to.
+
+    Never a client address. It receives the full review — excluded carriers,
+    runner-up rates, exclusion reasons — which is internal commercial detail
+    and must not reach a client."""
+
 
 class DemoSettings(BaseModel):
     fixtures_dir: Path = Path("fixtures/scenarios")
@@ -136,6 +173,17 @@ class DemoSettings(BaseModel):
     which S1-S4 business scenario eventually consumes it."""
 
     outbox_dir: Path = Path("outbox")
+
+    state_dir: Path = Path("runs/state")
+    """Where the durable demo store keeps what has already happened.
+
+    Git-ignored (`runs/`). The real-Gmail demo spans several CLI invocations —
+    a clarification goes out today, the client replies tomorrow — so what was
+    already sent has to outlive the process that sent it. Deleting this
+    directory starts a fresh demonstration and forgets what was sent, which is
+    exactly what you want between rehearsals and never what you want mid-run.
+    """
+
     deterministic: bool = True
     """Fixed clock, cached model responses, fixture-assigned request ids.
 

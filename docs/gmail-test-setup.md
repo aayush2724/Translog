@@ -133,3 +133,146 @@ and prints the extracted shipment.
 | `The authorized Gmail account does not match …` | you consented with the wrong account — delete `.secrets/gmail_token.json` and re-run `gmail-auth` |
 | `Gmail API refused the request (403)` | consent did not grant `gmail.readonly` |
 | `NO MESSAGE FOUND` | nothing in the inbox matched; send the test email and retry |
+
+---
+
+# Phase 11 — the outbound demo (`gmail-quote`)
+
+Everything above stays true. This section adds the **send** half, which is a
+second credential with a second scope, granted separately.
+
+## Accounts
+
+| Role | Account | What it does |
+|---|---|---|
+| Client | a separate Gmail account | sends the enquiry, receives the clarification and the quotation |
+| Translog | the account from step 4 above | receives client mail (read-only token), sends mail (send-only token), and receives the internal approval request |
+
+Two Gmail accounts are enough for the demo. The internal approver mailbox can
+be the Translog account itself — the review request lands in the same inbox,
+and both the Gmail query and the command filter it out of client processing by
+its `[TRANSLOG INTERNAL]` subject marker.
+
+## 1. Grant the send scope
+
+Reuses the same Desktop OAuth client from step 3; only the scope and the token
+file differ. Add `https://www.googleapis.com/auth/gmail.send` to the consent
+screen's scope list first, then:
+
+```
+.venv/bin/python -m translog_quote.interface.demo gmail-auth-send
+```
+
+Sign in with the **Translog** account. The token is written to
+`.secrets/gmail_send_token.json`, which is git-ignored.
+
+After this the project holds two credentials and neither can do the other's
+job: the read token cannot send, and the send token cannot read.
+
+## 2. Configure
+
+```
+TRANSLOG_GMAIL__SEND_ENABLED=true
+TRANSLOG_GMAIL__APPROVER_ADDRESS=<the internal mailbox>
+TRANSLOG_GMAIL__QUERY=in:inbox -subject:"[TRANSLOG INTERNAL]"
+TRANSLOG_GMAIL__MAX_RESULTS=5
+```
+
+`TRANSLOG_GMAIL__SENDER_ADDRESS` defaults to `TRANSLOG_GMAIL__TEST_ADDRESS`.
+Set it explicitly only if Translog sends from a different mailbox than it
+reads.
+
+`SEND_ENABLED` is off by default. With it off, `gmail-quote` refuses to start
+and every other demo falls back to the outbox sink that delivers nothing — a
+token file lying around is never enough to make anything send.
+
+## 3. Run the demo
+
+The demo spans two invocations, because the client's reply arrives whenever it
+arrives. State is persisted to `runs/state/` (git-ignored) between them.
+
+```
+# --- invocation 1 -----------------------------------------------------------
+# The client emails an incomplete enquiry to the Translog account, then:
+.venv/bin/python -m translog_quote.interface.demo gmail-quote \
+    --approved-by "your.name@company"
+```
+
+The enquiry is extracted, validated, and a clarification is drafted. Because
+you named yourself, the draft is released and **actually emailed to the
+client**. The run then ends:
+
+```
+STATUS         : clarification_sent / awaiting_client_reply
+persisted      : yes — this run's progress survives the process
+```
+
+Exit code 0. The process can now exit safely — sending the clarification and
+entering the waiting state is the workflow progressing as designed.
+
+Omitting `--approved-by` shows the draft and stops without sending. Nothing is
+written to `runs/state/` on that path, so re-running with the flag proceeds
+normally.
+
+```
+# --- invocation 2 -----------------------------------------------------------
+# The client replies. Then:
+.venv/bin/python -m translog_quote.interface.demo gmail-quote \
+    --approved-by "your.name@company"
+```
+
+This run loads the persisted state, reports `1 message(s) already processed in
+an earlier run; skipped`, and processes **only the reply** — no second model
+call on the enquiry, and no duplicate clarification. The reply correlates by
+its RFC `References` chain, merges, and validates. `DemoRateProvider` produces
+simulated rates, the fastest eligible is selected, the review packet is emailed
+to the approver, and the command stops at a terminal prompt.
+
+Read the packet in the internal mailbox, then type `APPROVE` or `DECLINE`.
+
+- **APPROVE** -> quotation emailed to the client, state `QUOTATION_SENT`, exit 0
+- **DECLINE** -> nothing sent to the client, state `MAKER_REJECTED` (terminal), exit 10
+- **Ctrl-D / walking away** -> no decision recorded, nothing sent, request stays
+  at `PENDING_APPROVAL`, exit 11
+
+A third run with no new mail reports `STATUS: nothing_new`, calls no model and
+sends nothing.
+
+### Between rehearsals
+
+Deleting the `runs/state` directory forgets what has already been sent and
+starts a fresh demonstration. Do that between practice runs, never mid-run — a
+forgotten `QUOTATION_SENT` is what allows a second quotation to reach the
+client.
+
+## What the outbound half can and cannot do
+
+| | |
+|---|---|
+| Send a clarification a named person approved | yes |
+| Send a quotation a named person approved | yes |
+| Approve anything on its own | **no** — both gates require a named human |
+| Send after a decline | **no** — the decline path never reaches the client sink, and `Quotation` cannot be built without an `Approved` |
+| Send the same quotation twice | **no**, across processes — the decision is committed to `runs/state/` before it is reported, and the gate refuses a request already at `QUOTATION_SENT` or `MAKER_REJECTED` |
+| Read the mailbox with the send token | **no** — the scope is `gmail.send` |
+| Send with the read token | **no** — the scope is `gmail.readonly`, and that transport issues only GETs |
+| Present simulated rates as real | **no** — the disclosure travels into the client email |
+| Contact WebCargo | **no** — `DemoRateProvider` makes no network call |
+
+**Honest limitations.** The persisted store is a pair of JSON files with no
+locking, so two concurrent runs against one state directory would race. And
+correlation depends on the client's mail software emitting a `References`
+chain — Gmail, Outlook and Apple Mail all do, but a reply carrying only
+`In-Reply-To` would name our clarification's Message-ID, which the send-only
+credential cannot read back, and would start a fresh request rather than
+merging.
+
+## Troubleshooting the send path
+
+| Symptom | Cause |
+|---|---|
+| `Outbound Gmail is disabled` | `TRANSLOG_GMAIL__SEND_ENABLED` is not `true` |
+| `No internal approver address configured` | set `TRANSLOG_GMAIL__APPROVER_ADDRESS` |
+| `Gmail refused the send (403)` | consent did not grant `gmail.send`, or the `From` address is not the authenticated account |
+| `Re-run the gmail-auth-send consent command` | the send token is missing, expired or revoked |
+| The run tries to extract a shipment from an approval request | the Gmail query is not excluding `[TRANSLOG INTERNAL]` — see step 2 |

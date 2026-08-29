@@ -12,6 +12,7 @@ from translog_quote.pipeline.clarification_loop import (
     TurnOutcome,
 )
 from translog_quote.pipeline.inbound import InboundRouter, RoutedMessage
+from translog_quote.pipeline.quotation import QuotationOutcome, QuotationStage
 from translog_quote.pipeline.rate_search import (
     RateSearchOutcome,
     RateSearchStage,
@@ -22,6 +23,8 @@ from translog_quote.pipeline.state_machine import StateMachine
 __all__ = [
     "ClarificationWorkflow",
     "InboundRouter",
+    "QuotationOutcome",
+    "QuotationStage",
     "RateSearchOutcome",
     "RateSearchStage",
     "RoutedMessage",

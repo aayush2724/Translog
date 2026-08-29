@@ -22,9 +22,14 @@ if TYPE_CHECKING:
 
     from translog_quote.domain.conversation import CorrelationPolicy
     from translog_quote.domain.email import RawEmail
-    from translog_quote.pipeline import ClarificationWorkflow, InboundRouter
+    from translog_quote.pipeline import (
+        ClarificationWorkflow,
+        InboundRouter,
+        QuotationStage,
+    )
     from translog_quote.pipeline.audit import AuditSink
     from translog_quote.ports import (
+        ApprovalPort,
         ClockPort,
         EmailSink,
         EmailSource,
@@ -36,18 +41,25 @@ if TYPE_CHECKING:
 __all__ = [
     "Settings",
     "authorize_gmail",
+    "authorize_gmail_send",
     "build_clarification_workflow",
+    "build_console_approval",
     "build_correlation_policy",
     "build_demo_rate_provider",
     "build_extractor",
+    "build_gmail_email_sink",
     "build_gmail_email_source",
     "build_inbound_router",
     "build_rate_provider",
     "build_fixed_clock",
     "build_fixture_email_source",
     "build_memory_store",
+    "build_persistent_store",
     "build_outbox_sink",
+    "build_quotation_stage",
+    "commit_request",
     "load_settings",
+    "seed_store",
 ]
 
 
@@ -125,6 +137,23 @@ def authorize_gmail(settings: Settings) -> Path:
     )
 
 
+def authorize_gmail_send(settings: Settings) -> Path:
+    """Run the one-time Gmail **send** consent; returns the send token path.
+
+    A second, separate grant into a second, separate file. The same Desktop
+    OAuth client is reused, but the scope and the token are not: after this the
+    project holds one credential that can only read and one that can only send.
+    """
+    from translog_quote.adapters.email.gmail_auth import run_consent_flow
+    from translog_quote.adapters.email.gmail_send import GMAIL_SEND_SCOPE
+
+    return run_consent_flow(
+        client_secret_path=settings.gmail.client_secret_path,
+        token_path=settings.gmail.send_token_path,
+        scope=GMAIL_SEND_SCOPE,
+    )
+
+
 def build_correlation_policy() -> CorrelationPolicy:
     """How a reply is matched to its enquiry: RFC header chains only.
 
@@ -143,6 +172,7 @@ def build_inbound_router(
     store: StorePort | None = None,
     extractor: ExtractionPort | None = None,
     audit: AuditSink | None = None,
+    sink: EmailSink | None = None,
 ) -> InboundRouter:
     """Correlation plus the clarification loop, over **one shared store**.
 
@@ -150,6 +180,12 @@ def build_inbound_router(
     writes requests to, so a reply correlated to R-123 merges into the record
     R-123 actually has. Two stores would correlate correctly and merge into
     nothing.
+
+    `sink` is where an *approved* clarification is released. It defaults to the
+    outbox sink, which delivers nothing — so a caller has to ask, explicitly
+    and by argument, for a router whose drafts can reach a real client. The
+    approval gate is unchanged either way: the sink is what happens after a
+    person says yes, never a substitute for one.
     """
     from translog_quote.pipeline import InboundRouter
 
@@ -157,7 +193,7 @@ def build_inbound_router(
     return InboundRouter(
         policy=build_correlation_policy(),
         workflow=build_clarification_workflow(
-            settings, store=shared, extractor=extractor, audit=audit
+            settings, store=shared, extractor=extractor, audit=audit, sink=sink
         ),
         store=shared,
         new_request_id=new_request_id,
@@ -171,12 +207,168 @@ def build_memory_store() -> StorePort:
     return InMemoryStore()
 
 
+def build_persistent_store(settings: Settings) -> StorePort:
+    """A store that outlives the process, under the git-ignored state directory.
+
+    Asked for explicitly. The in-memory store stays the default everywhere, so
+    no test and no other demo gains a file on disk by accident.
+    """
+    from translog_quote.adapters.store import JsonFileStore
+
+    return JsonFileStore(settings.demo.state_dir)
+
+
+def seed_store(target: StorePort, source: StorePort) -> None:
+    """Copy everything `source` knows into `target`.
+
+    Half of the commit-point model: a run works against a scratch store seeded
+    from the durable one, so the workflow's own writes — which happen turn by
+    turn, before anyone has approved anything — land somewhere discardable.
+
+    Threads are the index. Every request that was ever committed was committed
+    together with its thread, so walking the threads reaches every request
+    without `StorePort` needing an `all_requests` it has no other use for.
+    """
+    for thread in source.all_threads():
+        target.save_thread(thread)
+        request = source.get_request(thread.request_id)
+        if request is not None:
+            target.save_request(request)
+
+
+def commit_request(source: StorePort, target: StorePort, request_id: str) -> None:
+    """Persist one request and its thread. The other half of the model.
+
+    Called only after something irreversible has happened — a clarification was
+    actually emailed, a reply was merged, the quotation gate decided. A run
+    that stops at a gate having sent nothing commits nothing, so the next run
+    starts from the last state a person actually authorised and redoes only
+    work that can be redone safely.
+
+    That ordering matters for more than tidiness: the transition table permits
+    no way out of NEEDS_INFO except CLARIFICATION_SENT, so persisting a request
+    that is merely *awaiting* approval would leave it unable to advance in any
+    later process.
+    """
+    request = source.get_request(request_id)
+    if request is not None:
+        target.save_request(request)
+    thread = next((t for t in source.all_threads() if t.request_id == request_id), None)
+    if thread is not None:
+        target.save_thread(thread)
+
+
 def build_outbox_sink(directory: Path | None = None) -> EmailSink:
     """Where clarifications go. Collected in memory, and written to a directory
     when one is given. No mail is sent."""
     from translog_quote.adapters.email import CollectingEmailSink, FileOutboxSink
 
     return FileOutboxSink(directory) if directory is not None else CollectingEmailSink()
+
+
+def build_gmail_email_sink(settings: Settings) -> EmailSink:
+    """The **sending** `EmailSink`, over the send-scoped Gmail credential.
+
+    Three independent things must be true before this returns a sink that can
+    reach a real inbox, and each is checked here rather than at first send:
+
+    1. `TRANSLOG_GMAIL__SEND_ENABLED` is on. Off is the default, so a token
+       file lying around is not enough to make anything send.
+    2. A sender address is known. It becomes the `From` header, which Gmail
+       validates against the authenticated account.
+    3. The send token file exists — enforced by the transport's constructor.
+
+    The sender address falls back to the configured test mailbox because in
+    this demo Translog reads and sends from one account. The fallback lives
+    here, in the composition root, rather than in the settings model: it is a
+    wiring decision, and `GmailSettings` has no business knowing that its two
+    address fields usually name the same mailbox.
+    """
+    from translog_quote.adapters.email import GmailEmailSink, HttpxGmailSendTransport
+    from translog_quote.errors import PermanentFailure
+
+    gmail = settings.gmail
+    if not gmail.send_enabled:
+        raise PermanentFailure(
+            "Outbound Gmail is disabled. Set TRANSLOG_GMAIL__SEND_ENABLED=true in .env "
+            "to allow this process to send real email."
+        )
+
+    sender = gmail.sender_address or gmail.test_address
+    if not sender:
+        raise PermanentFailure(
+            "No Gmail sender address configured. Set TRANSLOG_GMAIL__SENDER_ADDRESS "
+            "(or TRANSLOG_GMAIL__TEST_ADDRESS) in .env (see .env.example)."
+        )
+
+    transport = HttpxGmailSendTransport(
+        token_path=gmail.send_token_path,
+        timeout_seconds=gmail.timeout_seconds,
+        max_retries=gmail.max_retries,
+        backoff_seconds=gmail.retry_backoff_seconds,
+    )
+    return GmailEmailSink(transport, sender_address=sender)
+
+
+def build_console_approval(
+    *,
+    approver: str | None = None,
+    read_line: Callable[[str], str] | None = None,
+    out: object | None = None,
+) -> ApprovalPort:
+    """The human approval gate, as a terminal prompt.
+
+    Returns the port, not the class, so no caller can come to depend on the
+    decision being taken at a console rather than anywhere else. Whatever is
+    behind it, the contract is the same halt: it blocks, and it never returns a
+    default (BR-11).
+    """
+    from translog_quote.adapters.approval import ConsoleApprovalGate
+
+    kwargs: dict[str, object] = {"clock": build_fixed_clock(), "approver": approver}
+    if read_line is not None:
+        kwargs["read_line"] = read_line
+    if out is not None:
+        kwargs["out"] = out
+    return ConsoleApprovalGate(**kwargs)  # type: ignore[arg-type]
+
+
+def build_quotation_stage(
+    settings: Settings,
+    *,
+    sink: EmailSink,
+    approval: ApprovalPort,
+    store: StorePort | None = None,
+    audit: AuditSink | None = None,
+) -> QuotationStage:
+    """The approval gate and the only path to a client quotation.
+
+    `sink` and `approval` are required arguments with no defaults. There is no
+    convenience wiring that quietly supplies an auto-approving gate, because a
+    default here is exactly the thing the gate exists to prevent.
+
+    Refuses to build without an internal approver address: a review packet that
+    goes nowhere is indistinguishable, from the outside, from a system that
+    approved on its own.
+    """
+    from translog_quote.errors import PermanentFailure
+    from translog_quote.pipeline import QuotationStage
+
+    approver_address = settings.gmail.approver_address
+    if not approver_address:
+        raise PermanentFailure(
+            "No internal approver address configured. Set TRANSLOG_GMAIL__APPROVER_ADDRESS "
+            "in .env (see .env.example). The quotation review must reach a person."
+        )
+
+    return QuotationStage(
+        sink=sink,
+        approval=approval,
+        clock=build_fixed_clock(),
+        approver_address=approver_address,
+        store=store,
+        audit=audit,
+    )
 
 
 def build_fixed_clock(moment: object | None = None) -> ClockPort:

@@ -109,6 +109,21 @@ class InboundRouter:
             outcome=outcome,
         )
 
+    def already_processed(self, message_id: str) -> bool:
+        """Whether this message is already recorded against some request.
+
+        A read of the same threads correlation matches against, so "seen" means
+        exactly what it means to the policy. Callers use it to skip a message a
+        previous run already handled: re-handling one would call the model
+        again, redraft a clarification that has already gone out, and — because
+        the transition table forbids NEEDS_INFO -> EXTRACTED — could not
+        legally advance the request anyway.
+
+        It reports; it refuses nothing. `route` is unchanged, so a caller that
+        does not ask still gets the previous behaviour.
+        """
+        return any(message_id in thread.message_ids for thread in self._store.all_threads())
+
     def pending_draft(self, request_id: str) -> ClarificationMessage | None:
         """The draft holding this request at NEEDS_INFO, if there is one."""
         return self._workflow.pending_draft(request_id)

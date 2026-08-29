@@ -141,3 +141,36 @@ def run_gmail_auth(*, settings: Settings | None = None, out: TextIO = sys.stdout
     print(f"  Authorization complete. Token stored at {token_path} (git-ignored).", file=out)
     print("  Next: python -m translog_quote.interface.demo gmail-test\n", file=out)
     return EXIT_OK
+
+
+def run_gmail_auth_send(*, settings: Settings | None = None, out: TextIO = sys.stdout) -> int:
+    """One-time interactive OAuth consent for **sending** (Phase 11).
+
+    A second consent run, granting a second scope into a second token file. The
+    read-only credential this project already holds is untouched: after this
+    there is one credential that can only read the mailbox and one that can
+    only send from it, and no single token can do both.
+    """
+    settings = settings or load_settings()
+
+    print(f"{RULE}\n  GMAIL ONE-TIME AUTHORIZATION (scope: gmail.send)\n{RULE}", file=out)
+    print(
+        "\n  A browser will open on Google's consent page. Sign in with the\n"
+        "  TRANSLOG account — the mailbox quotations are sent FROM. No password\n"
+        "  ever passes through this program.\n"
+        "\n  This grant can send mail and cannot read any. It is stored\n"
+        "  separately from the read-only token used to ingest client mail.\n",
+        file=out,
+        flush=True,
+    )
+    try:
+        token_path = bootstrap.authorize_gmail_send(settings)
+    except TranslogError as exc:
+        _fail(out, f"AUTHORIZATION FAILED: {type(exc).__name__}", str(exc))
+        return EXIT_CONFIG
+
+    print(f"  Authorization complete. Token stored at {token_path} (git-ignored).", file=out)
+    print("  Next: set TRANSLOG_GMAIL__SEND_ENABLED=true and", file=out)
+    print("        TRANSLOG_GMAIL__APPROVER_ADDRESS=<internal mailbox> in .env,", file=out)
+    print("        then: python -m translog_quote.interface.demo gmail-quote\n", file=out)
+    return EXIT_OK
