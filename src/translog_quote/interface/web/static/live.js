@@ -506,31 +506,62 @@ function sectionRates(detail) {
   return card(
     [el("h2", null, "Rate search & selection"), pill(rates.simulated ? "SIMULATED" : "LIVE PROVIDER", rates.simulated ? "amber" : "green")],
     simBanner(rates),
-    kv([
-      ["Query", `${rates.query.origin_iata} → ${rates.query.destination_iata}, ${rates.query.weight_kg} kg, ${rates.query.date}`],
-      ["Returned", String(rates.returned)],
-      ["Eligible", String(rates.eligible_count)],
-      ["Excluded", String(rates.excluded_count)],
-      ["Strategy", rates.strategy],
-    ]),
-    rates.excluded.length
-      ? el("div", null,
-          el("h3", null, "Excluded, and why"),
-          el("ul", { class: "issue-list" },
-            ...rates.excluded.map((row) => el("li", null, `${row.carrier_name} — ${row.reason}: ${row.detail}`))))
-      : null,
+    /* The search itself, presented as the search it is. */
+    el("div", { class: "search-strip" },
+      el("span", { class: "search-leg" },
+        el("span", { class: "search-place" }, rates.query.origin),
+        el("span", { class: "search-arrow", "aria-hidden": "true" }, "✈"),
+        el("span", { class: "search-place" }, rates.query.destination)),
+      el("span", { class: "search-meta" }, `${rates.query.weight_kg} kg`),
+      el("span", { class: "search-meta" }, rates.query.date),
+      el("span", { class: "search-meta muted" },
+        `${rates.returned} returned · ${rates.eligible_count} eligible`)),
+    el("p", { class: "strategy-note" }, rates.strategy),
+    /* Every eligible rate as a comparison card, the selected one leading. */
     selection
-      ? el("div", null,
-          el("h3", null, "Selected"),
-          kv([
-            ["Carrier", `${selection.carrier_name} (${selection.carrier_code})`],
-            ["Service", selection.product],
-            ["Transit", selection.transit],
-            ["Price", `${selection.amount} ${selection.currency}`],
-            ["Why", selection.reason],
-          ]))
-      : el("p", { class: "muted" }, "No eligible rate — nothing will be quoted.")
+      ? el("div", { class: "rate-board" },
+          ...[...rates.eligible]
+            .sort((a, b) => (a.carrier_code === selection.carrier_code ? -1 : b.carrier_code === selection.carrier_code ? 1 : 0))
+            .map((rate) => rateCard(rate, rate.carrier_code === selection.carrier_code ? selection : null)))
+      : el("p", { class: "muted" }, "No eligible rate — nothing will be quoted."),
+    rates.excluded.length
+      ? el("details", { class: "excluded-fold" },
+          el("summary", null,
+            `${rates.excluded.length} rate(s) excluded — see why`),
+          el("div", { class: "excluded-rows" },
+            ...rates.excluded.map((row) =>
+              el("div", { class: "excluded-row" },
+                carrierAvatar(row.carrier_code, true),
+                el("span", { class: "excluded-name" }, row.carrier_name),
+                el("span", { class: `reason-chip reason-${row.reason}` }, row.reason.replace(/_/g, " ")),
+                el("span", { class: "excluded-detail muted small" }, row.detail)))))
+      : null
   );
+}
+
+/* A two-letter carrier mark, coloured stably from its code so the same
+   carrier always wears the same colour. Decoration, never data. */
+function carrierAvatar(code, dim) {
+  const hue = ((code.charCodeAt(0) || 65) * 7 + (code.charCodeAt(1) || 65) * 13) % 6;
+  return el("span", { class: `carrier-avatar hue-${hue}${dim ? " avatar-dim" : ""}`, "aria-hidden": "true" }, code);
+}
+
+/* One rate as a marketplace-style comparison card. `chosen` is the selection
+   payload when this rate is the selected one, else null. */
+function rateCard(rate, chosen) {
+  return el("div", { class: `rate-card${chosen ? " rate-selected" : ""}` },
+    chosen ? el("span", { class: "rate-ribbon" }, "SELECTED") : null,
+    el("div", { class: "rate-main" },
+      carrierAvatar(rate.carrier_code, false),
+      el("div", { class: "rate-carrier" },
+        el("span", { class: "rate-name" }, rate.carrier_name),
+        el("span", { class: "rate-product" }, rate.product))),
+    el("div", { class: "rate-mid" },
+      el("span", { class: "transit-chip" }, `⏱ ${rate.transit || "—"}`),
+      chosen ? el("span", { class: "rate-why" }, chosen.reason) : null),
+    el("div", { class: "rate-price" },
+      el("span", { class: "price-amount" }, rate.amount || "—"),
+      rate.currency ? el("span", { class: "price-currency" }, rate.currency) : null));
 }
 
 function sectionApproval(detail) {
@@ -645,29 +676,6 @@ function renderDetail() {
   document.getElementById("sections").replaceChildren(...sections);
 }
 
-/* --------------------------------------------------------------- timeline */
-
-const GATE_EVENTS = new Set(["approval_requested", "approval_decided", "clarification_approved"]);
-const SENT_EVENTS = new Set(["quotation_sent", "clarification_sent"]);
-
-function renderAudit() {
-  const events = ui.snap.audit;
-  const holder = document.getElementById("audit");
-  if (!events.length) {
-    holder.replaceChildren(el("p", { class: "muted small" }, "Nothing has happened yet this session."));
-    return;
-  }
-  holder.replaceChildren(
-    el("div", { class: "card" },
-      el("div", { class: "card-body timeline" },
-        ...events.map((event) =>
-          el("div", { class: `timeline-row ${GATE_EVENTS.has(event.event) ? "gate" : SENT_EVENTS.has(event.event) ? "sent" : ""}` },
-            el("span", { class: "event" }, event.event),
-            el("span", { class: "detail" },
-              Object.entries(event.detail).map(([key, value]) => `${key}=${value}`).join("  ") || "—")))))
-  );
-}
-
 /* ----------------------------------------------------------------- render */
 
 function render() {
@@ -679,7 +687,6 @@ function render() {
   document.getElementById("provenance").replaceChildren(provenanceStrip(ui.snap.mode));
   if (ui.view === "dashboard") renderDashboard();
   else renderDetail();
-  renderAudit();
 
   document.getElementById("btn-new-demo").disabled = ui.busy;
   const poll = document.getElementById("btn-poll");

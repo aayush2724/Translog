@@ -22,6 +22,7 @@ from translog_quote.ports.clock import ClockPort
 from translog_quote.ports.email import EmailSink, EmailSource
 from translog_quote.ports.extraction import ExtractionPort
 from translog_quote.ports.rates import RateSearchPort
+from translog_quote.ports.routing import LocationResolverPort
 from translog_quote.ports.store import StorePort
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "EmailSink",
     "EmailSource",
     "ExtractionPort",
+    "LocationResolverPort",
     "RateSearchPort",
     "StorePort",
 ]

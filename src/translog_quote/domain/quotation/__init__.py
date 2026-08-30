@@ -3,6 +3,7 @@
 from translog_quote.domain.quotation.compose import (
     INTERNAL_SUBJECT_PREFIX,
     SIMULATED_RATE_NOTICE,
+    IncompatibleService,
     build_quotation,
     compose_quotation_body,
     compose_quotation_subject,
@@ -26,6 +27,7 @@ from translog_quote.domain.quotation.model import (
 )
 
 __all__ = [
+    "IncompatibleService",
     "APPROVE",
     "DECLINE",
     "INTERNAL_SUBJECT_PREFIX",

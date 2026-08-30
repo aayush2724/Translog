@@ -20,6 +20,21 @@ class PermanentFailure(TranslogError):
     """
 
 
+class UnresolvedLocation(PermanentFailure):
+    """A place the client named could not be resolved to a provider identifier.
+
+    A property of one enquiry, never of the system: it names a request that
+    cannot be priced yet, and says nothing about any other request in the same
+    poll. Callers isolate it per request rather than letting it end the batch.
+
+    Deliberately *not* recoverable by inference. Deriving an airport code from a
+    place name — by prefix, by similarity, by any table shipped in this
+    repository — produces a search against the wrong lane that succeeds and
+    looks right, which is the one failure mode a quotation must never have
+    (AMB-9). Refusing is the safe answer and the only one permitted here.
+    """
+
+
 class ContractViolation(TranslogError):
     """Something produced output that does not satisfy its declared contract.
 

@@ -12,6 +12,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
+from translog_quote.adapters.routing import StatedLocationResolver, WebCargoLocationResolver
 from translog_quote.adapters.webcargo import (
     DEMO_RATES,
     MockWebCargoAdapter,
@@ -32,13 +33,18 @@ from translog_quote.domain.rates import (
     filter_rates,
     select_rate,
 )
-from translog_quote.domain.routing import UnknownPlace
 from translog_quote.domain.shipment import CargoDimensions, RequestSource, ShipmentRecord
 from translog_quote.domain.workflow import RequestState
-from translog_quote.errors import ContractViolation, PermanentFailure, UnresolvedFieldMapping
+from translog_quote.errors import (
+    ContractViolation,
+    PermanentFailure,
+    UnresolvedFieldMapping,
+    UnresolvedLocation,
+)
 from translog_quote.pipeline import RateSearchStage, build_query
 
 DIMS = CargoDimensions(length=34, width=24, height=6)
+RESOLVER = StatedLocationResolver()
 WHEN = date(2026, 9, 2)
 
 
@@ -71,31 +77,48 @@ def record(**overrides: object) -> ShipmentRecord:
 
 
 def test_a_query_is_built_from_the_shipment() -> None:
-    query = build_query(record(), on_date=WHEN)
+    query = build_query(record(), on_date=WHEN, resolver=RESOLVER)
 
-    assert query.origin_iata == "AMD"
-    assert query.destination_iata == "BAH"
+    assert query.origin.stated == "Ahmedabad"
+    assert query.destination.stated == "Bahrain"
+    assert query.origin.code is None
     assert query.weight_kg == 500.0
     assert query.date == WHEN
 
 
 def test_place_decoration_is_handled() -> None:
-    query = build_query(record(destination="Bahrain (Hidd Industrial Area)"), on_date=WHEN)
+    query = build_query(
+        record(destination="Bahrain (Hidd Industrial Area)"), on_date=WHEN, resolver=RESOLVER
+    )
 
-    assert query.destination_iata == "BAH"
+    assert query.destination.stated == "Bahrain (Hidd Industrial Area)"
 
 
-def test_an_unknown_place_refuses_rather_than_guessing() -> None:
+def test_an_unfamiliar_place_is_accepted_rather_than_refused() -> None:
+    """The whitelist is gone: any place a client names reaches the provider.
+
+    It used to raise for anything outside a nineteen-entry table, which is what
+    stopped legitimate enquiries. What must never happen is a *code* being
+    invented for it — asserted here, not just the absence of an exception.
+    """
+    query = build_query(record(origin="Timbuktu"), on_date=WHEN, resolver=RESOLVER)
+
+    assert query.origin.stated == "Timbuktu"
+    assert query.origin.code is None
+    assert query.origin.resolved_by is None
+
+
+def test_a_resolver_that_cannot_resolve_refuses_rather_than_guessing() -> None:
     """A guessed airport code searches the wrong lane and looks successful."""
-    with pytest.raises(UnknownPlace):
-        build_query(record(origin="Timbuktu"), on_date=WHEN)
+    with pytest.raises(UnresolvedLocation):
+        build_query(record(origin="Dubai"), on_date=WHEN, resolver=WebCargoLocationResolver())
 
 
 def test_a_query_needs_weight_and_dimensions() -> None:
     with pytest.raises(ContractViolation, match="weight"):
-        build_query(record(weight_kg=None), on_date=WHEN)
+        build_query(record(weight_kg=None), on_date=WHEN, resolver=RESOLVER)
     with pytest.raises(ContractViolation, match="dimensions"):
-        build_query(record(dimensions_in=None), on_date=WHEN)
+        build_query(record(dimensions_in=None), on_date=WHEN, resolver=RESOLVER)
 
 
 def test_the_query_date_has_no_default() -> None:
@@ -256,7 +279,9 @@ def test_no_rates_at_all_selects_nothing() -> None:
 
 
 def test_all_rates_rejected_reaches_no_eligible_rate() -> None:
-    stage = RateSearchStage(provider=MockWebCargoAdapter(rates=(rate("HY", None, 3),)))
+    stage = RateSearchStage(
+        provider=MockWebCargoAdapter(rates=(rate("HY", None, 3),)), resolver=RESOLVER
+    )
 
     outcome = stage.run("R-1", record(), on_date=WHEN)
 
@@ -270,7 +295,7 @@ def test_all_rates_rejected_reaches_no_eligible_rate() -> None:
 
 def test_the_documented_demo_fixture_selects_the_dearest_survivor() -> None:
     """The fixture is built so that ranking on price gives the wrong answer."""
-    stage = RateSearchStage(provider=MockWebCargoAdapter())
+    stage = RateSearchStage(provider=MockWebCargoAdapter(), resolver=RESOLVER)
 
     outcome = stage.run("R-1", record(), on_date=WHEN, cargo_is_liquid=True)
 
@@ -283,7 +308,7 @@ def test_the_documented_demo_fixture_selects_the_dearest_survivor() -> None:
 
 
 def test_the_fixture_excludes_three_rates_for_three_different_reasons() -> None:
-    stage = RateSearchStage(provider=MockWebCargoAdapter())
+    stage = RateSearchStage(provider=MockWebCargoAdapter(), resolver=RESOLVER)
 
     outcome = stage.run("R-1", record(), on_date=WHEN, cargo_is_liquid=True)
 
@@ -297,7 +322,7 @@ def test_the_fixture_excludes_three_rates_for_three_different_reasons() -> None:
 def test_filtering_demonstrably_runs_before_ranking() -> None:
     """The cheapest AND fastest option overall is excluded. If ranking ran
     first it would have won."""
-    stage = RateSearchStage(provider=MockWebCargoAdapter())
+    stage = RateSearchStage(provider=MockWebCargoAdapter(), resolver=RESOLVER)
 
     outcome = stage.run("R-1", record(), on_date=WHEN, cargo_is_liquid=True)
 
@@ -309,7 +334,9 @@ def test_filtering_demonstrably_runs_before_ranking() -> None:
 
 def test_mock_results_are_labelled_as_mock() -> None:
     """Nothing may present fixture data as real WebCargo data."""
-    outcome = RateSearchStage(provider=MockWebCargoAdapter()).run("R-1", record(), on_date=WHEN)
+    outcome = RateSearchStage(provider=MockWebCargoAdapter(), resolver=RESOLVER).run(
+        "R-1", record(), on_date=WHEN
+    )
 
     assert outcome.adapter_id == "mock-webcargo"
     assert outcome.uses_mock_data is True
@@ -327,7 +354,7 @@ def test_the_mock_makes_no_network_call() -> None:
 
 def test_the_real_adapter_refuses_with_the_reason() -> None:
     adapter = RealWebCargoAdapter()
-    query = build_query(record(), on_date=WHEN)
+    query = build_query(record(), on_date=WHEN, resolver=RESOLVER)
 
     with pytest.raises(PermanentFailure, match="not implemented"):
         adapter.search(query)
@@ -405,7 +432,7 @@ def test_the_mapper_never_drops_a_row() -> None:
 
 
 def test_nothing_in_the_rate_path_carries_a_credential() -> None:
-    outcome = RateSearchStage(provider=MockWebCargoAdapter()).run(
+    outcome = RateSearchStage(provider=MockWebCargoAdapter(), resolver=RESOLVER).run(
         "R-1", record(), on_date=WHEN, cargo_is_liquid=True
     )
 
@@ -416,7 +443,7 @@ def test_nothing_in_the_rate_path_carries_a_credential() -> None:
 
 def test_the_real_adapter_error_names_no_endpoint_or_credential() -> None:
     with pytest.raises(PermanentFailure) as excinfo:
-        RealWebCargoAdapter().search(build_query(record(), on_date=WHEN))
+        RealWebCargoAdapter().search(build_query(record(), on_date=WHEN, resolver=RESOLVER))
 
     message = str(excinfo.value)
     assert "webcargonet.com" not in message

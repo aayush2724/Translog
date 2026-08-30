@@ -84,21 +84,40 @@ class _DemoCarrier:
     inr_per_kg: str | None  # None models a carrier that returned no price
     transit_days: int | None  # None models a carrier that returned no transit
     accepts_liquids: bool | None = None
+    serves_door: bool | None = None
+    """Whether this simulated rate includes door delivery. Declared per carrier
+    and never assumed: a door-delivery enquiry may only select a rate that says
+    True here, so the table needs all three answers represented — offered,
+    refused, and undeclared — for the exclusion behaviour to be demonstrable."""
 
 
 #: Six carriers, three of which must be excluded for three different reasons.
 DEMO_CARRIERS: tuple[_DemoCarrier, ...] = (
     # Fastest AND cheapest — and excluded for liquids, which is what proves
-    # that filtering runs before ranking rather than after it.
-    _DemoCarrier("TK", "Turkish Cargo", "GEN", "33.80", 1, accepts_liquids=False),
+    # that filtering runs before ranking rather than after it. Airport-to-airport
+    # only: on a door-delivery enquiry this carrier is excluded too, which is
+    # what proves the service filter outranks speed.
+    _DemoCarrier(
+        "TK", "Turkish Cargo", "GEN", "33.80", 1, accepts_liquids=False, serves_door=False
+    ),
     # No price: not an offer (BR-4).
     _DemoCarrier("HY", "Uzbekistan Airways", "HY-250", None, 3),
-    # No transit: unrankable under BR-1.
+    # No transit: unrankable under BR-1. Capability undeclared (None): even if it
+    # were rankable, "did not say" must never satisfy a door requirement.
     _DemoCarrier("UL", "SriLankan Cargo", "GEN", "34.40", None),
-    _DemoCarrier("EY", "Etihad Airways", "General Cargo", "36.68", 4, accepts_liquids=False),
-    _DemoCarrier("QR", "Qatar Airways", "GEN", "39.76", 3, accepts_liquids=True),
-    # The most expensive survivor, and the fastest eligible one. Wins on BR-1.
-    _DemoCarrier("EK", "Emirates", "GEN", "41.52420", 2, accepts_liquids=True),
+    _DemoCarrier(
+        "EY",
+        "Etihad Airways",
+        "General Cargo",
+        "36.68",
+        4,
+        accepts_liquids=False,
+        serves_door=False,
+    ),
+    _DemoCarrier("QR", "Qatar Airways", "GEN", "39.76", 3, accepts_liquids=True, serves_door=True),
+    # The most expensive survivor, and the fastest eligible one. Wins on BR-1 —
+    # and, offering door delivery, wins the door-enquiry case as well.
+    _DemoCarrier("EK", "Emirates", "GEN", "41.52420", 2, accepts_liquids=True, serves_door=True),
 )
 
 
@@ -135,13 +154,14 @@ def simulate_response(query: RateQuery) -> dict[str, Any]:
                 "currency": None if total is None else "INR",
                 "transitDays": carrier.transit_days,
                 "acceptsLiquids": carrier.accepts_liquids,
+                "doorDelivery": carrier.serves_door,
             }
         )
 
     return {
         "disclosure": DISCLOSURE,
-        "origin": query.origin_iata,
-        "destination": query.destination_iata,
+        "origin": query.origin.display,
+        "destination": query.destination.display,
         "chargeableWeightKg": round(weights.chargeable_kg, 2),
         "chargeableWeightBasis": weights.basis.value,
         "grossWeightKg": weights.gross_kg,
@@ -176,6 +196,7 @@ def map_rows(payload: dict[str, Any]) -> tuple[Rate, ...]:
         total = row.get("total")
         transit_days = row.get("transitDays")
         accepts = row.get("acceptsLiquids")
+        door = row.get("doorDelivery")
         currency = row.get("currency")
 
         rates.append(
@@ -189,7 +210,10 @@ def map_rows(payload: dict[str, Any]) -> tuple[Rate, ...]:
                 if not isinstance(transit_days, int)
                 else TransitTime(value=transit_days, unit=TransitUnit.DAYS),
                 restrictions=RateRestrictions(
-                    accepts_liquids=accepts if isinstance(accepts, bool) else None
+                    accepts_liquids=accepts if isinstance(accepts, bool) else None,
+                    # Anything that is not an explicit boolean maps to "did not
+                    # say" — which the filter treats as not offered.
+                    serves_door_delivery=door if isinstance(door, bool) else None,
                 ),
                 source_ref=f"{ADAPTER_ID}:{row['carrierCode']}",
             )

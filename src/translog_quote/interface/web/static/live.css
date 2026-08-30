@@ -102,7 +102,6 @@
 .timeline-row.gate { border-left-color: #f59e0b; background: #fffbeb; }
 .timeline-row.sent { border-left-color: #16a34a; background: #f0fdf4; }
 
-.audit-title { margin-top: 2rem; }
 
 @media (max-width: 640px) {
   .timeline-row { grid-template-columns: 1fr; }

@@ -1074,22 +1074,24 @@ def test_new_mail_still_arrives_after_a_quiet_poll(
 def test_a_non_translog_failure_still_answers_with_json(
     live_server: DemoServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`UnknownPlace` is a ValueError, not a TranslogError, and the routing
-    table raises it for any lane nobody has added. Uncaught it escaped as an
-    empty 500, the browser's `response.json()` threw, and the page reported
-    that the server had not responded — wrong, and unactionable."""
-    from translog_quote.domain.routing.iata import UnknownPlace
+    """Not every failure below the handler is a `TranslogError`.
+
+    The original instance was `UnknownPlace`, a ValueError the routing table
+    raised for any lane nobody had added. Uncaught it escaped as an empty 500,
+    the browser's `response.json()` threw, and the page reported that the
+    server had not responded — wrong, and unactionable. The table is gone; the
+    handler's contract is not, so a plain exception is still asserted here."""
     from translog_quote.interface.web.live_session import LiveSession as Live
 
     def explode(self: object) -> None:
-        raise UnknownPlace("'Atlantis' is not in the demo lane table")
+        raise ValueError("'Atlantis' is not a place this stub understands")
 
     monkeypatch.setattr(Live, "poll", explode)
 
     status, payload = call(live_server, "POST", "/api/live/poll", {})
 
     assert status == 500
-    assert payload["error"] == "UnknownPlace"
+    assert payload["error"] == "ValueError"
 
 
 def test_an_error_response_names_the_class_and_nothing_else(

@@ -206,8 +206,12 @@ def rates_json(outcome: RateSearchOutcome) -> Json:
         "uses_mock_data": outcome.uses_mock_data,
         "returned": outcome.returned,
         "query": {
-            "origin_iata": outcome.query.origin_iata,
-            "destination_iata": outcome.query.destination_iata,
+            # The place as the client stated it, unless a resolver supplied a
+            # real identifier. Renamed from "origin_iata": the value is no
+            # longer always an airport code, and a key that says it is would
+            # be the same lie the lane table used to tell.
+            "origin": outcome.query.origin.display,
+            "destination": outcome.query.destination.display,
             "weight_kg": outcome.query.weight_kg,
             "date": outcome.query.date.isoformat(),
         },

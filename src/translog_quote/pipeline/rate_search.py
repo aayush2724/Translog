@@ -23,7 +23,7 @@ from translog_quote.domain.rates import (
     filter_rates,
     select_rate,
 )
-from translog_quote.domain.routing import resolve_iata
+from translog_quote.domain.shipment import DeliveryType
 from translog_quote.domain.workflow import RequestState
 from translog_quote.errors import ContractViolation
 from translog_quote.pipeline.audit import AuditEvent, AuditEventType
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from translog_quote.domain.rates import FilterOutcome, Selection, SelectionStrategy
     from translog_quote.domain.shipment import ShipmentRecord
     from translog_quote.pipeline.audit import AuditSink
-    from translog_quote.ports import RateSearchPort
+    from translog_quote.ports import LocationResolverPort, RateSearchPort
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,13 +70,22 @@ class RateSearchOutcome:
         return self.is_simulated
 
 
-def build_query(record: ShipmentRecord, *, on_date: datetime.date) -> RateQuery:
+def build_query(
+    record: ShipmentRecord, *, on_date: datetime.date, resolver: LocationResolverPort
+) -> RateQuery:
     """Turn a validated shipment into a provider query.
 
     ``on_date`` is a required argument with no default. The date a rate search is
     run for is a business decision with no approved source in this project
     (AMB-8), so nothing here invents one — not today, not tomorrow, not the next
     available flight. The caller states it, and is accountable for it.
+
+    ``resolver`` is required for the same reason and has no default either. This
+    function used to call a module-level lookup that knew nineteen places, which
+    meant the pipeline decided what a location was and refused everything else.
+    It now asks whatever the composition root wired in, and an implementation
+    that cannot answer raises `UnresolvedLocation` — one request's problem,
+    isolated by the caller, never a guess.
     """
     if record.weight_kg is None or record.weight_kg <= 0:
         raise ContractViolation("cannot search rates without a positive weight")
@@ -84,8 +93,8 @@ def build_query(record: ShipmentRecord, *, on_date: datetime.date) -> RateQuery:
         raise ContractViolation("cannot search rates without dimensions")
 
     return RateQuery(
-        origin_iata=resolve_iata(record.origin),
-        destination_iata=resolve_iata(record.destination),
+        origin=resolver.resolve(record.origin or ""),
+        destination=resolver.resolve(record.destination or ""),
         weight_kg=record.weight_kg,
         dimensions_in=record.dimensions_in,
         date=on_date,
@@ -99,11 +108,13 @@ class RateSearchStage:
         self,
         *,
         provider: RateSearchPort,
+        resolver: LocationResolverPort,
         strategy: SelectionStrategy = FASTEST_ELIGIBLE,
         audit: AuditSink | None = None,
         clock: object | None = None,
     ) -> None:
         self._provider = provider
+        self._resolver = resolver
         self._strategy = strategy
         self._audit = audit
         self._clock = clock
@@ -124,7 +135,7 @@ class RateSearchStage:
         and guessing it from a commodity name would put a wrong carrier on a
         real quotation (AMB-3).
         """
-        query = build_query(record, on_date=on_date)
+        query = build_query(record, on_date=on_date, resolver=self._resolver)
 
         result = self._provider.search(query)
         self._emit(
@@ -138,7 +149,16 @@ class RateSearchStage:
             {"count": len(result.rates)},
         )
 
-        filtered = filter_rates(result.rates, cargo_is_liquid=cargo_is_liquid)
+        # The client's stated delivery scope, read from the validated record
+        # rather than injected like `cargo_is_liquid`. The asymmetry is earned:
+        # physical form is a fact the record cannot express and must never be
+        # derived (AMB-3), while delivery type is a canonical field the client
+        # stated and validation already enforced (VR-10/VR-11).
+        filtered = filter_rates(
+            result.rates,
+            cargo_is_liquid=cargo_is_liquid,
+            requires_door_delivery=record.delivery_type is DeliveryType.DOOR,
+        )
         self._emit(
             request_id,
             AuditEventType.RATES_FILTERED,

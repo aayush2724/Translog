@@ -12,6 +12,7 @@ import pytest
 
 from translog_quote.adapters.clock import FixedClock
 from translog_quote.adapters.email import CollectingEmailSink
+from translog_quote.adapters.routing import StatedLocationResolver
 from translog_quote.adapters.store import InMemoryStore
 from translog_quote.adapters.webcargo import DemoRateProvider
 from translog_quote.domain.quotation import (
@@ -32,6 +33,8 @@ from translog_quote.domain.workflow import QuotationRequest, RequestState
 from translog_quote.errors import IllegalTransition
 from translog_quote.pipeline import QuotationStage, build_query
 from translog_quote.pipeline.audit import AuditEvent, AuditEventType
+
+RESOLVER = StatedLocationResolver()
 
 CLOCK = FixedClock()
 WHEN = datetime.date(2026, 9, 2)
@@ -66,7 +69,7 @@ CARGO_IS_LIQUID = True
 
 def packet_for(record: ShipmentRecord = RECORD) -> ReviewPacket:
     """A real review packet: real simulated rates, real filter, real selection."""
-    result = DemoRateProvider().search(build_query(record, on_date=WHEN))
+    result = DemoRateProvider().search(build_query(record, on_date=WHEN, resolver=RESOLVER))
     filtered = filter_rates(result.rates, cargo_is_liquid=CARGO_IS_LIQUID)
     selection = select_rate(filtered.eligible, FASTEST_ELIGIBLE)
     assert selection is not None

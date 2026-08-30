@@ -632,7 +632,7 @@ function sectionRates() {
 
   const children = [
     el("p", { class: "card-sub" },
-      `Search: ${rates.query.origin_iata} → ${rates.query.destination_iata} · ` +
+      `Search: ${rates.query.origin} → ${rates.query.destination} · ` +
       `${rates.query.weight_kg} kg · ${rates.query.date} · ` +
       `${rates.returned} rates returned, ${rates.eligible.length} eligible`),
     el("div", { class: "table-wrap" },

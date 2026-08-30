@@ -13,8 +13,10 @@ consequences compounded:
   every later poll — the demonstration was wedged until somebody edited a
   table.
 
-The lane table is not the thing under test and is not being widened: refusing
-an unknown place is the safety property (AMB-9). What is under test is that the
+Since the lane table was removed, the demo resolver accepts any place a client
+names — so the failure is now reproduced the way production would hit it: a
+resolver that cannot identify one particular location. Refusing rather than
+guessing remains the safety property (AMB-9); what is under test is that the
 refusal stays the property of one request.
 
 Everything is stubbed except the parts that matter — the router, the workflow,
@@ -36,9 +38,10 @@ from translog_quote.adapters.email import CollectingEmailSink
 from translog_quote.config import Settings
 from translog_quote.domain.email import RawEmail
 from translog_quote.domain.extraction import ExtractedValue, ExtractionResult
-from translog_quote.domain.routing import DEMO_LANES
+from translog_quote.domain.rates import LocationRef
 from translog_quote.domain.shipment import CargoDimensions, DeliveryType
 from translog_quote.domain.workflow import RequestState
+from translog_quote.errors import UnresolvedLocation
 from translog_quote.interface.web.live_session import LiveSequenceError, LiveSession
 from translog_quote.interface.web.server import DemoServer
 
@@ -71,14 +74,25 @@ def sink() -> CollectingEmailSink:
     return CollectingEmailSink()
 
 
-#: A place the demo lane table deliberately does not carry. Asserted rather
-#: than assumed, so this suite fails loudly if the table ever grows to include
-#: it instead of quietly testing nothing.
+#: The place the stub provider below cannot identify. Any string would do: the
+#: point is a provider-side refusal, not a property of this particular name.
 UNROUTABLE = "Hyderabad"
 
 
-def test_the_unroutable_place_really_is_absent() -> None:
-    assert UNROUTABLE.lower() not in DEMO_LANES
+class PartialResolver:
+    """A provider that can identify some places and not others.
+
+    Exactly the production shape: a real lookup answers for most locations and
+    refuses for some. It resolves by *returning what it was given* and never by
+    deriving a code, so nothing here can accidentally model a guess.
+    """
+
+    resolver_id = "test-partial"
+
+    def resolve(self, place: str) -> LocationRef:
+        if UNROUTABLE.lower() in place.lower():
+            raise UnresolvedLocation(f"{place!r} could not be identified by the provider")
+        return LocationRef(stated=place)
 
 
 def _email(message_id: str, subject: str, minutes: int) -> RawEmail:
@@ -129,6 +143,7 @@ def _session(
         source=StubSource(*emails),  # type: ignore[arg-type]
         sink=sink,
         extractor=ScriptedExtractor(*(order[e.message_id] for e in emails)),  # type: ignore[arg-type]
+        resolver=PartialResolver(),
     )
 
 
@@ -138,7 +153,7 @@ def _session(
 def test_one_unroutable_request_does_not_stop_a_second_from_reaching_rate_selection(
     settings: Settings, sink: CollectingEmailSink
 ) -> None:
-    """The whole point. Before the fix this raised `UnknownPlace`."""
+    """The whole point. Before the isolation this raised out of the poll."""
     session = _session(settings, sink, emails=(BAD, GOOD))
 
     session.poll()
@@ -157,7 +172,7 @@ def test_one_unroutable_request_does_not_stop_a_second_from_reaching_rate_select
 def test_the_poll_does_not_raise(settings: Settings, sink: CollectingEmailSink) -> None:
     session = _session(settings, sink, emails=(BAD,))
 
-    session.poll()  # would have raised UnknownPlace
+    session.poll()  # would have raised out of the whole poll
 
     assert session.requests
 

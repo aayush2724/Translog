@@ -1,17 +1,16 @@
-"""Resolving a place the client named into the airport code a rate query needs.
+"""Place names as the client writes them.
 
-A deterministic lookup, not a model's job and not a guess. A hallucinated
-airport code is a silent wrong answer: the search succeeds, rates come back, and
-they are for the wrong lane (AMB-9).
+Resolving a place to a provider's identifier is *not* done here and cannot be:
+it needs a provider, and `domain` may not know one exists. That work sits
+behind `ports.routing.LocationResolverPort`.
 
-The table covers the lanes this demo uses and nothing more. An unknown place
-raises rather than resolving to something plausible.
+What remains is the pure part — tidying a name so two spellings of it compare
+equal — and the rule that has always mattered most: a hallucinated airport code
+is a silent wrong answer, because the search succeeds and returns rates for the
+wrong lane (AMB-9). No module in this package produces a code, so none can
+produce a wrong one.
 """
 
-from translog_quote.domain.routing.iata import (
-    DEMO_LANES,
-    UnknownPlace,
-    resolve_iata,
-)
+from translog_quote.domain.routing.places import is_nameable, normalise_place
 
-__all__ = ["DEMO_LANES", "UnknownPlace", "resolve_iata"]
+__all__ = ["is_nameable", "normalise_place"]

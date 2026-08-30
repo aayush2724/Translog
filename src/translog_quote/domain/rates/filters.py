@@ -74,7 +74,39 @@ def drop_restricted_carrier(rate: Rate, *, cargo_is_liquid: bool | None) -> Excl
     return None
 
 
-def filter_rates(rates: tuple[Rate, ...], *, cargo_is_liquid: bool | None = None) -> FilterOutcome:
+def drop_service_mismatch(rate: Rate, *, requires_door_delivery: bool) -> ExcludedRate | None:
+    """A rate that cannot perform the delivery scope the client stated.
+
+    Only ``True`` passes. ``None`` — the provider did not declare the capability
+    — excludes just as ``False`` does, which is the opposite polarity from the
+    liquids rule and deliberately so: quoting door delivery on a rate that never
+    promised it is a commitment made on the client's behalf, and the shipment
+    was validated against the client's own words (VR-10). An unknown liquid
+    restriction loses us an option; an unknown delivery capability must never
+    gain us one.
+    """
+    if not requires_door_delivery:
+        return None
+    if rate.restrictions.serves_door_delivery is not True:
+        return ExcludedRate(
+            rate=rate,
+            reason=ExclusionReason.SERVICE_NOT_AVAILABLE,
+            detail=(
+                f"{rate.carrier_name} does not offer door delivery on this rate"
+                if rate.restrictions.serves_door_delivery is False
+                else f"{rate.carrier_name} does not state door delivery for this rate; "
+                "an undeclared capability is not offered"
+            ),
+        )
+    return None
+
+
+def filter_rates(
+    rates: tuple[Rate, ...],
+    *,
+    cargo_is_liquid: bool | None = None,
+    requires_door_delivery: bool = False,
+) -> FilterOutcome:
     """Run every filter over every rate, preserving order.
 
     A rate is excluded by the first rule that rejects it, so an exclusion reason
@@ -88,6 +120,7 @@ def filter_rates(rates: tuple[Rate, ...], *, cargo_is_liquid: bool | None = None
             drop_incomplete_rate(rate)
             or drop_unrankable_rate(rate)
             or drop_restricted_carrier(rate, cargo_is_liquid=cargo_is_liquid)
+            or drop_service_mismatch(rate, requires_door_delivery=requires_door_delivery)
         )
         if rejection is None:
             eligible.append(rate)

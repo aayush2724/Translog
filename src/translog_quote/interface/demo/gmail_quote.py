@@ -431,6 +431,7 @@ def run_gmail_quote(  # noqa: C901 - a linear demo script; splitting it hides th
     print(f"\n{RULE}\nRATE SEARCH  (SIMULATED — DemoRateProvider)\n{THIN}", file=out)
     stage = RateSearchStage(
         provider=bootstrap.build_demo_rate_provider(),
+        resolver=bootstrap.build_location_resolver(settings),
         strategy=FASTEST_ELIGIBLE,
         audit=audit,
         clock=bootstrap.build_fixed_clock(),
@@ -453,7 +454,7 @@ def run_gmail_quote(  # noqa: C901 - a linear demo script; splitting it hides th
     )
     print(f"  {provenance}", file=out)
     print(
-        f"  query: {rates.query.origin_iata} -> {rates.query.destination_iata}  "
+        f"  query: {rates.query.origin.display} -> {rates.query.destination.display}  "
         f"{rates.query.weight_kg:g} kg  on {rates.query.date}",
         file=out,
     )

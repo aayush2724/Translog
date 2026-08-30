@@ -35,6 +35,7 @@ if TYPE_CHECKING:
         EmailSink,
         EmailSource,
         ExtractionPort,
+        LocationResolverPort,
         RateSearchPort,
         StorePort,
     )
@@ -45,6 +46,7 @@ __all__ = [
     "authorize_gmail_send",
     "build_clarification_workflow",
     "build_console_approval",
+    "build_location_resolver",
     "build_recorded_approval",
     "build_correlation_policy",
     "build_demo_rate_provider",
@@ -493,6 +495,30 @@ def build_rate_provider(settings: Settings) -> RateSearchPort:
     from translog_quote.adapters.webcargo import MockWebCargoAdapter
 
     return MockWebCargoAdapter()
+
+
+def build_location_resolver(settings: Settings) -> LocationResolverPort:
+    """How a place the client named becomes something a provider understands.
+
+    The only place either resolver is named, and the only place the choice is
+    made. `real` gets the provider's own lookup, which refuses until WebCargo
+    has a published contract; everything else gets the resolver that carries the
+    client's wording forward with no identifier attached.
+
+    The demo resolver is never a fallback for the real one. If production cannot
+    resolve a place, that request fails and says so — substituting demo
+    behaviour would put an unverified location on a real client's quotation.
+    """
+    from translog_quote.config import WebCargoMode
+
+    if settings.webcargo.mode is WebCargoMode.REAL:
+        from translog_quote.adapters.routing import WebCargoLocationResolver
+
+        return WebCargoLocationResolver(base_url=settings.webcargo.base_url)
+
+    from translog_quote.adapters.routing import StatedLocationResolver
+
+    return StatedLocationResolver()
 
 
 def build_demo_rate_provider() -> RateSearchPort:

@@ -282,7 +282,9 @@ def run_demo(*, settings: Settings | None = None, out: TextIO = sys.stdout) -> i
 
     # --- 7-8. rate search and selection ----------------------------------------
     stage = RateSearchStage(
-        provider=bootstrap.build_demo_rate_provider(), strategy=FASTEST_ELIGIBLE
+        provider=bootstrap.build_demo_rate_provider(),
+        resolver=bootstrap.build_location_resolver(settings),
+        strategy=FASTEST_ELIGIBLE,
     )
     rates: RateSearchOutcome = stage.run(
         REQUEST_ID, second.record, on_date=SEARCH_DATE, cargo_is_liquid=CARGO_IS_LIQUID
@@ -295,7 +297,7 @@ def run_demo(*, settings: Settings | None = None, out: TextIO = sys.stdout) -> i
     )
     _heading(7, "RATE SEARCH", out, note=label)
     print(
-        f"   Query: {rates.query.origin_iata} -> {rates.query.destination_iata}   "
+        f"   Query: {rates.query.origin.display} -> {rates.query.destination.display}   "
         f"{rates.query.weight_kg:g} kg   on {rates.query.date}",
         file=out,
     )

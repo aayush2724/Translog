@@ -17,9 +17,12 @@ import pytest
 from tests.unit.test_rate_search import WHEN, record
 
 from translog_quote import bootstrap
+from translog_quote.adapters.routing import StatedLocationResolver
 from translog_quote.config import Settings, WebCargoMode
 from translog_quote.errors import PermanentFailure
 from translog_quote.pipeline import build_query
+
+RESOLVER = StatedLocationResolver()
 
 
 def settings_with(mode: WebCargoMode | None = None) -> Settings:
@@ -45,7 +48,9 @@ def test_the_mock_provider_needs_no_credentials_to_search() -> None:
     assert settings.webcargo.username is None
     assert settings.webcargo.password is None
 
-    result = bootstrap.build_rate_provider(settings).search(build_query(record(), on_date=WHEN))
+    result = bootstrap.build_rate_provider(settings).search(
+        build_query(record(), on_date=WHEN, resolver=RESOLVER)
+    )
 
     assert result.rates
     assert result.adapter_id.startswith("mock")
@@ -74,7 +79,7 @@ def test_real_mode_refuses_at_search_rather_than_inventing_rates() -> None:
     provider = bootstrap.build_rate_provider(settings_with(WebCargoMode.REAL))
 
     with pytest.raises(PermanentFailure, match="not implemented"):
-        provider.search(build_query(record(), on_date=WHEN))
+        provider.search(build_query(record(), on_date=WHEN, resolver=RESOLVER))
 
 
 def test_the_mode_is_controlled_by_the_documented_environment_variable(
@@ -95,7 +100,7 @@ def test_the_refusal_names_no_endpoint_and_no_credential() -> None:
     provider = bootstrap.build_rate_provider(settings_with(WebCargoMode.REAL))
 
     with pytest.raises(PermanentFailure) as excinfo:
-        provider.search(build_query(record(), on_date=WHEN))
+        provider.search(build_query(record(), on_date=WHEN, resolver=RESOLVER))
 
     message = str(excinfo.value).lower()
     for forbidden in ("http://", "https://", "webcargonet", "password", "cookie"):

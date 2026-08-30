@@ -330,9 +330,9 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             # carry provider detail that does not belong in a browser.
             self._send_json({"error": type(exc).__name__}, status=500)
         except Exception as exc:  # noqa: BLE001 - the boundary of the process
-            # Not every failure below is a TranslogError. `UnknownPlace`, for
-            # one, is a ValueError raised by the routing table for a lane
-            # nobody has added. Left uncaught it escapes as an empty 500 with
+            # Not every failure below is a TranslogError — `NotADecision` and
+            # the pydantic validation errors raised by domain types are plain
+            # ValueErrors. Left uncaught one escapes as an empty 500 with
             # no JSON body, the browser's `response.json()` throws, and the
             # page reports that the server did not respond — which is both
             # wrong and unactionable. The class name is safe and says enough.

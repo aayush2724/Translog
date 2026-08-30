@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from translog_quote.adapters.routing import StatedLocationResolver
 from translog_quote.adapters.webcargo import (
     DISCLOSURE,
     DemoRateProvider,
@@ -26,6 +27,7 @@ from translog_quote.adapters.webcargo import (
 from translog_quote.domain.rates import (
     FASTEST_ELIGIBLE,
     ExclusionReason,
+    LocationRef,
     RateQuery,
     RateSearchResult,
     filter_rates,
@@ -39,8 +41,8 @@ WHEN = datetime.date(2026, 9, 15)
 
 #: The reference shipment: dense, so it charges on gross weight.
 REFERENCE = RateQuery(
-    origin_iata="AMD",
-    destination_iata="BAH",
+    origin=LocationRef(stated="Ahmedabad"),
+    destination=LocationRef(stated="Bahrain"),
     weight_kg=500.0,
     dimensions_in=CargoDimensions(length=34, width=24, height=6),
     date=WHEN,
@@ -48,8 +50,8 @@ REFERENCE = RateQuery(
 
 #: Same lane, light and bulky — charges on volumetric weight instead.
 BULKY = RateQuery(
-    origin_iata="AMD",
-    destination_iata="BAH",
+    origin=LocationRef(stated="Ahmedabad"),
+    destination=LocationRef(stated="Bahrain"),
     weight_kg=30.0,
     dimensions_in=CargoDimensions(length=48, width=40, height=40),
     date=WHEN,
@@ -94,7 +96,7 @@ def test_the_pipeline_reports_it_as_simulated_not_as_provider_data() -> None:
         weight_kg=500.0,
         dimensions_in=CargoDimensions(length=34, width=24, height=6),
     )
-    outcome = RateSearchStage(provider=DemoRateProvider()).run(
+    outcome = RateSearchStage(provider=DemoRateProvider(), resolver=StatedLocationResolver()).run(
         "R-DEMO", record, on_date=WHEN, cargo_is_liquid=False
     )
 
@@ -140,8 +142,8 @@ def test_light_bulky_cargo_is_priced_on_volumetric_weight() -> None:
 def test_the_payload_shows_its_working() -> None:
     payload = search(REFERENCE).raw_payload
 
-    assert payload["origin"] == "AMD"
-    assert payload["destination"] == "BAH"
+    assert payload["origin"] == "Ahmedabad"
+    assert payload["destination"] == "Bahrain"
     assert payload["grossWeightKg"] == 500.0
     assert payload["chargeableWeightBasis"] == "gross"
     assert payload["volumetricRatioKgPerCbm"] == 167.0

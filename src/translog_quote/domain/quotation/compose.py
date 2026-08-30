@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 
 from translog_quote.domain.email import OutboundMessage
 from translog_quote.domain.quotation.model import Approved, Quotation, ReviewPacket
-from translog_quote.domain.shipment import CargoDimensions
+from translog_quote.domain.shipment import CargoDimensions, DeliveryType
 
 if TYPE_CHECKING:
     from translog_quote.domain.rates import Selection
@@ -225,6 +225,7 @@ def compose_quotation_body(
         f"  {'Carrier:'.ljust(width)} {selection.rate.carrier_name} "
         f"({selection.rate.carrier_code})",
         f"  {'Service:'.ljust(width)} {selection.rate.product}",
+        f"  {'Delivery scope:'.ljust(width)} {_delivery_scope(record)}",
         f"  {'Transit time:'.ljust(width)} {_transit(selection)}",
         f"  {'Air freight:'.ljust(width)} {_price(selection)}",
         "",
@@ -244,13 +245,52 @@ def compose_quotation_body(
     return "\n".join(lines)
 
 
+def _delivery_scope(record: ShipmentRecord) -> str:
+    """What the quoted price covers, stated in the quotation itself.
+
+    Spelled out rather than left to the shipment block, because the shipment
+    block restates the *request* and this line states the *offer* — the reader
+    must not have to infer that the two match. By the time this renders they
+    provably do: ``build_quotation`` refuses a rate that cannot perform the
+    stated scope.
+    """
+    if record.delivery_type is DeliveryType.DOOR:
+        return "Door delivery included"
+    return "Airport to airport"
+
+
+class IncompatibleService(ValueError):
+    """The selected rate cannot perform the delivery scope the client stated.
+
+    A local ``ValueError`` for the same reason ``NotADecision`` is: a domain
+    rule states what it will not accept without importing the failure taxonomy
+    above it. Eligibility filtering should make this unreachable — this guard
+    exists so that if any future path hands the composer an incompatible
+    selection, the quotation cannot be built, rather than being built wrong.
+    """
+
+
 def build_quotation(packet: ReviewPacket, approved: Approved, *, is_simulated: bool) -> Quotation:
     """The approved quotation, ready to send.
 
     ``approved`` is a required positional argument of type ``Approved``. A
     ``Rejected`` decision cannot be passed here, which is the point: there is no
     way to build the thing the sender takes without holding an approval.
+
+    A door-delivery shipment paired with a rate that does not explicitly serve
+    door delivery is refused here outright — the last line of defence behind
+    the eligibility filter, so a quotation implying a service nobody offered is
+    unrepresentable, not merely unlikely.
     """
+    if (
+        packet.record.delivery_type is DeliveryType.DOOR
+        and packet.selection.rate.restrictions.serves_door_delivery is not True
+    ):
+        raise IncompatibleService(
+            f"{packet.request_id}: the selected rate does not declare door delivery, "
+            "but the shipment requires it. Refusing to compose a quotation that "
+            "implies a service the carrier has not offered."
+        )
     return Quotation(
         request_id=packet.request_id,
         record=packet.record,

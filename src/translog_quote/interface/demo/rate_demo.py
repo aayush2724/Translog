@@ -71,7 +71,11 @@ def run_demo(
     print(RULE, file=out)
 
     provider = bootstrap.build_rate_provider(settings)
-    stage = RateSearchStage(provider=provider, strategy=FASTEST_ELIGIBLE)
+    stage = RateSearchStage(
+        provider=provider,
+        resolver=bootstrap.build_location_resolver(settings),
+        strategy=FASTEST_ELIGIBLE,
+    )
 
     validation = validate_shipment(DEMO_SHIPMENT)
     print(f"\nSHIPMENT\n{THIN}", file=out)
@@ -103,7 +107,7 @@ def run_demo(
     )
     print(f"\nRATE QUERY\n{THIN}", file=out)
     print(
-        f"  {outcome.query.origin_iata} -> {outcome.query.destination_iata}  "
+        f"  {outcome.query.origin.display} -> {outcome.query.destination.display}  "
         f"{outcome.query.weight_kg:g} kg  on {outcome.query.date}",
         file=out,
     )

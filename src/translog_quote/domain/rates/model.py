@@ -7,7 +7,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from translog_quote.domain.shipment import CargoDimensions
 
@@ -48,6 +48,17 @@ class RateRestrictions(BaseModel):
 
     accepts_liquids: bool | None = None
 
+    serves_door_delivery: bool | None = None
+    """Whether this rate includes door delivery, as the provider declares it.
+
+    ``None`` means the provider did not say — and for a shipment that *requires*
+    door delivery, "did not say" must exclude. The asymmetry with
+    ``accepts_liquids`` is deliberate and inverted on purpose: an unknown liquid
+    restriction risks losing an option, while an unknown delivery capability
+    risks quoting a service nobody has agreed to perform. The first is a missed
+    rate; the second is a commercial commitment made by silence.
+    """
+
 
 class Rate(BaseModel):
     """One normalised rate. Adapter-agnostic and provenance-free.
@@ -73,18 +84,70 @@ class Rate(BaseModel):
     source_ref: str = ""  # the adapter's opaque id — audit only
 
 
+class LocationRef(BaseModel):
+    """One end of a lane: what the client called it, and what it resolved to.
+
+    The two are kept apart on purpose. ``stated`` is the client's own wording
+    and is always present — it is what the workflow carries, displays and quotes
+    against, so no enquiry can be turned away for naming a place the system has
+    not heard of. ``code`` is a provider's identifier and is present only when
+    something actually resolved it.
+
+    ``resolved_by`` is what makes "never guess an airport" structural rather
+    than a rule someone has to remember. A code cannot be set without naming the
+    mechanism that produced it, and no mechanism in this repository derives one
+    from a place name — so there is no path by which an inferred code reaches a
+    rate query. A wrong code is the worst failure available to this system: the
+    search succeeds, rates come back, and they price the wrong lane (AMB-9).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    stated: str = Field(min_length=1)
+    """Exactly what the client wrote. Never rewritten, never substituted."""
+
+    code: str | None = None
+    """A provider identifier — an IATA code, or whatever that provider uses."""
+
+    resolved_by: str | None = None
+    """The `resolver_id` that produced `code`. Required whenever `code` is set."""
+
+    @model_validator(mode="after")
+    def _a_code_must_name_its_source(self) -> LocationRef:
+        if self.code is not None and not self.resolved_by:
+            raise ValueError(
+                "a resolved code must name the resolver that produced it; "
+                "an unattributed code is indistinguishable from a guess"
+            )
+        if self.code is not None and not self.code.strip():
+            raise ValueError("a resolved code may not be blank")
+        return self
+
+    @property
+    def display(self) -> str:
+        """What a person should read: the code when there is one, else the name."""
+        return self.code or self.stated
+
+
 class RateQuery(BaseModel):
     """What we ask a rate provider for.
 
     There is no field capable of carrying a client identity. WebCargo has exactly
     one user, Translog, and no client credential or identity ever reaches it
     (BR-13) — that is enforced by this type's shape.
+
+    Origin and destination are `LocationRef`, not bare airport codes. The field
+    pair they replace was `min_length=3, max_length=3`, which meant a query
+    could not be built for a place nobody had already tabulated — so a lookup
+    table had to exist, and every enquiry outside it was refused before any
+    provider was asked. Carrying the stated place removes that gate without
+    inventing anything to fill it.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    origin_iata: str = Field(min_length=3, max_length=3)
-    destination_iata: str = Field(min_length=3, max_length=3)
+    origin: LocationRef
+    destination: LocationRef
     weight_kg: float = Field(gt=0)
     dimensions_in: CargoDimensions
     date: date  # AMB-8: source unconfirmed
@@ -131,6 +194,7 @@ class ExclusionReason(StrEnum):
     INCOMPLETE_RATE = "incomplete_rate"  # BR-4: null total or currency
     UNRANKABLE_NO_TRANSIT = "unrankable_no_transit"  # consequence of AMB-1
     CARRIER_RESTRICTED = "carrier_restricted"  # BR-5, governed by AMB-3
+    SERVICE_NOT_AVAILABLE = "service_not_available"  # the rate cannot perform the stated scope
 
 
 class ExcludedRate(BaseModel):

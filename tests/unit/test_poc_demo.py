@@ -184,7 +184,7 @@ def test_rate_search_runs_on_the_validated_shipment(
 ) -> None:
     _, output = run(settings, FIRST, REPLY, monkeypatch=monkeypatch)
 
-    assert "Query: AMD -> BAH   500 kg" in output
+    assert "Query: Ahmedabad -> Bahrain   500 kg" in output
     assert "Rates returned: 6" in output
 
 

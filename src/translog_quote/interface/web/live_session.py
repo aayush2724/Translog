@@ -43,7 +43,6 @@ from translog_quote.domain.quotation import (
     decision_from_choice,
 )
 from translog_quote.domain.rates import FASTEST_ELIGIBLE
-from translog_quote.domain.routing import UnknownPlace
 from translog_quote.domain.validation import validate_shipment
 from translog_quote.domain.workflow import RequestState
 from translog_quote.errors import IllegalTransition, PermanentFailure, TranslogError
@@ -68,6 +67,7 @@ if TYPE_CHECKING:
         EmailSink,
         EmailSource,
         ExtractionPort,
+        LocationResolverPort,
         StorePort,
     )
 
@@ -208,8 +208,13 @@ class LiveSession:
         durable: StorePort | None = None,
         clock: ClockPort | None = None,
         audit: CollectingAudit | None = None,
+        resolver: LocationResolverPort | None = None,
     ) -> None:
         self._settings = settings
+        # Injectable like every other collaborator, so a test can exercise a
+        # provider that cannot identify a particular place without needing a
+        # real one. The default is whatever the configured mode calls for.
+        self._resolver = resolver or bootstrap.build_location_resolver(settings)
         # The wall clock, not the fixed one. A live run's audit trail is a
         # record of when things actually happened; freezing it would stamp
         # every event with the same invented moment, and the interface would
@@ -486,6 +491,7 @@ class LiveSession:
         """
         stage = RateSearchStage(
             provider=bootstrap.build_demo_rate_provider(),
+            resolver=self._resolver,
             strategy=FASTEST_ELIGIBLE,
             audit=self.audit,
             clock=self._clock,
@@ -500,7 +506,7 @@ class LiveSession:
                     on_date=SEARCH_DATE,
                     cargo_is_liquid=None,  # AMB-3: stated, never derived
                 )
-            except (UnknownPlace, TranslogError) as exc:
+            except TranslogError as exc:
                 # One request that cannot be priced is one request that cannot
                 # be priced. Before this, an unroutable lane raised out of the
                 # loop, out of `poll`, and out of the request handler as a 500
@@ -508,10 +514,12 @@ class LiveSession:
                 # table stopped every *other* request from being searched and
                 # ended the poll that would have read the rest of the mailbox.
                 #
-                # Caught narrowly on purpose. `UnknownPlace` and the project
-                # taxonomy are the failures a *request* can have; anything else
-                # is a defect in this process and must still escape loudly
-                # rather than be recorded as a property of somebody's enquiry.
+                # Caught narrowly on purpose. The project taxonomy is the set
+                # of failures a *request* can have — `UnresolvedLocation` among
+                # them, since a place the provider cannot identify is one
+                # enquiry's problem. Anything else is a defect in this process
+                # and must still escape loudly rather than be recorded as a
+                # property of somebody's enquiry.
                 #
                 # Nothing else is touched: the state stays VALIDATED and
                 # `rates` stays None, which is exactly the pair this loop

@@ -13,6 +13,7 @@ from translog_quote.errors.taxonomy import (
     TransientFailure,
     TranslogError,
     UnresolvedFieldMapping,
+    UnresolvedLocation,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "TransientFailure",
     "TranslogError",
     "UnresolvedFieldMapping",
+    "UnresolvedLocation",
 ]

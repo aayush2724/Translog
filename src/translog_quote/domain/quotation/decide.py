@@ -25,9 +25,9 @@ if TYPE_CHECKING:
 class NotADecision(ValueError):
     """What arrived is not an approval and not a decline.
 
-    Deliberately an error rather than a fallback, and local to `domain` for the
-    same reason `UnknownPlace` is: a domain rule states what it will not accept
-    without depending on the failure taxonomy above it. Resolving an
+    Deliberately an error rather than a fallback, and local to `domain` because
+    a domain rule states what it will not accept without depending on the
+    failure taxonomy above it — `domain` may not import `errors`. Resolving an
     unrecognised input to either outcome would either send a quotation nobody
     authorised or record a refusal nobody made.
     """
