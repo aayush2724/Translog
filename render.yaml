@@ -1,0 +1,71 @@
+# Render service definition for the Translog demonstration.
+#
+# The application is unchanged: this file only states how Render should build
+# and start the server it already had. Everything account-specific — the Gmail
+# addresses, the OpenRouter key, the OAuth tokens — is supplied as environment
+# variables or secret files in the Render dashboard, never here and never in
+# the repository.
+#
+# Two settings are not optional, and are the reason this file exists at all:
+#   HOST                   Render routes to the container's external interface,
+#                          not to loopback, so the server must bind 0.0.0.0.
+#   TRANSLOG_ALLOWED_HOSTS The cross-site guard refuses any state-changing POST
+#                          whose Host is not declared. Without the service's own
+#                          hostname here the page loads and every button 403s.
+services:
+  - type: web
+    name: translog-demo
+    runtime: python
+    plan: starter
+    buildCommand: pip install .
+    startCommand: python -m translog_quote.interface.web --live
+    # The demonstration's durable state. Without a disk Render's filesystem is
+    # wiped on every deploy and every restart, and a request waiting on a client
+    # reply — the one thing in this workflow that deliberately outlives the
+    # process that started it — would disappear between the clarification going
+    # out and the answer coming back.
+    #
+    # A disk pins the service to one instance and disables zero-downtime
+    # deploys. Both are correct here: the session is per-process and holds the
+    # approval gate, so a second instance would answer with a different view of
+    # what is awaiting approval.
+    disk:
+      name: translog-state
+      mountPath: /var/lib/translog
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12"
+      - key: HOST
+        value: 0.0.0.0
+      # Must equal the service's public hostname, e.g. translog-demo.onrender.com
+      - key: TRANSLOG_ALLOWED_HOSTS
+        sync: false
+      - key: TRANSLOG_OPENROUTER__API_KEY
+        sync: false
+      - key: TRANSLOG_GMAIL__TEST_ADDRESS
+        sync: false
+      - key: TRANSLOG_GMAIL__SENDER_ADDRESS
+        sync: false
+      - key: TRANSLOG_GMAIL__APPROVER_ADDRESS
+        sync: false
+      - key: TRANSLOG_GMAIL__SEND_ENABLED
+        value: "true"
+      # Uploaded in the dashboard as Secret Files; Render mounts them here.
+      - key: TRANSLOG_GMAIL__TOKEN_PATH
+        value: /etc/secrets/gmail_token.json
+      - key: TRANSLOG_GMAIL__SEND_TOKEN_PATH
+        value: /etc/secrets/gmail_send_token.json
+      - key: TRANSLOG_GMAIL__QUERY
+        value: 'in:inbox -subject:"[TRANSLOG INTERNAL]"'
+      - key: TRANSLOG_GMAIL__MAX_RESULTS
+        value: "5"
+      # Rates stay simulated and disclosed. The real adapter refuses anyway.
+      - key: TRANSLOG_WEBCARGO__MODE
+        value: demo
+      # On the persistent disk declared above, not in the ephemeral container
+      # filesystem. A subdirectory of the mount rather than the mount itself,
+      # so the disk's own lost+found sits beside the state rather than inside
+      # the directory the store enumerates. Created on first write.
+      - key: TRANSLOG_DEMO__STATE_DIR
+        value: /var/lib/translog/state

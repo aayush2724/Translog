@@ -13,6 +13,7 @@ the static files are committed source with no templating step to leak into.
 from __future__ import annotations
 
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -193,6 +194,25 @@ class DemoServer(ThreadingHTTPServer):
 #: browser. The port is appended at check time.
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
 
+#: Hostnames this server is additionally allowed to be reached under, as a
+#: comma-separated list. Empty by default, which leaves the guard exactly as it
+#: has always been for a local run.
+#:
+#: It exists because the guard above is written for a loopback-only server, and
+#: a hosted one is reached by name: every state-changing POST to a deployed
+#: hostname is refused until that name is declared here. Declaring it is
+#: deliberately an explicit act — an allowlist, never a wildcard and never
+#: "trust whatever Host arrives", because the check would then defend nothing.
+ALLOWED_HOSTS_VAR = "TRANSLOG_ALLOWED_HOSTS"
+
+
+def _allowed_hosts() -> frozenset[str]:
+    """Loopback, plus whatever names the operator has declared."""
+    declared = os.environ.get(ALLOWED_HOSTS_VAR, "")
+    return frozenset(_LOOPBACK_HOSTS) | {
+        name.strip().lower() for name in declared.split(",") if name.strip()
+    }
+
 
 class DemoRequestHandler(BaseHTTPRequestHandler):
     server_version = "TranslogPOC/0.1"
@@ -236,7 +256,8 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         Two cheap, standard defences for a localhost-only server, and nothing
         that a legitimate same-origin `fetch` from the served page ever trips:
 
-        - **Host must be loopback.** Defeats DNS rebinding, where an attacker
+        - **Host must be loopback, or a name the operator declared** in
+          `TRANSLOG_ALLOWED_HOSTS`. Defeats DNS rebinding, where an attacker
           domain resolves to 127.0.0.1 so its page can reach this server.
         - **State-changing POSTs must be `application/json`.** A cross-site HTML
           form can only send `text/plain`, form-encoded or multipart bodies
@@ -249,7 +270,7 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         teaching an attacker to satisfy.
         """
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip().lower()
-        if host not in _LOOPBACK_HOSTS:
+        if host not in _allowed_hosts():
             return True
         content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
         return content_type != "application/json"
