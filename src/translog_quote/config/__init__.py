@@ -9,6 +9,8 @@ documents the names.
 """
 
 from translog_quote.config.settings import (
+    DEFAULT_ENV_FILE,
+    ENV_FILE_VAR,
     Environment,
     GmailSettings,
     LogLevel,
@@ -18,6 +20,8 @@ from translog_quote.config.settings import (
 )
 
 __all__ = [
+    "DEFAULT_ENV_FILE",
+    "ENV_FILE_VAR",
     "Environment",
     "GmailSettings",
     "LogLevel",

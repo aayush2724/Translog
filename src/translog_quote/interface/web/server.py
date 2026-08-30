@@ -284,6 +284,13 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         except TranslogError as exc:
             # The class of failure, never its contents: adapter messages can
             # carry provider detail that does not belong in a browser.
+            #
+            # Logged in full on the way past, though. Redacting the browser's
+            # copy is the point; redacting the operator's too left a 500 whose
+            # only trace was the access-log line, and the sentence naming what
+            # actually broke was discarded at exactly the moment somebody
+            # needed it.
+            _log.warning("Live action %s failed: %s", name, exc)
             self._send_json({"error": type(exc).__name__}, status=500)
 
     # ---------------------------------------------------------------- live --

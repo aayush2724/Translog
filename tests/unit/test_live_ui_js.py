@@ -60,4 +60,4 @@ def test_every_case_in_the_harness_actually_ran() -> None:
         timeout=60,
         check=False,
     )
-    assert result.stdout.count("  ok   ") >= 13, result.stdout
+    assert result.stdout.count("  ok   ") >= 20, result.stdout

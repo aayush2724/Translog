@@ -43,9 +43,10 @@ from translog_quote.domain.quotation import (
     decision_from_choice,
 )
 from translog_quote.domain.rates import FASTEST_ELIGIBLE
+from translog_quote.domain.routing import UnknownPlace
 from translog_quote.domain.validation import validate_shipment
 from translog_quote.domain.workflow import RequestState
-from translog_quote.errors import IllegalTransition, PermanentFailure
+from translog_quote.errors import IllegalTransition, PermanentFailure, TranslogError
 from translog_quote.interface.demo.gmail_thread import _request_id_for
 from translog_quote.interface.web.audit_log import JsonFileAuditLog
 from translog_quote.interface.web.demonstration import DemonstrationFile
@@ -136,6 +137,15 @@ class LiveRequest:
     clarification: ClarificationMessage | None = None
     clarification_sent_by: str | None = None
     rates: RateSearchOutcome | None = None
+    rate_failure: str | None = None
+    """Why rate search could not run for this request, if it could not.
+
+    Set instead of the search result, never alongside it: a request either has
+    rates or has a reason it has none. It is a *report*, not a state — the
+    request stays where the state machine put it, so the next poll retries it
+    for free once the cause is fixed.
+    """
+
     packet: ReviewPacket | None = None
     decision: ApprovalDecision | None = None
     quotation_sent: bool = False
@@ -483,12 +493,37 @@ class LiveSession:
         for request in self.requests.values():
             if request.rates is not None or request.state is not RequestState.VALIDATED:
                 continue
-            outcome = stage.run(
-                request.request_id,
-                request.record,
-                on_date=SEARCH_DATE,
-                cargo_is_liquid=None,  # AMB-3: stated, never derived
-            )
+            try:
+                outcome = stage.run(
+                    request.request_id,
+                    request.record,
+                    on_date=SEARCH_DATE,
+                    cargo_is_liquid=None,  # AMB-3: stated, never derived
+                )
+            except (UnknownPlace, TranslogError) as exc:
+                # One request that cannot be priced is one request that cannot
+                # be priced. Before this, an unroutable lane raised out of the
+                # loop, out of `poll`, and out of the request handler as a 500
+                # — so a single enquiry naming a place outside the demo lane
+                # table stopped every *other* request from being searched and
+                # ended the poll that would have read the rest of the mailbox.
+                #
+                # Caught narrowly on purpose. `UnknownPlace` and the project
+                # taxonomy are the failures a *request* can have; anything else
+                # is a defect in this process and must still escape loudly
+                # rather than be recorded as a property of somebody's enquiry.
+                #
+                # Nothing else is touched: the state stays VALIDATED and
+                # `rates` stays None, which is exactly the pair this loop
+                # selects on — so the retry is the next poll, with no queue to
+                # drain and nothing to reset. No packet is built, so the
+                # request cannot reach the approval gate, and no sink is
+                # called, so the failure cannot send anything.
+                request.rate_failure = str(exc)
+                _log.warning("Rate search failed for %s: %s", request.request_id, exc)
+                continue
+
+            request.rate_failure = None
             request.rates = outcome
             request.state = outcome.state
             if outcome.selection is not None:

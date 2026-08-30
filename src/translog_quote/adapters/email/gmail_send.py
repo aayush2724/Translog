@@ -110,7 +110,7 @@ class HttpxGmailSendTransport:
         jitter: Callable[[], float] = random.random,
     ) -> None:
         # Fail at construction, not halfway through a demo.
-        self._token_file = _load_token_file(token_path)
+        self._token_file = _load_token_file(token_path, command="gmail-auth-send")
         self._timeout = timeout_seconds
         self._max_retries = max_retries
         self._backoff = max(0.0, backoff_seconds)

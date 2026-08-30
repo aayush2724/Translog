@@ -34,6 +34,9 @@
   <div id="provenance" class="provenance-bar"></div>
 
   <p id="busy-banner" class="busy-banner" role="status" aria-live="polite" hidden></p>
+  <!-- Outside both views on purpose: an action can fail from either one,
+       and the banner that says so used to live in the detail view only. -->
+  <p id="action-error" class="banner banner-amber" role="alert" aria-live="assertive" hidden></p>
 
   <main class="container">
     <section id="view-dashboard">

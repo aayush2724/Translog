@@ -408,6 +408,9 @@ def request_summary(request: LiveRequest, *, in_demonstration: bool = True) -> J
         "received_at": received.isoformat() if received else None,
         "status": status_json(request),
         "awaiting_clarification": request.awaiting_clarification_approval,
+        # Why this request has no rates, when it has none. Reported rather
+        # than hidden: a request stuck before pricing looks idle otherwise.
+        "rate_failure": request.rate_failure,
         "waiting_replies": len(request.waiting_replies),
         "awaiting_decision": request.awaiting_quotation_decision,
         "settled": request.is_settled,
@@ -434,6 +437,7 @@ def request_detail(session: LiveSession, request: LiveRequest) -> Json:
         "merged": [FIELD_TITLES.get(f, f) for f in request.merged_fields],
         "carried": [FIELD_TITLES.get(f, f) for f in request.carried_fields],
         "shipment": shipment_json(request),
+        "rate_failure": request.rate_failure,
         "validation": validation_json(request.validation),
         "clarification": None
         if clarification is None

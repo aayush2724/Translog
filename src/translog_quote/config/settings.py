@@ -7,11 +7,25 @@ clients these values configure do not exist yet.
 
 from __future__ import annotations
 
+import os
 from enum import StrEnum
 from pathlib import Path
 
 from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DEFAULT_ENV_FILE = ".env"
+"""The base configuration layer. Always read when it exists."""
+
+ENV_FILE_VAR = "TRANSLOG_ENV_FILE"
+"""Names a second env file, layered *on top of* `.env`.
+
+The reason it layers rather than replaces: an account switch changes which
+mailbox is read and which OAuth token files are used, and nothing else. The
+OpenRouter key, the WebCargo mode and the demo paths are the same either way,
+so an account file that had to restate them would mean the same secret written
+in two places — the failure mode this indirection exists to avoid.
+"""
 
 
 class Environment(StrEnum):
@@ -215,6 +229,35 @@ class Settings(BaseSettings):
     demo: DemoSettings = DemoSettings()
 
 
-def load_settings() -> Settings:
-    """Load configuration. Safe to call with nothing configured."""
-    return Settings()
+def load_settings(env_file: str | Path | None = None) -> Settings:
+    """Load configuration. Safe to call with nothing configured.
+
+    With no `env_file` and no `TRANSLOG_ENV_FILE`, this is exactly what it has
+    always been: `.env` if present, defaults otherwise.
+
+    Given one — by argument, or by `TRANSLOG_ENV_FILE` in the environment — that
+    file is layered *over* `.env`, and its values win. This is how a second
+    Gmail account gets a configuration path of its own: a small file naming that
+    mailbox and its own OAuth token paths, with the base file left untouched.
+    Switching accounts then means selecting a file, not editing one, so the
+    previous account's configuration and credentials survive the switch.
+
+    An explicitly named file that does not exist is an error rather than a
+    silent fall-back to `.env`. Falling back would run the demo against the
+    *other* account while the operator believed they had switched — the one
+    outcome this whole mechanism exists to prevent.
+    """
+    override = env_file if env_file is not None else os.environ.get(ENV_FILE_VAR) or None
+    if override is None:
+        return Settings()
+
+    path = Path(override)
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"No configuration file at {path}. {ENV_FILE_VAR} (or --env-file) must name "
+            "an existing env file; refusing to silently fall back to "
+            f"{DEFAULT_ENV_FILE}, which may point at a different account."
+        )
+    # Later files win, so the account file overrides the base one field by
+    # field and inherits everything it does not mention.
+    return Settings(_env_file=(DEFAULT_ENV_FILE, path))  # type: ignore[call-arg]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 
+from translog_quote.config import ENV_FILE_VAR, load_settings
 from translog_quote.interface.web.server import DEFAULT_HOST, DEFAULT_PORT, run
 
 
@@ -21,8 +22,26 @@ def main(argv: list[str] | None = None) -> int:
             "(requires the inbound and outbound credentials and an approver address)"
         ),
     )
+    parser.add_argument(
+        "--env-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "layer this env file over .env — how a second Gmail account is selected "
+            f"without editing the first one (or set {ENV_FILE_VAR})"
+        ),
+    )
     args = parser.parse_args(argv)
-    return run(host=args.host, port=args.port, live=args.live)
+
+    try:
+        settings = load_settings(args.env_file)
+    except FileNotFoundError as exc:
+        # Named a file that is not there. Reported here rather than served as a
+        # demo silently running against whatever .env points at.
+        print(exc)
+        return 2
+
+    return run(host=args.host, port=args.port, settings=settings, live=args.live)
 
 
 if __name__ == "__main__":

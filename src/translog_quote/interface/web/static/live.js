@@ -352,6 +352,9 @@ function requestCard(request) {
         ? el("p", { class: "waiting-note" },
             `${request.waiting_replies} client reply waiting — approve the clarification to merge it`)
         : null,
+      request.rate_failure
+        ? el("p", { class: "waiting-note" }, `Rate search could not run: ${request.rate_failure}`)
+        : null,
       request.not_enquiry_reason
         ? el("p", { class: "not-enquiry" }, request.not_enquiry_reason)
         : null));
@@ -488,7 +491,17 @@ function sectionClarification(detail) {
 
 function sectionRates(detail) {
   const rates = detail.rates;
-  if (!rates) return null;
+  if (!rates) {
+    /* No rates and a reason why. Without this the detail view simply omits the
+       section and the request reads as though nothing had been attempted. */
+    if (!detail.rate_failure) return null;
+    return card(
+      [el("h2", null, "Rate search & selection"), pill("NOT RUN", "amber")],
+      el("p", null, `Rate search could not run: ${detail.rate_failure}`),
+      el("p", { class: "muted small" },
+        "Nothing was sent and nothing was approved. The next “Check mail” " +
+        "retries this request automatically."));
+  }
   const selection = rates.selection;
   return card(
     [el("h2", null, "Rate search & selection"), pill(rates.simulated ? "SIMULATED" : "LIVE PROVIDER", rates.simulated ? "amber" : "green")],
@@ -629,7 +642,6 @@ function renderDetail() {
     sectionQuotation(detail),
   ].filter(Boolean);
 
-  if (ui.error) sections.unshift(el("div", { class: "banner banner-amber" }, "⚠ ", ui.error));
   document.getElementById("sections").replaceChildren(...sections);
 }
 
@@ -685,6 +697,14 @@ function render() {
   const banner = document.getElementById("busy-banner");
   banner.hidden = !ui.busy;
   banner.textContent = ui.busy ? `${ui.busyLabel} this can take up to a minute.` : "";
+
+  /* Set here rather than inside a view renderer. It used to be appended by
+     renderDetail() alone, so an action that failed while the dashboard was on
+     screen — which is every action on a fresh demonstration — set ui.error and
+     displayed nothing at all. */
+  const failure = document.getElementById("action-error");
+  failure.hidden = !ui.error;
+  failure.textContent = ui.error ? `⚠ ${ui.error}` : "";
 }
 
 document.addEventListener("DOMContentLoaded", () => {

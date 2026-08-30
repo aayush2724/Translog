@@ -101,11 +101,27 @@ class _TokenFile:
     client_secret: str = field(repr=False)
 
 
-def _load_token_file(path: Path) -> _TokenFile:
+def _load_token_file(path: Path, *, command: str = "gmail-auth") -> _TokenFile:
+    """Read one authorized-user token, or refuse with the command that makes it.
+
+    ``command`` names the consent command that writes *this* token, because the
+    two are not interchangeable: `gmail-auth` grants read and `gmail-auth-send`
+    grants send, and a message naming the wrong one sends the operator to a
+    grant that leaves the actual problem in place.
+
+    The `--env-file` reminder is part of the instruction rather than a footnote.
+    Consent writes to whichever token path the loaded configuration names, so
+    running the bare command while a second account is configured writes the
+    token to the *default* path — overwriting the first account's credential,
+    which is the one thing a missing-token message must not talk somebody into.
+    """
     if not path.exists():
         raise PermanentFailure(
-            f"No Gmail token file at {path}. Run the one-time consent command: "
-            "python -m translog_quote.interface.demo gmail-auth"
+            f"No Gmail token file at {path}. Grant consent for this account with the "
+            "one-time command: python -m translog_quote.interface.demo "
+            f"--env-file <the env file naming this token path> {command} "
+            "(without the matching --env-file the token is written to the default "
+            "path, overwriting another account's credential)."
         )
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -127,7 +143,7 @@ def _load_token_file(path: Path) -> _TokenFile:
     if missing:
         raise PermanentFailure(
             f"Gmail token file at {path} is missing {missing}. "
-            "Re-run the gmail-auth consent command."
+            f"Re-run the {command} consent command."
         )
 
     return _TokenFile(

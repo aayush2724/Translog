@@ -103,7 +103,8 @@ function load(fetchStub) {
   const source =
     fs.readFileSync(SOURCE, "utf8") +
     "\n;globalThis.__t = { ui, canDecide, sectionClarification, sectionApproval," +
-    " renderDashboard, renderTimeline, holderFor: (id) => document.getElementById(id) };";
+    " renderDashboard, renderTimeline, render, post, sectionRates," +
+    " holderFor: (id) => document.getElementById(id) };";
   vm.runInContext(source, context);
   return context.__t;
 }
@@ -138,6 +139,12 @@ function check(name, fn) {
     failures += 1;
     console.log(`  FAIL ${name}\n       ${err.message}`);
   }
+}
+/* post() is async, and the failure it must surface only exists after the
+   response comes back — so these cases cannot run under the sync helper. */
+const asyncChecks = [];
+function checkAsync(name, fn) {
+  asyncChecks.push([name, fn]);
 }
 function eq(actual, expected, what) {
   if (actual !== expected) {
@@ -371,5 +378,104 @@ check("the check-mail button never renders a null child", () => {
   eq(t.ui.busy, false, "idle");
 });
 
-console.log(failures ? `\n  ${failures} failure(s)` : "\n  all passed");
-process.exit(failures ? 1 : 0);
+
+/* --- a failed action has to be visible from whichever view you are on ----- */
+
+function failingFetch() {
+  return async () => ({
+    ok: false,
+    status: 500,
+    json: async () => ({ error: "PermanentFailure" }),
+  });
+}
+
+check("a request that could not be priced says so on its dashboard card", () => {
+  const t = load();
+  t.ui.snap = snapshotWith(
+    [request({ rate_failure: "'Hyderabad' is not in the demo lane table" })],
+    { active: true, following: 1 }
+  );
+  t.renderDashboard();
+  const notes = t.holderFor("dashboard-list").findAll((n) => n.className === "waiting-note");
+
+  eq(notes.length, 1, "one failure note");
+  eq(/Hyderabad/.test(notes[0].textContent), true, "names the cause");
+});
+
+check("a priced request shows no failure note", () => {
+  const t = load();
+  t.ui.snap = snapshotWith([request({ rate_failure: null })], { active: true, following: 1 });
+  t.renderDashboard();
+
+  eq(
+    t.holderFor("dashboard-list").findAll((n) => n.className === "waiting-note").length,
+    0,
+    "no note when nothing failed"
+  );
+});
+
+check("the detail view explains an absent rate section", () => {
+  const t = load();
+  const section = t.sectionRates({
+    rates: null,
+    rate_failure: "'Hyderabad' is not in the demo lane table",
+  });
+
+  eq(section !== null, true, "a section is rendered");
+  eq(/Hyderabad/.test(section.textContent), true, "names the cause");
+});
+
+check("the detail view renders nothing when there is no failure and no rates", () => {
+  const t = load();
+  eq(t.sectionRates({ rates: null, rate_failure: null }), null, "still nothing to show");
+});
+
+checkAsync("an action failing on the DASHBOARD renders a visible error", async () => {
+  /* The regression: ui.error was only ever appended by renderDetail(), so a
+     poll that failed while the dashboard was on screen — every poll on a fresh
+     demonstration — set the error and displayed absolutely nothing. */
+  const t = load(failingFetch());
+  t.ui.snap = snapshotWith([], { active: true });
+  t.ui.view = "dashboard";
+
+  await t.post("poll", {}, "Checking mail\u2026");
+
+  const banner = t.holderFor("action-error");
+  eq(banner.hidden, false, "the banner is shown");
+  eq(/PermanentFailure/.test(banner.textContent), true, "it names the failure");
+});
+
+checkAsync("an action failing on the DETAIL view still renders the error", async () => {
+  const t = load(failingFetch());
+  t.ui.snap = snapshotWith([], { active: true });
+  t.ui.view = "detail";
+
+  await t.post("poll", {}, "Checking mail\u2026");
+
+  eq(t.holderFor("action-error").hidden, false, "shown in the other view too");
+});
+
+checkAsync("a successful action clears a previous error", async () => {
+  const t = load(async () => ({ ok: true, status: 200, json: async () => snapshotWith([], {}) }));
+  t.ui.snap = snapshotWith([], {});
+  t.ui.view = "dashboard";
+  t.ui.error = "PermanentFailure";
+
+  await t.post("poll", {}, "Checking mail\u2026");
+
+  eq(t.holderFor("action-error").hidden, true, "banner hidden again");
+});
+
+(async () => {
+  for (const [name, fn] of asyncChecks) {
+    try {
+      await fn();
+      console.log(`  ok   ${name}`);
+    } catch (err) {
+      failures += 1;
+      console.log(`  FAIL ${name}\n       ${err.message}`);
+    }
+  }
+  console.log(failures ? `\n  ${failures} failure(s)` : "\n  all passed");
+  process.exit(failures ? 1 : 0);
+})();
