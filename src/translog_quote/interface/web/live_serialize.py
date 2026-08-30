@@ -25,6 +25,7 @@ from translog_quote.interface.web.serialize import (
     email_json,
     validation_json,
 )
+from translog_quote.pipeline.audit import AuditEventType
 
 if TYPE_CHECKING:
     from translog_quote.domain.quotation import ReviewPacket
@@ -76,6 +77,17 @@ TIMELINE: tuple[tuple[str, str, str, int, str | None], ...] = (
     ("approval_decided", "Human approval", "approval_decided", 0, None),
     ("quotation_sent", "Quotation sent", "quotation_sent", 0, None),
 )
+
+#: The audit events that prove a request entered the clarification loop, and
+#: the timeline steps that exist only inside it.
+_CLARIFICATION_EVENTS = frozenset(
+    {
+        AuditEventType.CLARIFICATION_DRAFTED,
+        AuditEventType.CLARIFICATION_APPROVED,
+        AuditEventType.CLARIFICATION_SENT,
+    }
+)
+_CLARIFICATION_STEPS = frozenset({"clarification_sent", "reply_received"})
 
 #: What the interface says about the step a request is currently sitting on.
 #: Only ever attached to the *current* step, so a pending step further down
@@ -304,9 +316,25 @@ def timeline_json(request: LiveRequest, events: list[AuditEvent]) -> list[Json]:
     mine = [event for event in events if event.request_id == request.request_id]
     emails = {"enquiry_received": request.enquiry, "reply_received": request.reply}
 
+    # Whether this request ever entered the clarification loop. A complete
+    # enquiry never does, and its timeline must not carry the two steps that
+    # belong to that loop: rendered as pending they read as things still owed
+    # — "Clarification awaiting approval", "Client reply received" — which
+    # invents a human action nobody needs to take. Evidence, not inference:
+    # a clarification event in the audit trail, a draft currently held, the
+    # NEEDS_INFO state itself, or a merged reply (which only the loop produces).
+    saw_clarification = (
+        request.clarification is not None
+        or request.state is RequestState.NEEDS_INFO
+        or request.reply_received
+        or any(event.event in _CLARIFICATION_EVENTS for event in mine)
+    )
+
     rows: list[Json] = []
     current_marked = False
     for key, label, event_name, index, pending_label in TIMELINE:
+        if key in _CLARIFICATION_STEPS and not saw_clarification:
+            continue
         event = _occurrence(mine, event_name, index)
         email = emails.get(key)
         at = email.received_at if email is not None else (event.at if event else None)
