@@ -275,12 +275,21 @@ class ClarificationWorkflow:
         drafts and shows; a human decides. There is no timeout into approval and
         no caller that can reach this without naming who approved.
 
-        Releasing the draft means handing it to the `EmailSink`. In this build
-        that sink collects in memory and performs no I/O — **no email is sent by
-        any code in this repository.** The call site exists so that a future
-        real sender plugs in behind the approval gate rather than in front of it.
+        Releasing the draft means handing it to the `EmailSink`, which in a live
+        run really does deliver over Gmail.
+
+        **The draft is consumed only once the sink has accepted it.** It used to
+        be popped on the way in, which meant a send that raised — an expired
+        credential, a scope the token does not hold, a provider outage — took
+        the pending draft with it. The request stayed in NEEDS_INFO with nothing
+        left to approve: the operator's next click answered "no clarification
+        draft is awaiting approval", the client's reply stayed deferred behind a
+        clarification that had never gone out, and the audit trail recorded an
+        approval with no send beside it. Holding the draft until the send
+        succeeds makes the operation retryable, which is the correct shape for
+        something that depends on a remote service.
         """
-        held = self._pending.pop(request_id, None)
+        held = self._pending.get(request_id)
         if held is None:
             raise IllegalTransition(f"no clarification draft is awaiting approval for {request_id}")
 
@@ -295,6 +304,10 @@ class ClarificationWorkflow:
             {"by": by, "fields": [u.field.value for u in held.message.unresolved]},
         )
 
+        # Everything after this line is contingent on the provider accepting the
+        # message. If `send` raises, it propagates: the draft is still pending,
+        # the state is still NEEDS_INFO, nothing was persisted, and the operator
+        # can approve again once the cause is fixed.
         self._sink.send(
             OutboundMessage(
                 to_address=held.to_address,
@@ -303,6 +316,9 @@ class ClarificationWorkflow:
                 in_reply_to=held.in_reply_to,
             )
         )
+
+        # Sent. Only now is the draft spent, so it cannot be released twice.
+        del self._pending[request_id]
         state = self._advance(request_id, stored.state, RequestState.CLARIFICATION_SENT)
         self._emit(request_id, AuditEventType.CLARIFICATION_SENT, {"approved_by": by})
         self._store.save_request(stored.model_copy(update={"state": state}))
