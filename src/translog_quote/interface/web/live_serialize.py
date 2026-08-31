@@ -443,6 +443,7 @@ def request_summary(request: LiveRequest, *, in_demonstration: bool = True) -> J
         # Why this request has no rates, when it has none. Reported rather
         # than hidden: a request stuck before pricing looks idle otherwise.
         "rate_failure": request.rate_failure,
+        "manual_review_notes": list(request.manual_review_notes),
         "waiting_replies": len(request.waiting_replies),
         "awaiting_decision": request.awaiting_quotation_decision,
         "settled": request.is_settled,
@@ -470,6 +471,7 @@ def request_detail(session: LiveSession, request: LiveRequest) -> Json:
         "carried": [FIELD_TITLES.get(f, f) for f in request.carried_fields],
         "shipment": shipment_json(request),
         "rate_failure": request.rate_failure,
+        "manual_review_notes": list(request.manual_review_notes),
         "validation": validation_json(request.validation),
         "clarification": None
         if clarification is None

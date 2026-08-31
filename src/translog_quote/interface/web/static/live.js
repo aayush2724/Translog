@@ -355,6 +355,10 @@ function requestCard(request) {
       request.rate_failure
         ? el("p", { class: "waiting-note" }, `Rate search could not run: ${request.rate_failure}`)
         : null,
+      request.manual_review_notes && request.manual_review_notes.length
+        ? el("p", { class: "waiting-note" },
+            "Handed to manual review — the client's answer could not be used automatically.")
+        : null,
       request.not_enquiry_reason
         ? el("p", { class: "not-enquiry" }, request.not_enquiry_reason)
         : null));
@@ -564,6 +568,21 @@ function rateCard(rate, chosen) {
       rate.currency ? el("span", { class: "price-currency" }, rate.currency) : null));
 }
 
+function sectionManualReview(detail) {
+  /* Why a person has to take over, in the model's own words. Rendered only
+     for a request that was actually escalated; an empty card would imply a
+     problem where there is none. */
+  const notes = detail.manual_review_notes;
+  if (!notes || !notes.length) return null;
+  return card(
+    [el("h2", null, "Manual review required"), pill("HANDED TO A PERSON", "amber")],
+    el("p", null,
+      "The client replied, but their answer could not be used automatically. " +
+      "Asking the same question again will not resolve it — this request needs a person."),
+    el("ul", { class: "issue-list" }, ...notes.map((note) => el("li", null, note)))
+  );
+}
+
 function sectionApproval(detail) {
   const approval = detail.approval;
   if (!approval) return null;
@@ -668,6 +687,7 @@ function renderDetail() {
     sectionClarification(detail),
     sectionReply(detail),
     sectionMerged(detail),
+    sectionManualReview(detail),
     sectionRates(detail),
     sectionApproval(detail),
     sectionQuotation(detail),

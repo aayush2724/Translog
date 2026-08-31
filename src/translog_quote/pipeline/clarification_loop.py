@@ -72,6 +72,11 @@ class TurnOutcome:
     clarification: ClarificationMessage | None
     round_number: int
 
+    escalation_notes: tuple[str, ...] = ()
+    """The model's own explanation of why a reply's answer could not be used,
+    for each field that sent this request to manual review. Shown to the
+    operator — an escalation nobody can see the reason for is just a stall."""
+
     @property
     def is_complete(self) -> bool:
         return self.state is RequestState.VALIDATED
@@ -157,11 +162,44 @@ class ClarificationWorkflow:
             AuditEventType.EXTRACTION_CALLED,
             {"stated_fields": len(extraction.fields_by_status(FieldStatus.STATED))},
         )
-        if not abandoned:
-            state = self._advance(request_id, state, RequestState.EXTRACTED)
-
         # --- everything below is deterministic --------------------------------
         merge = merge_shipment(record, to_extracted_fields(extraction))
+
+        # A reply whose answer could not be used will not be fixed by asking
+        # the same question again. The known instance: a client asked for
+        # dimensions answered with two package sizes — a true fact about their
+        # shipment that the canonical record cannot hold — so extraction
+        # correctly returned AMBIGUOUS (BR-7: never guess), the field stayed
+        # empty, and the loop would have re-sent the identical question to a
+        # client who had already answered it in full. That is a person's
+        # problem to take over, and MANUAL_REVIEW is the state that says so.
+        #
+        # Deliberately narrow: only after a clarification actually went out
+        # (a first-contact enquiry with an ambiguous field is exactly what
+        # clarification exists for), and only for a field that is required,
+        # still missing after this merge, and ambiguous in this extraction —
+        # the client engaged with the question and we still could not use the
+        # answer. Detected before the EXTRACTED advance because the approved
+        # table exits to MANUAL_REVIEW from CLARIFICATION_SENT, not from
+        # EXTRACTED.
+        futile: tuple[str, ...] = ()
+        if not abandoned and state is RequestState.CLARIFICATION_SENT:
+            still_missing = validate_shipment(merge.record).missing_fields
+            futile = tuple(
+                field.value
+                for field in still_missing
+                if getattr(extraction, field.value).status is FieldStatus.AMBIGUOUS
+            )
+        if futile:
+            state = self._advance(request_id, state, RequestState.MANUAL_REVIEW)
+            notes = [note for field in futile if (note := getattr(extraction, field).note)]
+            self._emit(
+                request_id,
+                AuditEventType.MANUAL_REVIEW_ESCALATED,
+                {"fields": list(futile), "notes": notes},
+            )
+        elif not abandoned:
+            state = self._advance(request_id, state, RequestState.EXTRACTED)
         self._emit(
             request_id,
             AuditEventType.RECORD_MERGED,
@@ -184,7 +222,7 @@ class ClarificationWorkflow:
         analysis = identify_unresolved(validation, extraction, merge.conflicts)
 
         clarification: ClarificationMessage | None = None
-        if not abandoned:
+        if not abandoned and not futile:
             state, clarification = self._decide(request_id, state, email, analysis)
 
         self._store.save_request(
@@ -206,6 +244,9 @@ class ClarificationWorkflow:
             analysis=analysis,
             clarification=clarification,
             round_number=self._rounds.get(request_id, 0),
+            escalation_notes=tuple(
+                note for field in futile if (note := getattr(extraction, field).note)
+            ),
         )
 
     # ------------------------------------------------------------- decision --

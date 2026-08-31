@@ -33,6 +33,7 @@ class AuditEventType(StrEnum):
     APPROVAL_DECIDED = "approval_decided"
     QUOTATION_SENT = "quotation_sent"
     CLIENT_RESPONDED = "client_responded"
+    MANUAL_REVIEW_ESCALATED = "manual_review_escalated"
     STATE_CHANGED = "state_changed"
     FAILED = "failed"
 

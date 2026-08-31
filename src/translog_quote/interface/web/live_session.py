@@ -138,6 +138,10 @@ class LiveRequest:
     stated_count: int = 0
     clarification: ClarificationMessage | None = None
     clarification_sent_by: str | None = None
+    manual_review_notes: tuple[str, ...] = ()
+    """Why this request was handed to a person: the model's own explanation of
+    the answer it could not use. Empty for every request that was not."""
+
     rates: RateSearchOutcome | None = None
     rate_failure: str | None = None
     """Why rate search could not run for this request, if it could not.
@@ -475,6 +479,8 @@ class LiveSession:
         request.latest_email = email
         request.stated_count = len(outcome.merge.changed) + request.stated_count
         request.clarification = outcome.clarification
+        if outcome.escalation_notes:
+            request.manual_review_notes = outcome.escalation_notes
         request.messages.append(email.message_id)
 
         if not request.subject:
