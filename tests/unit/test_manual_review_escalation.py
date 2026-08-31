@@ -228,6 +228,119 @@ def test_first_contact_ambiguity_still_clarifies(settings: Settings) -> None:
     assert request.awaiting_clarification_approval is True  # type: ignore[attr-defined]
 
 
+# --- the exact production structure: two labelled shipment groups ---------------
+
+#: The reply from the live test that exposed the timeline defect, structure
+#: verbatim (identities fictional). Extraction of this text was verified
+#: against the real model, twice: dimensions -> AMBIGUOUS with a note, pcs ->
+#: AMBIGUOUS, delivery type and address -> STATED. The scripted extraction
+#: below mirrors exactly that observed result.
+TWO_SHIPMENTS_REPLY_BODY = """Dear Translog Express Team,
+
+Please find the requested details below.
+
+For the first shipment:
+Dimensions: 48 x 36 x 30 inches, 8 packages
+
+For the second shipment:
+Dimensions: 32 x 24 x 20 inches, 6 packages
+
+Delivery type: Door delivery
+
+Delivery address:
+Bahnhofstrasse 45
+8001 Zurich
+Switzerland
+
+Kind regards,
+Test Client"""
+
+TWO_SHIPMENTS_NOTE = (
+    "The email provides dimensions for two separate shipments rather than a "
+    "single set of dimensions."
+)
+
+
+def two_shipments_extraction() -> ExtractionResult:
+    """What the real model returned for TWO_SHIPMENTS_REPLY_BODY."""
+    return ExtractionResult(
+        dimensions_in=ExtractedValue[CargoDimensions].ambiguous(note=TWO_SHIPMENTS_NOTE),
+        pcs=ExtractedValue[int].ambiguous(
+            note="The email lists piece counts for two different shipments."
+        ),
+        delivery_type=ExtractedValue[DeliveryType].stated(DeliveryType.DOOR),
+        delivery_address=ExtractedValue[str].stated("Bahnhofstrasse 45, 8001 Zurich, Switzerland"),
+    )
+
+
+def test_the_two_shipments_reply_escalates_with_delivery_still_merged(
+    settings: Settings,
+) -> None:
+    """The full production scenario: escalate on dimensions, but the parts of
+    the answer that WERE usable — delivery type and address — merge normally."""
+    sink = CollectingEmailSink()
+    reply = REPLY.model_copy(update={"body_text": TWO_SHIPMENTS_REPLY_BODY})
+    # As in the live test: the enquiry stated neither dimensions nor delivery
+    # type, so the clarification asked for both and the reply answers both —
+    # one usably, one not.
+    enquiry_missing_both = enquiry_extraction().model_copy(
+        update={"delivery_type": ExtractedValue[DeliveryType].not_stated()}
+    )
+    session = LiveSession(
+        settings,
+        source=StubSource(ENQUIRY),  # type: ignore[arg-type]
+        sink=sink,
+        extractor=ScriptedExtractor(enquiry_missing_both, two_shipments_extraction()),  # type: ignore[arg-type]
+        resolver=StatedLocationResolver(),
+    )
+    session.poll()
+    request_id = only(session).request_id  # type: ignore[attr-defined]
+    session.approve_clarification(by=APPROVER, request_id=request_id)
+    session._source = StubSource(ENQUIRY, reply)  # type: ignore[assignment,arg-type]
+    session.poll()
+
+    request = only(session)
+    assert request.state is RequestState.MANUAL_REVIEW  # type: ignore[attr-defined]
+    assert request.record.delivery_type is DeliveryType.DOOR  # type: ignore[attr-defined]
+    assert request.record.delivery_address is not None  # type: ignore[attr-defined]
+    assert request.record.dimensions_in is None, "no dimension group may be chosen"  # type: ignore[attr-defined]
+    assert request.rates is None, "rate search must not run"  # type: ignore[attr-defined]
+    assert TWO_SHIPMENTS_NOTE in request.manual_review_notes  # type: ignore[attr-defined]
+    assert len(sink.sent) == 1, "no second clarification, no quotation"
+
+    # Repeat polling changes nothing and sends nothing.
+    session.poll()
+    session.poll()
+    assert only(session).state is RequestState.MANUAL_REVIEW  # type: ignore[attr-defined]
+    assert len(sink.sent) == 1
+
+
+def test_the_timeline_says_manual_review_not_rate_search_pending(
+    settings: Settings,
+) -> None:
+    """The defect the operator actually saw. Backend state was correct; the
+    timeline's first not-done template row rendered as 'Rate search — Pending',
+    promising progress that will never come."""
+    from translog_quote.interface.web.live_serialize import timeline_json
+
+    sink = CollectingEmailSink()
+    session = session_after_reply(settings, sink, ambiguous_dimensions_reply())
+    request = only(session)
+    assert request.state is RequestState.MANUAL_REVIEW  # type: ignore[attr-defined]
+
+    rows = timeline_json(request, session.audit.events)  # type: ignore[arg-type]
+
+    keys = [row["key"] for row in rows]
+    assert keys[-1] == "manual_review"
+    assert rows[-1]["state"] == "current"
+    assert rows[-1]["waiting_on"] == "operator"
+    assert "rate_search" not in keys, "a step that will not happen is not shown as coming"
+    assert "quotation_sent" not in keys
+    done = [row["key"] for row in rows if row["state"] == "done"]
+    assert "clarification_sent" in done
+    assert "reply_received" in done
+
+
 def test_a_clean_answer_still_proceeds_to_rate_search(settings: Settings) -> None:
     sink = CollectingEmailSink()
     session = session_after_reply(settings, sink, clean_dimensions_reply())

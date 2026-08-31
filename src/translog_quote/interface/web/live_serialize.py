@@ -358,6 +358,25 @@ def timeline_json(request: LiveRequest, events: list[AuditEvent]) -> list[Json]:
                 "waiting_on": _WAITING_ON.get(key) if current else None,
             }
         )
+
+    if request.state is RequestState.MANUAL_REVIEW:
+        # Automated processing has stopped, and the timeline must say so.
+        # Without this, the first not-yet-done template row rendered as the
+        # current step — a manual-review request read "Rate search — Pending",
+        # which is a promise the workflow will not keep. The rows that already
+        # happened stay; the ones that will not happen automatically are
+        # replaced by the one true statement about where the request is.
+        rows = [row for row in rows if row["state"] == "done"]
+        rows.append(
+            {
+                "key": "manual_review",
+                "label": "Manual review",
+                "state": "current",
+                "at": None,
+                "note": "Handed to a person — automated processing has stopped",
+                "waiting_on": "operator",
+            }
+        )
     return rows
 
 
