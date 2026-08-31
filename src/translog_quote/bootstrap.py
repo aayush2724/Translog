@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 from translog_quote.config import Settings, load_settings
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Collection
     from pathlib import Path
 
     from translog_quote.domain.conversation import CorrelationPolicy
@@ -93,7 +93,12 @@ def build_fixture_email_source(settings: Settings, scenario: str) -> EmailSource
     return FixtureEmailSource(settings.demo.email_fixtures_dir / scenario)
 
 
-def build_gmail_email_source(settings: Settings, *, max_results: int | None = None) -> EmailSource:
+def build_gmail_email_source(
+    settings: Settings,
+    *,
+    max_results: int | None = None,
+    sent_by_us: Callable[[], Collection[str]] | None = None,
+) -> EmailSource:
     """An `EmailSource` over the configured Gmail **test** mailbox (Phase 10.3).
 
     Receive-only, and never built implicitly: the fixture source stays the
@@ -127,6 +132,9 @@ def build_gmail_email_source(settings: Settings, *, max_results: int | None = No
         mailbox_address=gmail.test_address,
         query=gmail.query,
         max_results=gmail.max_results if max_results is None else max_results,
+        # What this run has already sent, so a mailbox that both reads and
+        # sends does not feed Translog its own words back as a client's.
+        sent_by_us=sent_by_us,
     )
 
 

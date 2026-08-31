@@ -310,6 +310,22 @@ class GmailEmailSink:
         self._transport = transport
         self._sender_address = sender_address
         self.sent: list[OutboundMessage] = []
+        self.sent_provider_ids: set[str] = set()
+        """Gmail's own id for every message this sink delivered.
+
+        Kept so the inbound source can refuse to read our own outbound mail
+        back in. That is not hypothetical: when Translog reads and sends from
+        one mailbox — the shape this demo runs in — a clarification we send
+        arrives in our own inbox labelled INBOX *and* SENT, which the sent-mail
+        guard deliberately allows through. Correlated by its own In-Reply-To it
+        then merges nothing into the request it belongs to, drops it back to
+        NEEDS_INFO with a fresh draft, and strands the client's real reply
+        behind it.
+
+        Gmail's id is the key rather than the RFC Message-ID because Gmail
+        rewrites the latter on send: a Message-ID we choose never survives, so
+        it cannot be matched afterwards. The id in the send response can.
+        """
 
     @property
     def sender_address(self) -> str:
@@ -317,7 +333,10 @@ class GmailEmailSink:
 
     def send(self, message: OutboundMessage) -> None:
         raw = build_mime(message, sender_address=self._sender_address)
-        self._transport.post_json(SEND_PATH, {"raw": raw})
+        accepted = self._transport.post_json(SEND_PATH, {"raw": raw})
+        provider_id = accepted.get("id")
+        if isinstance(provider_id, str) and provider_id:
+            self.sent_provider_ids.add(provider_id)
         # Appended only after the provider accepted it. A failed send must not
         # look like a delivered one in the run's own record of what went out.
         self.sent.append(message)

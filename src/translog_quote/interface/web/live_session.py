@@ -53,6 +53,8 @@ from translog_quote.observability import get_logger
 from translog_quote.pipeline import RateSearchStage
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     from translog_quote.config import Settings
     from translog_quote.domain.clarification import ClarificationMessage
     from translog_quote.domain.email import RawEmail
@@ -432,9 +434,19 @@ class LiveSession:
 
     def _fetch(self) -> tuple[RawEmail, ...]:
         source = self._source or bootstrap.build_gmail_email_source(
-            self._settings, max_results=MESSAGE_LIMIT
+            self._settings, max_results=MESSAGE_LIMIT, sent_by_us=self._sent_provider_ids
         )
         return source.fetch_new()
+
+    def _sent_provider_ids(self) -> Collection[str]:
+        """Provider ids of everything this session has delivered.
+
+        Empty for a sink that does not track them — the collecting sink used in
+        tests, and any future one — so the filter simply does nothing rather
+        than requiring every sink to implement it.
+        """
+        ids = getattr(self._sink, "sent_provider_ids", None)
+        return ids if isinstance(ids, set | frozenset | tuple | list) else ()
 
     def _route(self, email: RawEmail) -> None:
         routed = self._router.route(email)

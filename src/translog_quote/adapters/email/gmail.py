@@ -51,7 +51,7 @@ from translog_quote.errors import ContractViolation, PermanentFailure, Transient
 from translog_quote.observability import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Collection
     from pathlib import Path
 
 _log = get_logger("adapters.email.gmail")
@@ -525,6 +525,7 @@ class GmailEmailSource:
         mailbox_address: str,
         query: str = "in:inbox",
         max_results: int = 1,
+        sent_by_us: Callable[[], Collection[str]] | None = None,
     ) -> None:
         if not mailbox_address:
             raise PermanentFailure(
@@ -534,6 +535,7 @@ class GmailEmailSource:
         self._mailbox_address = mailbox_address
         self._query = query
         self._max_results = max_results
+        self._sent_by_us_ids = sent_by_us
         self._metadata: dict[str, GmailMessageMetadata] = {}
 
     def provider_metadata(self, message_id: str) -> GmailMessageMetadata | None:
@@ -569,6 +571,14 @@ class GmailEmailSource:
                 _log.info("Gmail message %s is sent/draft mail; skipped", gmail_id)
                 continue
 
+            if self._sent_by_us(gmail_id):
+                # A message this run delivered, arriving in our own inbox
+                # because Translog reads and sends from one mailbox. It is our
+                # words, not a client's, and reading it back as an inbound
+                # message corrupts the request it correlates to.
+                _log.info("Gmail message %s was sent by this run; skipped", gmail_id)
+                continue
+
             raw = parse_gmail_message(full)
             thread_id = full.get("threadId")
             self._metadata[raw.message_id] = GmailMessageMetadata(
@@ -593,6 +603,17 @@ class GmailEmailSource:
                 "The authorized Gmail account does not match TRANSLOG_GMAIL__TEST_ADDRESS. "
                 "Refusing to read this mailbox."
             )
+
+    def _sent_by_us(self, gmail_id: str) -> bool:
+        """Whether this run delivered this exact message.
+
+        Asked as a callable rather than handed a snapshot: the set grows every
+        time a clarification or quotation goes out, and a source built at the
+        start of a poll must see what was sent since.
+        """
+        if self._sent_by_us_ids is None:
+            return False
+        return gmail_id in self._sent_by_us_ids()
 
     @staticmethod
     def _is_own_outbound(message: dict[str, Any]) -> bool:
