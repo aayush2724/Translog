@@ -418,15 +418,60 @@ def _html_to_text(markup: str) -> str:
     return "\n".join(line for line in lines if line)
 
 
+#: The attribution line a mail client writes above quoted history —
+#: "On Mon, 31 Aug 2026 at 18:13, someone <a@b.com> wrote:". Matched at the
+#: start of a line, allowing the wrapping every client applies to long ones.
+_QUOTE_ATTRIBUTION = re.compile(
+    r"^\s*On .{0,200}?\bwrote:\s*$",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def strip_quoted_reply(text: str) -> str:
+    """A reply's own words, without the thread quoted underneath it.
+
+    Every mail client appends the message being answered, so a two-line reply
+    arrives carrying the entire conversation. Extraction is run on this text,
+    and the quoted part is not the client speaking — it is *us*, or an older
+    message, and reading it changes answers.
+
+    That is not theoretical. A client asked for "the package dimensions in
+    inches (length x width x height)" replied "Dimensions: 42 x 28 x 24 inches
+    per package", and the model — reading our own quoted question beneath the
+    answer — returned `ambiguous` with the note "does not label them as length,
+    width, or height". The field stayed empty, the shipment stayed incomplete,
+    and the request never reached rate search. On the same text with the quote
+    removed it extracts cleanly.
+
+    Deliberately conservative. Only the two universal markers are removed — the
+    ``>`` prefix and the attribution line that introduces the quote — and if
+    that leaves nothing, the original is returned unchanged. Losing a client's
+    words is far worse than reading a few extra: an over-eager stripper that
+    ate an unusually formatted reply would fail silently and look like a model
+    error.
+    """
+    match = _QUOTE_ATTRIBUTION.search(text)
+    head = text[: match.start()] if match else text
+
+    kept = [line for line in head.splitlines() if not line.lstrip().startswith(">")]
+    stripped = "\n".join(kept).strip()
+    return stripped or text.strip()
+
+
 def _extract_body_text(payload: dict[str, Any]) -> str:
     """The message's readable text: ``text/plain`` preferred, stripped
-    ``text/html`` as the fallback."""
+    ``text/html`` as the fallback.
+
+    Quoted history is removed here, at the boundary that understands mail
+    formats, so nothing above this layer has to know that replies carry their
+    own conversation with them.
+    """
     plain = _collect_text_parts(payload, "text/plain")
     if plain:
-        return "\n".join(plain).strip("\n")
+        return strip_quoted_reply("\n".join(plain).strip("\n"))
     html_parts = _collect_text_parts(payload, "text/html")
     if html_parts:
-        return _html_to_text("\n".join(html_parts))
+        return strip_quoted_reply(_html_to_text("\n".join(html_parts)))
     raise ContractViolation("Gmail message has no readable text part")
 
 
