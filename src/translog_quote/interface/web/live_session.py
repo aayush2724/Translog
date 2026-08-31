@@ -367,18 +367,26 @@ class LiveSession:
         """Whether this request is one the current demonstration follows."""
         return self._demonstration.current.focuses(request_id)
 
-    def approve_clarification(self, *, by: str) -> None:
-        """Release the held draft on a named person's authority.
+    def approve_clarification(self, *, by: str, request_id: str | None = None) -> None:
+        """Release one held draft on a named person's authority.
 
         The email leaves here — through the existing send-only Gmail sink, from
         the server. This is the one and only path out of NEEDS_INFO, and it has
         no default for `by`.
+
+        ``request_id`` names *which* draft. It is not optional in practice: the
+        browser always sends the request the operator was looking at, and
+        without it this method used to release whichever draft happened to be
+        first in the dictionary. With several enquiries awaiting clarification
+        — the normal state of a mailbox with more than one open conversation —
+        that meant clicking Approve on one request mailed a different client
+        about a different shipment, in that client's own thread.
         """
         who = by.strip()
         if not who:
             raise LiveSequenceError("A clarification can only be approved by a named person.")
 
-        request = self._one_awaiting_clarification()
+        request = self._awaiting_clarification(request_id)
         self._router.approve(request.request_id, by=who)
 
         stored = self._working.get_request(request.request_id)
@@ -569,10 +577,30 @@ class LiveSession:
                 return blocked[candidate]
         return None
 
-    def _one_awaiting_clarification(self) -> LiveRequest:
+    def _awaiting_clarification(self, request_id: str | None) -> LiveRequest:
+        """The draft to release, named rather than guessed.
+
+        Falling back to "the only one" is safe and keeps a single-request
+        demonstration working from a client that sends no id. Falling back to
+        "the first one" is not, and was the defect: dictionary order is not a
+        decision anybody made, and the consequence is a real email to a real
+        client about the wrong shipment.
+        """
         held = [r for r in self.requests.values() if r.awaiting_clarification_approval]
         if not held:
             raise LiveSequenceError("No clarification draft is awaiting approval.")
+
+        if request_id is not None:
+            for candidate in held:
+                if candidate.request_id == request_id:
+                    return candidate
+            raise LiveSequenceError(f"{request_id} has no clarification awaiting approval.")
+
+        if len(held) > 1:
+            raise LiveSequenceError(
+                "Several requests are awaiting clarification; the one to approve "
+                "must be named. Open the request and approve it from there."
+            )
         return held[0]
 
     def _restore(self) -> None:

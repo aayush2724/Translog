@@ -112,8 +112,16 @@ def _live_start_demonstration(session: LiveSession, body: dict[str, object]) -> 
 
 
 def _live_approve_clarification(session: LiveSession, body: dict[str, object]) -> None:
-    """Release a held clarification. Requires a named person; no default."""
-    session.approve_clarification(by=str(body.get("by", "")))
+    """Release a held clarification. Requires a named person; no default.
+
+    `request_id` says which draft. The page has always sent it and this handler
+    used to drop it on the floor, which is how approving the request on screen
+    could mail a different client about a different shipment.
+    """
+    session.approve_clarification(
+        by=str(body.get("by", "")),
+        request_id=_str_or_none(body.get("request_id")),
+    )
 
 
 def _live_decide(session: LiveSession, body: dict[str, object]) -> None:
