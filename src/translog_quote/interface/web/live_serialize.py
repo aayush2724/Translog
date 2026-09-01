@@ -527,13 +527,21 @@ def request_detail(session: LiveSession, request: LiveRequest) -> Json:
 def snapshot(session: LiveSession, *, selected: str | None = None) -> Json:
     """Everything the browser may know, in one shape.
 
-    Only the requests this demonstration is following. Not a display filter:
-    the session drops out-of-focus work when a demonstration starts and never
-    restores it, so this reports what is actually active rather than hiding
-    what is not. Anything from an earlier demonstration remains in the durable
-    store, correlatable and unaltered — it is simply not this session's work.
+    Only the requests this demonstration is following, and only the ones still
+    in play. Not a display filter: the session drops out-of-focus work when a
+    demonstration starts and never restores it, and a settled request is one
+    nothing further can happen to — the quotation went out or the gate declined
+    it, and neither the poll nor the rate pass will touch it again. Anything
+    removed here remains in the durable store and the audit trail, correlatable
+    and unaltered.
+
+    `selected` is deliberately looked up against every request the session
+    holds rather than against this list. Approving a quotation settles it, and
+    an operator reading the confirmation of what they just sent must not have
+    it disappear from under them; it leaves the *desk*, not the record.
     """
-    focused = [r for r in session.requests.values() if session.in_demonstration(r.request_id)]
+    followed = [r for r in session.requests.values() if session.in_demonstration(r.request_id)]
+    active = [r for r in followed if not r.is_settled]
     chosen = session.requests.get(selected) if selected else None
     demonstration = session.demonstration
     return {
@@ -542,7 +550,7 @@ def snapshot(session: LiveSession, *, selected: str | None = None) -> Json:
             "started_at": demonstration.started_at.isoformat()
             if demonstration.started_at
             else None,
-            "following": len(focused),
+            "following": len(active),
             "outside_messages": session.outside_demonstration,
         },
         "mode": {
@@ -558,15 +566,15 @@ def snapshot(session: LiveSession, *, selected: str | None = None) -> Json:
             },
             "approver_address": session.approver_address,
         },
-        "requests": [request_summary(request) for request in focused],
+        "requests": [request_summary(request) for request in active],
         "selected": None if chosen is None else request_detail(session, chosen),
         "audit": audit_json(session.audit.events),
         "poll": {
             "new_messages": session.last_poll_new,
             "skipped_internal": session.skipped_internal,
             "deferred": session.blocked_messages,
-            "enquiries": sum(1 for request in focused if request.looks_like_an_enquiry),
-            "unrecognised": sum(1 for request in focused if not request.looks_like_an_enquiry),
+            "enquiries": sum(1 for request in active if request.looks_like_an_enquiry),
+            "unrecognised": sum(1 for request in active if not request.looks_like_an_enquiry),
             # The mailbox is read by a background thread now, so the page has
             # no click to infer liveness from. These two are how a dashboard
             # that has not moved tells "nothing arrived" from "nothing is

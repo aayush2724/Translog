@@ -1880,6 +1880,60 @@ def test_the_snapshot_carries_this_session_and_admits_what_it_skipped(
     assert len(ids) == 1, "the earlier request is not active work in this session"
 
 
+def test_a_settled_request_leaves_the_dashboard(after_reply: LiveSession) -> None:
+    """The desk shows work in play. Once the quotation has gone out there is
+    nothing left for anybody to do with it, and a finished card sitting on the
+    dashboard is the next demonstration's clutter."""
+    request_id = next(iter(after_reply.requests))
+    assert live_serialize.snapshot(after_reply)["requests"], "precondition: it is listed"
+
+    after_reply.decide(request_id, choice="approve", by=APPROVER)
+
+    assert live_serialize.snapshot(after_reply)["requests"] == []
+    assert live_serialize.snapshot(after_reply)["demonstration"]["following"] == 0  # type: ignore[index]
+
+
+def test_a_declined_request_leaves_the_dashboard_too(after_reply: LiveSession) -> None:
+    """Settled is settled: a decline sends nothing and is equally finished."""
+    request_id = next(iter(after_reply.requests))
+
+    after_reply.decide(request_id, choice="decline", by=APPROVER, reason="not this time")
+
+    assert live_serialize.snapshot(after_reply)["requests"] == []
+
+
+def test_a_settled_request_is_still_readable_by_id(after_reply: LiveSession) -> None:
+    """It leaves the desk, not the record. An operator reading the confirmation
+    of the quotation they just approved must not have it vanish under them."""
+    request_id = next(iter(after_reply.requests))
+    after_reply.decide(request_id, choice="approve", by=APPROVER)
+
+    detail = live_serialize.snapshot(after_reply, selected=request_id)["selected"]
+
+    assert detail is not None
+    assert detail["decision"]["sent"] is True  # type: ignore[index]
+    assert detail["status"]["label"] == "QUOTATION SENT"  # type: ignore[index]
+
+
+def test_an_unfinished_request_stays_on_the_dashboard(after_reply: LiveSession) -> None:
+    """Only the two terminal states leave. A request waiting at the approval
+    gate is exactly the work the desk exists to show."""
+    assert len(live_serialize.snapshot(after_reply)["requests"]) == 1  # type: ignore[arg-type]
+
+
+def test_a_manual_review_request_stays_on_the_dashboard(
+    settings: Settings, sink: CollectingEmailSink
+) -> None:
+    """Handed to a person is not finished — it is the one state that most needs
+    somebody to see it."""
+    session = session_for(settings, sink)
+    session.poll()
+    request = only_request(session)
+    request.state = RequestState.MANUAL_REVIEW  # type: ignore[attr-defined]
+
+    assert len(live_serialize.snapshot(session)["requests"]) == 1  # type: ignore[arg-type]
+
+
 def test_a_fresh_untouched_request_is_flagged_as_new(
     settings: Settings, sink: CollectingEmailSink
 ) -> None:

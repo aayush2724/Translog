@@ -498,8 +498,21 @@ def test_the_serialised_state_matches_the_backend_at_each_stage(settings: Settin
     request_id = find(session, "Delhi").request_id  # type: ignore[attr-defined]
 
     def row() -> dict[str, object]:
+        """The request as the dashboard lists it, while it is still work."""
         payload = snapshot(session, selected=request_id)
         return next(r for r in payload["requests"] if r["request_id"] == request_id)  # type: ignore[index,union-attr]
+
+    def detail() -> dict[str, object]:
+        """The request as the operator reads it, listed or not.
+
+        A settled request leaves the dashboard — nothing further happens to it,
+        and a finished card is the next demonstration's clutter — but it stays
+        addressable, because the person who just approved a quotation is
+        looking at the confirmation of what they sent.
+        """
+        payload = snapshot(session, selected=request_id)
+        assert payload["selected"] is not None
+        return payload["selected"]  # type: ignore[return-value]
 
     assert row()["status"]["state"] == "needs_info"  # type: ignore[index]
     assert row()["awaiting_clarification"] is True
@@ -514,5 +527,6 @@ def test_the_serialised_state_matches_the_backend_at_each_stage(settings: Settin
     assert row()["awaiting_decision"] is True
 
     session.decide(request_id, choice="approve", by=APPROVER)
-    assert row()["status"]["state"] == "quotation_sent"  # type: ignore[index]
-    assert row()["settled"] is True
+    assert detail()["status"]["state"] == "quotation_sent"  # type: ignore[index]
+    assert detail()["decision"]["sent"] is True  # type: ignore[index]
+    assert snapshot(session)["requests"] == [], "and the desk is clear again"
