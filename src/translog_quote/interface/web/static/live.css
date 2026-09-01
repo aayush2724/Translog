@@ -368,14 +368,6 @@ body { background: var(--wc-bg); color: var(--wc-ink); }
 .btn-primary:hover:not(:disabled) { background: var(--wc-accent-deep); }
 :focus-visible { outline-color: var(--wc-accent); }
 
-/* app.css draws this in the scripted POC's warm stone; against the neutral
-   canvas here it reads as a stray tan line. */
-.footer {
-  max-width: 980px;
-  border-top: 1px solid var(--wc-line);
-  color: #9aa3b2;
-}
-
 h1 { font-size: 1.3rem; font-weight: 600; }
 .page-head { margin-bottom: 1.25rem; }
 .request-title { font-size: 1.05rem; font-weight: 600; }
