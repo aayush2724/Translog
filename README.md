@@ -5,19 +5,20 @@ concept**. A client emails a shipment request; the system understands the email,
 asks for anything missing, searches for rates, selects the fastest eligible one,
 and stops so a human can approve before the quotation reaches the client.
 
-> **Status: the workflow runs end to end against real Gmail.**
-> A client emails a real mailbox; Qwen extracts it; deterministic validation
-> finds what is missing; a person approves a clarification that is really sent;
-> the client's reply is correlated by RFC header chain and merged; rates are
-> simulated and clearly labelled; a person approves or declines; and only on
-> approval does a quotation reach the client. Drivable from the terminal or
-> from a browser.
+> **Status: the workflow runs end to end against real Gmail, on its own.**
+> A client emails a real mailbox; the server notices without being asked; Qwen
+> extracts it; deterministic validation finds what is missing; a person approves
+> a clarification that is really sent; the client's reply is detected, correlated
+> by RFC header chain and merged; rates are simulated and clearly labelled; a
+> person approves or declines; and only on approval does a quotation reach the
+> client. Drivable from the terminal, or from a browser where the only two
+> clicks in the whole flow are the two human gates.
 >
 > Two things are still genuinely absent, and neither is faked: **the real
 > WebCargo integration** (no published contract) and **client ACCEPT / REJECT**
 > handling. See [What is not implemented](#what-is-not-implemented).
 >
-> 995 tests pass with no credentials configured; a model or a mailbox is
+> 1,180 tests pass with no credentials configured; a model or a mailbox is
 > reached **only** when explicitly configured.
 
 ---
@@ -37,7 +38,10 @@ client's acceptance or rejection.
 There is no client authentication, no client portal, and no customer account
 system in this proof of concept, and none is planned for it. The browser UI that
 exists is the quotation maker's own console — an internal operator view of the
-same workflow the terminal drives, bound to localhost. No client ever sees it.
+same workflow the terminal drives. It binds to localhost by default, and a
+deployed hostname has to be declared in `TRANSLOG_ALLOWED_HOSTS` before the
+server will accept a single state-changing request from it. No client ever
+sees it.
 
 The AI has exactly one job: turning unstructured email into structured fields. It
 does not decide whether a shipment is valid, choose an airline, rank rates, approve
@@ -145,7 +149,8 @@ Everything in this list exists, is typed, and is covered by tests.
 | **Terminal demos** — extraction, clarification, rates, and the full Gmail flow | `interface/demo/` |
 | **Web POC (scripted)** — the workflow over a fictional scenario, no credentials | `interface/web/`, `--` default |
 | **Web UI (live)** — the real Gmail workflow, driven from a browser | `interface/web/live_session.py`, `--live` |
-| **Demonstration scoping** — focus one enquiry without deleting or naming anything | `interface/web/demonstration.py` |
+| **Automatic ingestion** — the server reads the mailbox on a timer; no control to press | `interface/web/live_poller.py` |
+| **Session scoping** — the cutoff is the moment the process starts, so an inbox full of history is out of scope without deleting or naming anything | `interface/web/demonstration.py` |
 
 ## What is not implemented
 
@@ -198,13 +203,25 @@ send and the send credential cannot read. Setup:
 | `reset-state` | Clear local demo state. Touches no mailbox and no credential |
 
 In the browser there is nothing to press to make the workflow run. Starting the
-server fixes the demonstration's cutoff at that moment and starts a background
-poll, so mail already in the inbox is out of scope and every enquiry sent
-afterwards is read, extracted and validated on its own. The two gates appear as
-cards with an approver-name field, and they are the only two clicks in the
-whole demonstration. Simulated rates carry
-`SIMULATED WEBCARGO DATA — DEMO ONLY` everywhere they are shown, including in
-the client's quotation email.
+server fixes the session's cutoff at that moment and starts a background poll,
+so mail already in the inbox is out of scope and every enquiry sent afterwards
+is read, extracted and validated on its own. The page watches the state the
+server produces, so a request appears, advances and reaches the approval gate
+while nobody touches the keyboard.
+
+The desk shows work in play and nothing else. It opens on *Waiting for new
+enquiry*; a request leaves it once the quotation has gone out or the gate has
+declined one, and stays readable by reference. The two gates appear as cards
+with an approver-name field, and they are the only two clicks in the whole
+demonstration.
+
+`TRANSLOG_DEMO__POLL_INTERVAL_SECONDS` sets how often the mailbox is read
+(default 10). A poll skips anything it has already handled before calling the
+model, so an idle demonstration costs Gmail requests and no model calls.
+
+Simulated rates carry `SIMULATED WEBCARGO DATA — DEMO ONLY` everywhere they are
+shown — beside every figure, on the approval card, and in the client's
+quotation email.
 
 ## Validation
 
@@ -437,7 +454,7 @@ Secrets come from the environment and are never committed.
 .venv/bin/python -m pytest
 ```
 
-995 tests pass with nothing configured. No model is called and no mailbox is
+1,180 tests pass with nothing configured. No model is called and no mailbox is
 contacted unless credentials are explicitly set.
 
 The suite covers:
@@ -467,6 +484,11 @@ The suite covers:
   including the client's email; no credential appears in any browser snapshot;
   the static surface is a closed whitelist; the timeline never invents a
   timestamp for a stage that has not happened
+- **Automatic ingestion** — mail that predates the process is never read; a new
+  enquiry and its reply are processed with no action from anybody; an old reply
+  cannot reopen an old request; repeated polls extract nothing twice and send
+  nothing twice; a failing poll is recorded and the polling survives it; and the
+  page carries no control that reads the mailbox
 
 The browser UI has its own suite, run under node, which loads the shipped
 `live.js` into a minimal DOM and drives the real controls:
@@ -508,6 +530,7 @@ Type checking, linting, and formatting:
 | **10.3–10.5** | Real Gmail inbound, reply correlation over a live mailbox | ✅ **COMPLETE** |
 | **11** | Quotation-maker approval, outbound Gmail, quotation sending | ✅ **COMPLETE** |
 | **11.5** | Durable state, browser UI, demonstration scoping | ✅ **COMPLETE** |
+| **11.6** | Automatic mailbox ingestion, startup cutoff, operator console | ✅ **COMPLETE** |
 | **12** | Client ACCEPT / REJECT workflow | Planned |
 | — | Real WebCargo integration | Blocked on a published API contract |
 
