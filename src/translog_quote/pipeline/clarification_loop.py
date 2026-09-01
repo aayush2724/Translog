@@ -47,6 +47,15 @@ if TYPE_CHECKING:
 
 DEFAULT_MAX_ROUNDS = 3
 
+#: Why a request was handed over when the client answered and said nothing the
+#: record could take. Deterministic wording, like every other client-facing and
+#: operator-facing sentence in this workflow: the model has no opinion to quote
+#: here, because the whole point is that it reported nothing at all.
+SILENT_REPLY_NOTE = (
+    "The client replied to the clarification, but the reply stated nothing that "
+    "answers it. Asking the same question again will not resolve it."
+)
+
 
 @dataclass(frozen=True, slots=True)
 class _PendingDraft:
@@ -183,6 +192,7 @@ class ClarificationWorkflow:
         # table exits to MANUAL_REVIEW from CLARIFICATION_SENT, not from
         # EXTRACTED.
         futile: tuple[str, ...] = ()
+        notes: list[str] = []
         if not abandoned and state is RequestState.CLARIFICATION_SENT:
             still_missing = validate_shipment(merge.record).missing_fields
             futile = tuple(
@@ -190,9 +200,32 @@ class ClarificationWorkflow:
                 for field in still_missing
                 if getattr(extraction, field.value).status is FieldStatus.AMBIGUOUS
             )
+            notes = [note for field in futile if (note := getattr(extraction, field).note)]
+
+            # The second way a reply can be futile: it answers, and states
+            # nothing at all. A client asked "whether the cargo is a chemical
+            # product" replied "yes" — a real answer to a human, and no answer
+            # to the record, because the question it refers to is not in the
+            # message. Extraction reported nothing rather than guessing, which
+            # is BR-7 working correctly, and the loop then re-sent the same
+            # question to a client who believed they had answered it. Two more
+            # rounds and two more approval clicks before `max_rounds` gave up.
+            #
+            # Narrow on purpose, and narrower than the ambiguous case above:
+            # the clarification must have gone out, the reply must have stated
+            # *nothing* — not merely too little — the merge must have changed
+            # nothing, and something required must still be missing. A reply
+            # that moved any field at all is progress and stays in the loop.
+            if (
+                not futile
+                and still_missing
+                and not merge.changed
+                and not extraction.fields_by_status(FieldStatus.STATED)
+            ):
+                futile = tuple(field.value for field in still_missing)
+                notes = [SILENT_REPLY_NOTE]
         if futile:
             state = self._advance(request_id, state, RequestState.MANUAL_REVIEW)
-            notes = [note for field in futile if (note := getattr(extraction, field).note)]
             self._emit(
                 request_id,
                 AuditEventType.MANUAL_REVIEW_ESCALATED,
@@ -244,9 +277,7 @@ class ClarificationWorkflow:
             analysis=analysis,
             clarification=clarification,
             round_number=self._rounds.get(request_id, 0),
-            escalation_notes=tuple(
-                note for field in futile if (note := getattr(extraction, field).note)
-            ),
+            escalation_notes=tuple(notes),
         )
 
     # ------------------------------------------------------------- decision --

@@ -40,6 +40,7 @@ from translog_quote.domain.shipment import CargoDimensions, DeliveryType
 from translog_quote.domain.workflow import RequestState
 from translog_quote.interface.web.live_serialize import request_detail, request_summary
 from translog_quote.interface.web.live_session import LiveSession
+from translog_quote.pipeline.clarification_loop import SILENT_REPLY_NOTE
 
 APPROVER = "A. Operator"
 
@@ -349,3 +350,154 @@ def test_a_clean_answer_still_proceeds_to_rate_search(settings: Settings) -> Non
     assert request.state is RequestState.RATE_SELECTED  # type: ignore[attr-defined]
     assert request.manual_review_notes == ()  # type: ignore[attr-defined]
     assert request.awaiting_quotation_decision is True  # type: ignore[attr-defined]
+
+
+# --- a reply that answers, and states nothing -----------------------------------
+#
+# The second way a clarification can be futile, reproduced from production. Two
+# separate requests were asked "whether the cargo is a chemical product" and the
+# client replied, in full:
+#
+#     yes
+#
+# Quoted history is stripped at the mail boundary, so the question that "yes"
+# refers to is not in the message extraction sees. It reported nothing stated —
+# BR-7 working exactly as intended — the merge changed nothing, and the loop
+# re-sent the identical question. One of the two reached round three, each round
+# costing the operator an approval click, before `max_rounds` would have given
+# up. A client who believes they have answered is a person's problem.
+
+
+BARE_YES = RawEmail(
+    message_id="<milan-bare-yes@mail.example.com>",
+    from_address="client@example.com",
+    subject="Re: Air Freight Quote - Bengaluru to Milan",
+    body_text="yes",
+    received_at=datetime(2026, 9, 1, 12, 0, tzinfo=UTC),
+    in_reply_to=ENQUIRY.message_id,
+    references=(ENQUIRY.message_id,),
+)
+
+
+def session_after(
+    settings: Settings,
+    sink: CollectingEmailSink,
+    reply: RawEmail,
+    reply_extraction: ExtractionResult,
+) -> LiveSession:
+    """Enquiry -> clarification approved and sent -> this reply arrives."""
+    session = LiveSession(
+        settings,
+        source=StubSource(ENQUIRY),  # type: ignore[arg-type]
+        sink=sink,
+        extractor=ScriptedExtractor(enquiry_extraction(), reply_extraction),  # type: ignore[arg-type]
+        resolver=StatedLocationResolver(),
+    )
+    session.poll()
+    request = next(iter(session.requests.values()))
+    session.approve_clarification(by=APPROVER, request_id=request.request_id)
+    session._source = StubSource(ENQUIRY, reply)  # type: ignore[assignment,arg-type]
+    session.poll()
+    return session
+
+
+def to_client(sink: CollectingEmailSink) -> list[object]:
+    return [m for m in sink.sent if m.to_address == "client@example.com"]
+
+
+def test_a_reply_that_states_nothing_escalates_instead_of_re_asking(
+    settings: Settings,
+) -> None:
+    """1. The regression: no third question, and no fourth."""
+    sink = CollectingEmailSink()
+    session = session_after(settings, sink, BARE_YES, ExtractionResult())
+    request = only(session)
+
+    assert request.state is RequestState.MANUAL_REVIEW  # type: ignore[attr-defined]
+    assert request.clarification is None, "no further question was drafted"  # type: ignore[attr-defined]
+    assert len(to_client(sink)) == 1, "only the first clarification ever reached the client"
+
+
+def test_the_operator_is_told_why_a_silent_reply_escalated(settings: Settings) -> None:
+    """The model had no opinion to quote — it reported nothing — so the reason
+    is stated deterministically rather than left blank."""
+    session = session_after(settings, CollectingEmailSink(), BARE_YES, ExtractionResult())
+
+    assert only(session).manual_review_notes == (SILENT_REPLY_NOTE,)  # type: ignore[attr-defined]
+
+
+def test_an_ambiguous_reply_still_escalates_with_the_models_own_note(
+    settings: Settings,
+) -> None:
+    """2. The path that already existed is untouched, and still carries the
+    model's explanation rather than the new deterministic one."""
+    session = session_after_reply(settings, CollectingEmailSink(), ambiguous_dimensions_reply())
+    request = only(session)
+
+    assert request.state is RequestState.MANUAL_REVIEW  # type: ignore[attr-defined]
+    assert request.manual_review_notes == (TWO_SIZES_NOTE,)  # type: ignore[attr-defined]
+    assert SILENT_REPLY_NOTE not in request.manual_review_notes  # type: ignore[attr-defined]
+
+
+def test_a_reply_that_answers_still_runs_the_normal_workflow(settings: Settings) -> None:
+    """3. Progress is progress: a usable answer merges, validates and prices."""
+    session = session_after_reply(settings, CollectingEmailSink(), clean_dimensions_reply())
+    request = only(session)
+
+    assert request.state is not RequestState.MANUAL_REVIEW  # type: ignore[attr-defined]
+    assert request.rates is not None, "rate search ran"  # type: ignore[attr-defined]
+
+
+def test_a_reply_that_states_something_else_is_not_futile(settings: Settings) -> None:
+    """The guard is "stated nothing", not "did not answer the question". A reply
+    that moves any field is progress and stays in the clarification loop."""
+    partial = ExtractionResult(pcs=ExtractedValue[int].stated(9))
+    session = session_after(settings, CollectingEmailSink(), BARE_YES, partial)
+    request = only(session)
+
+    assert request.state is RequestState.NEEDS_INFO, "still asking, not escalated"  # type: ignore[attr-defined]
+    assert request.clarification is not None  # type: ignore[attr-defined]
+
+
+def test_no_client_reply_leaves_the_clarification_behaviour_unchanged(
+    settings: Settings,
+) -> None:
+    """4. Nothing arrived, so nothing is decided: the request sits where the
+    clarification left it, and no escalation is invented from silence."""
+    sink = CollectingEmailSink()
+    session = LiveSession(
+        settings,
+        source=StubSource(ENQUIRY),  # type: ignore[arg-type]
+        sink=sink,
+        extractor=ScriptedExtractor(enquiry_extraction()),  # type: ignore[arg-type]
+        resolver=StatedLocationResolver(),
+    )
+    session.poll()
+    request = next(iter(session.requests.values()))
+    session.approve_clarification(by=APPROVER, request_id=request.request_id)
+
+    session.poll()  # the mailbox holds only the enquiry we already handled
+
+    assert only(session).state is RequestState.CLARIFICATION_SENT  # type: ignore[attr-defined]
+    assert len(to_client(sink)) == 1
+
+
+def test_repeated_polls_after_the_escalation_change_nothing(settings: Settings) -> None:
+    """5. MANUAL_REVIEW is terminal for automation, and the poller runs forever.
+
+    The scripted extractor is exhausted, so a re-extraction would raise rather
+    than pass quietly — the dedupe is asserted by construction as well as by
+    the unchanged state.
+    """
+    sink = CollectingEmailSink()
+    session = session_after(settings, sink, BARE_YES, ExtractionResult())
+    settled = only(session).state  # type: ignore[attr-defined]
+    sent = list(sink.sent)
+    events = len(session.audit.events)
+
+    for _ in range(3):
+        session.poll()
+
+    assert only(session).state is settled  # type: ignore[attr-defined]
+    assert sink.sent == sent, "no duplicate email left the mailbox"
+    assert len(session.audit.events) == events, "and no duplicate evidence was recorded"
