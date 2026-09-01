@@ -35,8 +35,9 @@ from translog_quote import bootstrap
 from translog_quote.adapters.email import CollectingEmailSink
 from translog_quote.adapters.store import JsonFileStore
 from translog_quote.config import Settings
-from translog_quote.domain.extraction import ExtractionResult
+from translog_quote.domain.extraction import ExtractedValue, ExtractionResult
 from translog_quote.domain.quotation import INTERNAL_SUBJECT_PREFIX, NotADecision
+from translog_quote.domain.shipment import DeliveryType
 from translog_quote.domain.workflow import RequestState
 from translog_quote.interface.web import live_serialize
 from translog_quote.interface.web.live_serialize import SIMULATED_BANNER
@@ -1971,6 +1972,93 @@ def test_the_timeline_says_whose_move_it_is(settings: Settings, sink: Collecting
     assert rows["reply_received"]["state"] == "current"
     assert rows["reply_received"]["waiting_on"] == "client"
     assert rows["reply_received"]["note"] == "Waiting for client reply"
+
+
+# --- a second clarification round must not read as rate search ------------------
+
+
+def second_round(settings: Settings, sink: CollectingEmailSink) -> LiveSession:
+    """The production shape: a reply that answers some questions but not all.
+
+    Round one goes out and is answered; the answer leaves one rule still
+    failing, so the loop drafts round two and holds it. Reproduced with the
+    real router, merge, validator and clarification loop — only the mailbox,
+    the model and the sink are stubs.
+    """
+    # Everything round one asked for except the chemical status — the shape the
+    # production request actually arrived in.
+    partial = ExtractionResult(
+        commodity=ExtractedValue[str].stated("Engineering components"),
+        pcs=ExtractedValue[int].stated(10),
+        delivery_type=ExtractedValue[DeliveryType].stated(DeliveryType.AIRPORT),
+    )
+    session = LiveSession(
+        settings,
+        source=GrowingSource((ENQUIRY,), (ENQUIRY, REPLY)),  # type: ignore[arg-type]
+        sink=sink,
+        extractor=ScriptedExtractor(ENQUIRY_EXTRACTION, partial),
+    )
+    session.poll()
+    session.approve_clarification(by=APPROVER)
+    session.poll()
+    return session
+
+
+def test_a_held_second_clarification_never_reads_as_rate_search(
+    settings: Settings, sink: CollectingEmailSink
+) -> None:
+    """The defect, stated: a request parked on a person read "Rate search —
+    Pending", so the screen said the system was pricing the shipment while it
+    was in fact waiting for a click."""
+    session = second_round(settings, sink)
+    request = only_request(session)
+    assert request.awaiting_clarification_approval is True, "precondition: round two is held"  # type: ignore[attr-defined]
+
+    rows = {row["key"]: row for row in timeline_of(session)}
+
+    assert rows["rate_search"]["state"] != "current", "rate search has not started"  # type: ignore[index]
+    current = [row for row in timeline_of(session) if row["state"] == "current"]
+    assert len(current) == 1
+    assert current[0]["label"] == "Clarification awaiting approval"
+    assert current[0]["waiting_on"] == "operator"
+
+
+def test_the_later_steps_stay_pending_rather_than_disappearing(
+    settings: Settings, sink: CollectingEmailSink
+) -> None:
+    """Unlike manual review the workflow has not stopped, so the steps still to
+    come must still be shown — they resume once the draft goes out."""
+    rows = {row["key"]: row for row in timeline_of(second_round(settings, sink))}
+
+    for key in ("rate_search", "rate_selected", "approval_decided", "quotation_sent"):
+        assert rows[key]["state"] == "pending", key
+
+
+def test_the_first_round_timeline_is_unchanged(
+    settings: Settings, sink: CollectingEmailSink
+) -> None:
+    """The fix must not disturb the ordinary case: on round one the template's
+    own clarification row is already the current step."""
+    session = session_for(settings, sink)
+    session.poll()
+
+    current = [row for row in timeline_of(session) if row["state"] == "current"]
+
+    assert len(current) == 1
+    assert current[0]["key"] == "clarification_sent"
+    assert current[0]["label"] == "Clarification awaiting approval"
+
+
+def test_the_round_two_marker_clears_once_it_is_approved(
+    settings: Settings, sink: CollectingEmailSink
+) -> None:
+    """It is a statement about now, not a state anyone has to reset."""
+    session = second_round(settings, sink)
+    session.approve_clarification(by=APPROVER)
+
+    keys = [row["key"] for row in timeline_of(session)]
+
+    assert "clarification_pending" not in keys
 
 
 def test_a_completed_step_is_never_marked_as_waiting_on_anyone(

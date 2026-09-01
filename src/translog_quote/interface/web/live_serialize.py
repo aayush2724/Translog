@@ -359,6 +359,40 @@ def timeline_json(request: LiveRequest, events: list[AuditEvent]) -> list[Json]:
             }
         )
 
+    if request.awaiting_clarification_approval and not any(
+        row["key"] == "clarification_sent" and row["state"] == "current" for row in rows
+    ):
+        # A second or later clarification round, and the template has no row
+        # for one: it carries a single clarification row and a single reply
+        # row, both pinned to the first occurrence. Once round one has been
+        # sent and answered, both read as done and the next template row —
+        # rate search — inherits "current". The screen then reports the system
+        # as pricing the shipment while it is in fact parked on a person, which
+        # is the one thing a desk must never state backwards.
+        #
+        # Only the marker moves. Unlike manual review the later rows are not
+        # dropped, because they will still happen: this request resumes the
+        # moment the draft is approved and the client answers.
+        for row in rows:
+            if row["state"] == "current":
+                row["state"] = "pending"
+                row["note"] = None
+                row["waiting_on"] = None
+        after_last_done = max(
+            (index for index, row in enumerate(rows) if row["state"] == "done"), default=-1
+        )
+        rows.insert(
+            after_last_done + 1,
+            {
+                "key": "clarification_pending",
+                "label": "Clarification awaiting approval",
+                "state": "current",
+                "at": None,
+                "note": _WAITING_NOTES["clarification_sent"],
+                "waiting_on": _WAITING_ON["clarification_sent"],
+            },
+        )
+
     if request.state is RequestState.MANUAL_REVIEW:
         # Automated processing has stopped, and the timeline must say so.
         # Without this, the first not-yet-done template row rendered as the
