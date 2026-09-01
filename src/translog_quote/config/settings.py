@@ -204,6 +204,19 @@ class DemoSettings(BaseModel):
     Demos that drift are not demonstrations.
     """
 
+    poll_interval_seconds: float = Field(default=10.0, gt=0)
+    """How often the live server reads the mailbox on its own.
+
+    The live demonstration has no "check mail" control: the server polls in the
+    background and the browser watches the state that produces. This is the gap
+    between one poll finishing and the next one starting.
+
+    A poll costs one Gmail list plus one get per listed message, and — because
+    a message already routed is skipped *before* extraction — no model call at
+    all unless something new arrived. Ten seconds is therefore cheap, and about
+    as long as a room will watch a dashboard before believing it is broken.
+    """
+
 
 class Settings(BaseSettings):
     """Root settings. Nested sections use a double-underscore delimiter:

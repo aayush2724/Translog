@@ -197,9 +197,12 @@ send and the send credential cannot read. Setup:
 | `gmail-quote` | The whole flow, including both gates and real sending |
 | `reset-state` | Clear local demo state. Touches no mailbox and no credential |
 
-In the browser: **Start new demonstration** scopes the view to mail arriving
-from that moment, then **Check mail** reads the real mailbox, and the two gates
-appear as cards with an approver-name field. Simulated rates carry
+In the browser there is nothing to press to make the workflow run. Starting the
+server fixes the demonstration's cutoff at that moment and starts a background
+poll, so mail already in the inbox is out of scope and every enquiry sent
+afterwards is read, extracted and validated on its own. The two gates appear as
+cards with an approver-name field, and they are the only two clicks in the
+whole demonstration. Simulated rates carry
 `SIMULATED WEBCARGO DATA — DEMO ONLY` everywhere they are shown, including in
 the client's quotation email.
 

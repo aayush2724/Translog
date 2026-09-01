@@ -355,11 +355,11 @@ POC, which needs no credentials and is worth keeping in a second tab.
 
 | Step | In the browser | What actually happens |
 |---|---|---|
-| 1 | Open the dashboard | One card: subject, lane, weight, client, received time |
-| 2 | Press **Check mail** | Real Gmail read; out-of-scope mail reported as ignored |
+| 1 | Open the dashboard | It is waiting for an enquiry; the mailbox is already being read on a timer |
+| 2 | *(send the enquiry)* wait | Real Gmail read by the server itself; out-of-scope mail reported as ignored. A card appears: subject, lane, weight, client, received time |
 | 3 | **Open request** | The full story top to bottom, with a live timeline down the left |
 | 4 | Type your name, **Approve & send to client** | A real clarification email leaves the Translog mailbox |
-| 5 | *(client replies)* **Check mail** | Reply correlates by RFC headers, merges, validates; rates run |
+| 5 | *(client replies)* wait | Reply correlates by RFC headers, merges, validates; rates run — all on a background poll |
 | 6 | Read the rate card | Returned / eligible / excluded + reasons, selected carrier — every simulated figure carries the banner |
 | 7 | Type your name, **APPROVE** or **DECLINE** | The click is the decision the approval port carries |
 | 8 | Read the result | `APPROVED — quotation sent` or `DECLINED — quotation not sent` |
@@ -399,8 +399,9 @@ round trip. `RecordedDecisionGate` carries one decision, consumes it once, and
 
 A mailbox used for testing accumulates history, and during a presentation that
 history competes with the one enquiry the room should be following. A
-**demonstration** is the answer: everything that arrived *after you pressed
-Start*.
+**demonstration** is the answer: everything that arrived *after the server came
+up*. There is no button — starting the process is what starts the
+demonstration.
 
 That definition is deliberately not a list of approved subjects or senders.
 Nothing is hardcoded, nothing is deleted, and an old reply cannot attach itself
@@ -413,19 +414,24 @@ a rule anyone has to remember.
 
 | Step | Where | What happens |
 |---|---|---|
-| 1 | Browser: **Start new demonstration** | Records a cutoff. Deletes nothing — no Gmail message, no persisted request, no audit entry. Older mail stops being read at all, so the first Check mail is fast |
-| 2 | Send the enquiry from the client account | Real mail to the Translog mailbox |
-| 3 | Browser: **Check mail** | Reads the real mailbox; only post-cutoff mail is extracted. The card appears under **This demonstration** with a green **NEW REQUEST** badge and its real received time |
-| 4 | Browser: **Open request** | The one-request timeline, timestamps beside each event |
-| 5 | Type your name → **Approve & send to client** | The real clarification email leaves the send-only credential. Timeline: `✓ Clarification sent` then `⏳ Waiting for client reply` |
-| 6 | Reply from the client account | Answer the questions the clarification asked |
-| 7 | Browser: **Check mail** | `✓ Client reply received` with the reply's own Date header, then extraction → merge → validation → rate search → rate selected, all automatic and all real |
-| 8 | Type your name → **APPROVE** | The quotation reaches the client. **DECLINE** sends nothing |
+| 1 | Start the server | Records the cutoff and starts the background poll. Deletes nothing — no Gmail message, no persisted request, no audit entry. Older mail stops being read at all, so every poll is cheap |
+| 2 | Browser: open the dashboard | "Waiting for an enquiry." Nothing to press |
+| 3 | Send the enquiry from the client account | Real mail to the Translog mailbox |
+| 4 | Wait a few seconds | The server reads the mailbox on its own; only post-cutoff mail is extracted. The card appears with a green **NEW REQUEST** badge and its real received time |
+| 5 | Browser: **Open request** | The one-request timeline, timestamps beside each event |
+| 6 | Type your name → **Approve & send to client** | The real clarification email leaves the send-only credential. Timeline: `✓ Clarification sent` then `⏳ Waiting for client reply` |
+| 7 | Reply from the client account | Answer the questions the clarification asked |
+| 8 | Wait a few seconds | `✓ Client reply received` with the reply's own Date header, then extraction → merge → validation → rate search → rate selected, all automatic and all real |
+| 9 | Type your name → **APPROVE** | The quotation reaches the client. **DECLINE** sends nothing |
 
-Earlier work is still on the page, under **Earlier enquiries**, dimmed. The
-scope line above the list states outright how many earlier requests are kept
-and how many older mailbox messages were not read — the goal is focus, not
-concealment.
+The dashboard shows this session's work and nothing else. Requests from an
+earlier demonstration stay in `runs/state/` — correlatable, unaltered, and not
+presented as active. The scope line above the list states outright how many
+older mailbox messages were not read, and when the mailbox was last checked —
+the goal is focus, not concealment.
+
+`TRANSLOG_DEMO__POLL_INTERVAL_SECONDS` sets how often the mailbox is read;
+10 seconds by default.
 
 Timeline markers: `✓` done, `⏳` waiting on the client, `●` waiting on you,
 `○` not yet reached. Email rows carry the message's own `Date` header; every

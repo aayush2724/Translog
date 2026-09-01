@@ -13,20 +13,30 @@
 
 const ui = {
   snap: null,
+  snapKey: null,
   view: "dashboard",
   selected: null,
   approver: "",
   declineReason: "",
   busy: false,
   busyLabel: null,
-  polled: false,
+  refreshing: false,
+  refreshAgain: false,
+  editing: false,
   error: null,
 };
 
-/* A poll makes one live model call per unread message, so it can legitimately
-   take half a minute. Without a ceiling a stalled request leaves the page
-   waiting forever with no way to tell that from slow. */
+/* An action — approving a clarification, deciding a quotation — sends a real
+   email, so it can legitimately take a while. Without a ceiling a stalled
+   request leaves the page waiting forever with no way to tell that from slow. */
 const POLL_TIMEOUT_MS = 180000;
+
+/* How often the page asks the server what it knows. This is a read of state
+   the server already holds — the mailbox itself is read by the server's own
+   poller — so it is cheap, and it is the whole of "the dashboard updates by
+   itself": a new enquiry, a finished extraction, a merged reply and a selected
+   rate all arrive through it with nothing to click. */
+const REFRESH_MS = 3000;
 
 /* ------------------------------------------------------------- utilities */
 
@@ -38,6 +48,8 @@ function el(tag, attrs, ...children) {
       if (key === "class") node.className = value;
       else if (key === "onClick") node.addEventListener("click", value);
       else if (key === "onInput") node.addEventListener("input", value);
+      else if (key === "onFocus") node.addEventListener("focus", value);
+      else if (key === "onBlur") node.addEventListener("blur", value);
       else node.setAttribute(key, value);
     }
   }
@@ -125,13 +137,21 @@ function approverField(...dependents) {
   const sync = () => dependents.forEach((control) => {
     control.disabled = !canDecide();
   });
+  /* The auto-refresh rebuilds this view, and rebuilding an input the operator
+     is typing into takes the caret with it. So the field says when it is in
+     use and the refresh loop leaves the page alone until it is not. Nothing is
+     lost by waiting: the only thing that could change underneath is a client
+     reply, and it will still be there a few seconds later. */
   const field = el("input", {
     class: "approver-input",
     type: "text",
     value: ui.approver,
     placeholder: "Your name, for the record",
+    onFocus: () => { ui.editing = true; },
+    onBlur: () => { ui.editing = false; },
     onInput: (event) => {
       ui.approver = event.target.value;
+      ui.editing = true;
       sync();
     },
   });
@@ -156,33 +176,94 @@ function simBanner(rates) {
   );
 }
 
-function provenanceStrip(mode) {
-  return el("div", { class: "provenance" },
-    ...mode.provenance.map((row) =>
-      el("span", { class: `prov prov-${row.tone}` },
-        el("span", { class: "prov-label" }, row.label),
-        el("span", { class: "prov-value" }, row.value))));
-}
-
 /* ---------------------------------------------------------------- network */
 
-async function refresh() {
+/* Reads the server's state and redraws only when it actually differs.
+ *
+ * The comparison is not an optimisation. This runs every few seconds, and a
+ * redraw replaces every node on the page: without it an open <details>, a
+ * scroll position and any hover would be thrown away on a timer, and the
+ * screen would read as flickering rather than as live. `force` is for the
+ * moments where the same bytes must still be re-rendered — switching between
+ * the dashboard and a request. */
+async function refresh(force) {
+  if (ui.refreshing) {
+    /* One read at a time. A *forced* one is a view change rather than a poll,
+       though, so it is queued instead of dropped: a read can sit behind a
+       mailbox poll holding the server's lock for a long time, and a click
+       discarded in that window would leave the operator looking at the screen
+       they clicked away from with no way to tell why. */
+    if (force) ui.refreshAgain = true;
+    return;
+  }
+  ui.refreshing = true;
+  try {
+    await readAndRender(force);
+  } finally {
+    ui.refreshing = false;
+  }
+  if (ui.refreshAgain) {
+    ui.refreshAgain = false;
+    await refresh(true);
+  }
+}
+
+/* What counts as "the state changed", with the liveness clock taken out of it.
+ *
+ * The server stamps every poll with the time it read the mailbox, so the raw
+ * payload differs on every single tick — comparing it whole would rebuild the
+ * page every few seconds forever, which is the thing the comparison exists to
+ * prevent. It is not a cosmetic difference: a rebuild throws away open folds
+ * and scroll position, and a click landing on a node that is being replaced
+ * does nothing at all. */
+function stateKey(snap) {
+  return JSON.stringify({ ...snap, poll: { ...snap.poll, last_checked_at: null } });
+}
+
+async function readAndRender(force) {
   const query = ui.selected ? `?request_id=${encodeURIComponent(ui.selected)}` : "";
+  let text = null;
   try {
     const response = await fetch(`/api/live/state${query}`);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    ui.snap = await response.json();
-    ui.error = null;
+    text = await response.text();
   } catch (err) {
     document.getElementById("load-error").hidden = false;
     return;
   }
   document.getElementById("load-error").hidden = true;
-  render();
+
+  ui.snap = JSON.parse(text);
+  const key = stateKey(ui.snap);
+  if (force || key !== ui.snapKey) {
+    ui.snapKey = key;
+    render();
+  } else if (ui.view === "dashboard") {
+    /* Nothing happened, so nothing is redrawn — but the indicator still has to
+       track the mailbox, or a poll that started failing would go unreported
+       until something else changed. Written straight into the header rather
+       than through a render. */
+    renderLiveIndicator();
+  }
+}
+
+/* The loop that makes the page live. Two things pause it and neither can stop
+   it: an action already in flight (its own response is the newer state), and
+   an operator typing their name into a decision field. */
+function watchForChanges() {
+  /* The tick returns the refresh rather than firing and forgetting it, so a
+     caller — a test, today — can wait for the redraw it caused instead of
+     guessing how long one takes. */
+  setInterval(() => (ui.busy || ui.editing ? null : refresh(false)), REFRESH_MS);
 }
 
 async function post(action, body, label) {
   if (ui.busy) return;
+  /* The click took the name; nobody is typing any more. Cleared here as well
+     as on blur, because this view is about to be rebuilt — the field the blur
+     would have come from will not exist, and a flag left set would pause the
+     automatic refresh for the rest of the session. */
+  ui.editing = false;
   ui.busy = true;
   ui.busyLabel = label || "Working…";
   ui.error = null;
@@ -207,113 +288,87 @@ async function post(action, body, label) {
   } catch (err) {
     ui.error =
       err && err.name === "AbortError"
-        ? "The server took too long to answer. It may still be working — press Check mail again in a moment."
+        ? "The server took too long to answer. It may still be working — the page will show the result as soon as it does."
         : "The demo server did not respond.";
   }
   clearTimeout(timer);
   ui.busy = false;
   ui.busyLabel = null;
+  /* The action replaced the snapshot with its own response. Recorded as the
+     new baseline so the next tick does not redraw over the result the operator
+     is reading. */
+  ui.snapKey = ui.snap ? stateKey(ui.snap) : null;
   render();
-}
-
-function checkMail() {
-  ui.polled = true;
-  return post("poll", {}, "Checking mail…");
 }
 
 /* -------------------------------------------------------------- dashboard */
 
+/* Whether the desk is watching the mailbox — the only status the page shows.
+ *
+ * Counts, poll timings and internal processing state are the machinery and
+ * belong in the log, not on an operator's screen. What does belong is the one
+ * fact they cannot otherwise know: that mail is being picked up. It turns
+ * amber when the background poll is failing, so a dashboard that has silently
+ * stopped receiving work does not look like a quiet morning. The time of the
+ * last successful read is the tooltip — available when questioned, not text
+ * on the page. */
+function renderLiveIndicator() {
+  const poll = ui.snap.poll;
+  const indicator = document.getElementById("live-indicator");
+  const failing = Boolean(poll.error);
+  indicator.className = failing ? "live live-stalled" : "live";
+  document.getElementById("live-label").textContent = failing ? "Reconnecting" : "Live";
+  const checked = fmtStamp(poll.last_checked_at);
+  indicator.setAttribute(
+    "title",
+    failing
+      ? "The mailbox could not be reached on the last attempt. Retrying automatically."
+      : checked
+        ? `Mailbox last checked ${checked}`
+        : "Watching the mailbox"
+  );
+}
+
+/* Nothing has arrived yet. Deliberately almost empty: a dashboard with no work
+   on it should look like a desk that is ready, not like a screen that failed
+   to load. */
+function emptyState() {
+  return el("div", { class: "empty" },
+    el("span", { class: "empty-icon", "aria-hidden": "true" }, "\u2709"),
+    el("h1", { class: "empty-title" }, "Waiting for new enquiry"),
+    el("p", { class: "empty-sub" }, "New enquiries will appear here automatically."));
+}
+
 function renderDashboard() {
   const snap = ui.snap;
   const holder = document.getElementById("dashboard-list");
+  renderLiveIndicator();
 
-  const note = document.getElementById("poll-note");
-  const bits = [];
-  if (snap.poll.new_messages) bits.push(`${snap.poll.new_messages} new message(s) last check`);
-  if (snap.poll.skipped_internal) bits.push(`${snap.poll.skipped_internal} internal mail skipped`);
-  note.textContent = bits.join(" · ");
-
-  /* Says plainly that the mailbox holds more than this demonstration. The
-     goal is focus, not concealment. */
-  const scope = document.getElementById("demo-scope");
-  const demo = snap.demonstration;
-  if (demo.active) {
-    const parts = [`Following ${demo.following} request(s) received since this demonstration started`];
-    if (demo.earlier_requests) parts.push(`${demo.earlier_requests} earlier request(s) kept below`);
-    if (demo.outside_messages) parts.push(`${demo.outside_messages} older mailbox message(s) not read`);
-    scope.textContent = `${parts.join(" · ")}.`;
-    scope.hidden = false;
-  } else {
-    scope.textContent = "No demonstration started — showing everything in the mailbox.";
-    scope.hidden = false;
-  }
+  /* The page title is for a page with something on it. The empty state carries
+     its own heading and reads better without a second one above it. */
+  document.getElementById("page-head").hidden = !snap.requests.length;
 
   if (!snap.requests.length) {
-    holder.replaceChildren(
-      el("div", { class: "card empty-state" },
-        ui.busy
-          ? [
-              el("p", { class: "working" }, el("span", { class: "spinner", "aria-hidden": "true" }), ui.busyLabel),
-              el("p", { class: "muted small" },
-                "Reading the mailbox and extracting each message. One live model call " +
-                "per unread message, so this can take up to a minute."),
-            ]
-          : [
-              el("p", null, "No quotation requests yet."),
-              el("p", { class: "muted small" },
-                ui.polled
-                  ? "The mailbox held nothing new. Send an enquiry to the Translog address, then press “Check mail”."
-                  : "Press “Check mail” to read the Translog mailbox."),
-            ])
-    );
+    holder.replaceChildren(emptyState());
     return;
   }
 
   /* Two groups, decided by what extraction actually found — not by a list of
-     approved subjects or senders anyone has to maintain. Unrecognised messages
-     are shown rather than hidden, each explaining itself, so the operator can
-     see the classification is right and pick the request they mean. */
-  /* Three bands, in the order a presenter needs them: what this
-     demonstration is following, then anything from before it, then messages
-     that carried no shipment. Nothing is hidden — earlier work is still on
-     the page, just no longer competing for the room's attention. */
-  const active = snap.demonstration.active;
-  const following = snap.requests.filter((r) => r.in_demonstration && r.is_enquiry);
-  const earlier = snap.requests.filter((r) => !r.in_demonstration && r.is_enquiry);
+     approved subjects or senders anyone has to maintain. A message that stated
+     no shipment is still shown, explaining itself, so the operator can see the
+     classification is right rather than trust it.
+
+     There is no band for earlier work: the session drops what an earlier
+     demonstration left behind, so nothing reaches this function that is not
+     part of the run happening now. */
+  const enquiries = snap.requests.filter((r) => r.is_enquiry);
   const others = snap.requests.filter((r) => !r.is_enquiry);
 
-  const groups = [];
-
-  groups.push(
-    el("div", { class: "group-head" },
-      el("h2", null, active ? "This demonstration" : "Quotation enquiries"),
-      el("span", { class: "muted small" }, `${following.length} request(s)`))
-  );
-  groups.push(
-    following.length
-      ? el("div", { class: "request-list" }, ...following.map(requestCard))
-      : el("div", { class: "card empty-state" },
-          el("p", null, active ? "Waiting for the demonstration enquiry." : "No quotation enquiries yet."),
-          el("p", { class: "muted small" },
-            active
-              ? "Send the enquiry to the Translog mailbox, then press “Check mail”."
-              : "A message becomes an enquiry when extraction finds shipment details in it."))
-  );
-
-  if (earlier.length) {
-    groups.push(
-      el("div", { class: "group-head group-muted" },
-        el("h2", null, "Earlier enquiries"),
-        el("span", { class: "muted small" }, `${earlier.length} — from before this demonstration`)),
-      el("div", { class: "request-list" }, ...earlier.map(requestCard))
-    );
-  }
+  const groups = [el("div", { class: "request-list" }, ...enquiries.map(requestCard))];
 
   if (others.length) {
     groups.push(
-      el("div", { class: "group-head group-muted" },
-        el("h2", null, "Not recognised as enquiries"),
-        el("span", { class: "muted small" }, `${others.length} message(s)`)),
+      el("h2", { class: "group-head" }, "Other messages"),
       el("div", { class: "request-list" }, ...others.map(requestCard))
     );
   }
@@ -323,14 +378,16 @@ function renderDashboard() {
 
 function requestCard(request) {
   const received = fmtStamp(request.received_at);
-  const muted = !request.is_enquiry || !request.in_demonstration;
+  const muted = !request.is_enquiry;
   return el("article", { class: `card request-card${muted ? " request-muted" : ""}` },
     el("div", { class: "card-body" },
       el("div", { class: "request-row" },
         el("div", { class: "request-main" },
+          /* The reference and the time it came in. The field count that used
+             to sit here was extraction's own bookkeeping — true, and of no use
+             to somebody quoting a shipment. */
           el("p", { class: "eyebrow" },
-            request.is_new ? el("span", { class: "badge-new" }, "NEW REQUEST") : null,
-            request.request_id),
+            [request.request_id, received].filter(Boolean).join("  ·  ")),
           el("h2", { class: "request-title" }, request.headline),
           request.lane ? el("p", { class: "route" }, request.lane) : null,
           el("p", { class: "muted small" },
@@ -341,13 +398,8 @@ function requestCard(request) {
             ui.selected = request.request_id;
             ui.view = "detail";
             window.scrollTo(0, 0);
-            refresh();
+            refresh(true);
           }))),
-      kv([
-        ["Received", received || "—"],
-        ["Subject", request.subject || "—"],
-        ["Shipment details found", `${request.shipment_fields} field(s)`],
-      ]),
       request.waiting_replies
         ? el("p", { class: "waiting-note" },
             `${request.waiting_replies} client reply waiting — approve the clarification to merge it`)
@@ -392,10 +444,14 @@ function renderTimeline(timeline) {
   );
 }
 
-function emailCard(title, email, tone) {
+/* The provenance pills these cards used to carry — "REAL GMAIL",
+   "REAL GMAIL · CORRELATED" — were the same demo-plumbing disclosure as the
+   capability strip, in a smaller font. What the operator needs from a client
+   email is who sent it, when, and what it says. */
+function emailCard(title, email) {
   if (!email) return null;
   return card(
-    [el("h2", null, title), pill(tone, "blue")],
+    [el("h2", null, title)],
     kv([
       ["From", email.from],
       ["Subject", email.subject],
@@ -406,18 +462,18 @@ function emailCard(title, email, tone) {
 }
 
 function sectionEnquiry(detail) {
-  return emailCard("Client email", detail.enquiry || detail.latest_email, "REAL GMAIL");
+  return emailCard("Client email", detail.enquiry || detail.latest_email);
 }
 
 function sectionReply(detail) {
-  return emailCard("Client reply", detail.reply, "REAL GMAIL · CORRELATED");
+  return emailCard("Client reply", detail.reply);
 }
 
 function sectionMerged(detail) {
   if (!detail.reply_received || !detail.merged.length) return null;
   return card(
-    [el("h2", null, "Merged shipment"), pill("RFC IN-REPLY-TO / REFERENCES", "gray")],
-    el("p", { class: "card-sub" }, "The reply is matched to its enquiry by RFC header chain, never by subject."),
+    [el("h2", null, "Merged shipment")],
+    el("p", { class: "card-sub" }, "The reply was matched to this enquiry by its mail thread, not by subject line."),
     kv([
       ["Supplied by the reply", detail.merged.join(", ")],
       ["Carried from the enquiry", detail.carried.join(", ") || "—"],
@@ -474,7 +530,7 @@ function sectionClarification(detail) {
           `${detail.waiting_replies} client reply waiting on this clarification`,
           el("span", { class: "sub" },
             "It cannot be merged until the clarification below has been approved and " +
-            "sent. Approve it, then press “Check mail” again."))
+            "sent. Approve it and the reply is picked up on the next mailbox check."))
       );
     }
     const approve = button("Approve & send to client", "approve",
@@ -503,7 +559,7 @@ function sectionRates(detail) {
       [el("h2", null, "Rate search & selection"), pill("NOT RUN", "amber")],
       el("p", null, `Rate search could not run: ${detail.rate_failure}`),
       el("p", { class: "muted small" },
-        "Nothing was sent and nothing was approved. The next “Check mail” " +
+        "Nothing was sent and nothing was approved. The next mailbox check " +
         "retries this request automatically."));
   }
   const selection = rates.selection;
@@ -642,7 +698,7 @@ function sectionQuotation(detail) {
       ["Decided by", decision.by],
       ["Decided at", fmtStamp(decision.at) || "—"],
       ["Reason", decision.reason || "—"],
-      ["Email to client", decision.sent ? "Sent through the real Gmail send-only credential" : "Not sent"],
+      ["Email to client", decision.sent ? "Sent" : "Not sent"],
     ])
   );
 }
@@ -704,22 +760,8 @@ function render() {
   const detail = document.getElementById("view-detail");
   dashboard.hidden = ui.view !== "dashboard";
   detail.hidden = ui.view !== "detail";
-  document.getElementById("provenance").replaceChildren(provenanceStrip(ui.snap.mode));
   if (ui.view === "dashboard") renderDashboard();
   else renderDetail();
-
-  document.getElementById("btn-new-demo").disabled = ui.busy;
-  const poll = document.getElementById("btn-poll");
-  poll.disabled = ui.busy;
-  /* `replaceChildren` stringifies whatever it is given, so a `null` child
-     renders as the literal text "null" — which is how the button came to read
-     "nullCheck mail" when idle. Only real children go in. */
-  poll.replaceChildren(
-    ...[
-      ui.busy ? el("span", { class: "spinner", "aria-hidden": "true" }) : null,
-      ui.busy ? ui.busyLabel : "Check mail",
-    ].filter((child) => child != null)
-  );
 
   const banner = document.getElementById("busy-banner");
   banner.hidden = !ui.busy;
@@ -738,22 +780,13 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("btn-back").addEventListener("click", () => {
     ui.view = "dashboard";
     ui.selected = null;
-    refresh();
-  });
-  document.getElementById("btn-poll").addEventListener("click", checkMail);
-  document.getElementById("btn-new-demo").addEventListener("click", () => {
-    ui.view = "dashboard";
-    ui.selected = null;
-    return post("demonstration/start", {}, "Starting demonstration…");
+    refresh(true);
   });
 
-  /* Check on load. An enquiry still waiting for its clarification is
-     deliberately not persisted — committing it would leave it unable to
-     advance in any later process — so a freshly started server genuinely
-     knows nothing until it reads the mailbox. Making the operator discover
-     that by pressing a button on an empty page is not a design, it is a
-     missing step. */
-  refresh().then(() => {
-    if (ui.snap && !ui.snap.requests.length) checkMail();
-  });
+  /* Draw whatever the server already knows, then keep watching. Reading the
+     mailbox is not this page's job and never was a person's: the server polls
+     it on its own timer, so an enquiry sent while nobody was looking is
+     already processed by the time the dashboard is opened. */
+  refresh(true);
+  watchForChanges();
 });

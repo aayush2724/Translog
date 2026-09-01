@@ -73,6 +73,8 @@ class Node {
   }
 }
 
+const intervals = [];
+
 function makeContext(fetchStub) {
   const byId = {};
   const document = {
@@ -95,15 +97,24 @@ function makeContext(fetchStub) {
     },
     setTimeout, clearTimeout, Date, Number, JSON, Math, Object, Array, String,
     encodeURIComponent,
+    /* Captured rather than run: the page arms a repeating timer at load, and
+       a test wants to know it did and then fire it by hand — not to have a
+       real interval firing underneath the assertions. */
+    setInterval: (fn, ms) => {
+      intervals.push({ fn, ms });
+      return intervals.length;
+    },
   });
 }
 
 function load(fetchStub) {
+  intervals.length = 0;
   const context = makeContext(fetchStub);
   const source =
     fs.readFileSync(SOURCE, "utf8") +
     "\n;globalThis.__t = { ui, canDecide, sectionClarification, sectionApproval," +
-    " renderDashboard, renderTimeline, render, post, sectionRates," +
+    " renderDashboard, renderTimeline, render, post, sectionRates, refresh," +
+    " watchForChanges, REFRESH_MS," +
     " holderFor: (id) => document.getElementById(id) };";
   vm.runInContext(source, context);
   return context.__t;
@@ -278,7 +289,10 @@ function snapshotWith(requests, demonstration) {
     ),
     requests,
     audit: [],
-    poll: { new_messages: 0, skipped_internal: 0, deferred: 0, enquiries: 0, unrecognised: 0 },
+    poll: {
+      new_messages: 0, skipped_internal: 0, deferred: 0, enquiries: 0, unrecognised: 0,
+      last_checked_at: "2026-08-29T10:09:00+05:30", error: null,
+    },
     mode: { badge: "LIVE", banner: "SIMULATED", provenance: [] },
     selected: null,
   };
@@ -291,7 +305,7 @@ function request(overrides) {
       client_address: "client@example.com", lane: "Mumbai → Dubai", weight: "320 kg",
       received_at: "2026-08-29T10:08:00+05:30", shipment_fields: 7,
       status: { label: "INFORMATION REQUIRED", tone: "amber" },
-      is_enquiry: true, in_demonstration: true, is_new: true,
+      is_enquiry: true, is_new: true,
       not_enquiry_reason: null, waiting_replies: 0,
     },
     overrides
@@ -302,51 +316,85 @@ function headings(holder) {
   return holder.findAll((n) => n.tagName === "h2").map((n) => n.textContent);
 }
 
-check("an earlier request is kept on the page, below the demonstration", () => {
-  const t = load();
-  t.ui.snap = snapshotWith(
-    [
-      request({ request_id: "R-NEW" }),
-      request({ request_id: "R-OLD", in_demonstration: false, is_new: false }),
-    ],
-    { active: true, following: 1, earlier_requests: 1 }
-  );
-  t.renderDashboard();
-  const holder = t.holderFor("dashboard-list");
-  const titles = headings(holder);
+/* The dashboard's band subheadings only — a request card's own title is an h2
+   too, and counting those would make "no subheading" impossible to assert. */
+function bandHeadings(holder) {
+  return holder
+    .findAll((n) => n.className === "group-head")
+    .map((n) => n.textContent);
+}
 
-  eq(titles[0], "This demonstration", "the demonstration leads");
-  eq(titles.includes("Earlier enquiries"), true, "earlier work is still shown, not removed");
+check("the dashboard shows only this session's requests, with no counters", () => {
+  const t = load();
+  t.ui.snap = snapshotWith([request({ request_id: "R-NEW" })], { active: true, following: 1 });
+  t.renderDashboard();
+  const text = t.holderFor("dashboard-list").textContent;
+
+  eq(/R-NEW/.test(text), true, "the request is on the page");
+  eq(/Earlier enquiries/.test(text), false, "no band of historical work exists any more");
+  eq(/request\(s\)/.test(text), false, "no counter");
+  eq(bandHeadings(t.holderFor("dashboard-list")).length, 0, "no subheading for a single band");
 });
 
-check("the demonstration scope line admits what was not read", () => {
-  const t = load();
-  t.ui.snap = snapshotWith([request({})], {
-    active: true, following: 1, earlier_requests: 2, outside_messages: 5,
-  });
-  t.renderDashboard();
-  const scope = t.holderFor("demo-scope").textContent;
-
-  eq(scope.includes("2 earlier request(s) kept below"), true, "earlier requests admitted");
-  eq(scope.includes("5 older mailbox message(s) not read"), true, "unread mail admitted");
-});
-
-check("a NEW REQUEST badge marks the fresh enquiry and nothing else", () => {
+check("a message that stated no shipment gets its own quiet band", () => {
+  /* Still shown, never hidden: the operator has to be able to check the
+     classification rather than trust it. */
   const t = load();
   t.ui.snap = snapshotWith(
-    [
-      request({ request_id: "R-NEW", is_new: true }),
-      request({ request_id: "R-OLD", in_demonstration: false, is_new: false }),
-    ],
-    { active: true, following: 1, earlier_requests: 1 }
+    [request({ request_id: "R-1" }), request({ request_id: "R-2", is_enquiry: false })],
+    { active: true, following: 2 }
   );
   t.renderDashboard();
-  const badges = t.holderFor("dashboard-list").findAll(
-    (n) => n.className === "badge-new"
-  );
 
-  eq(badges.length, 1, "exactly one NEW REQUEST badge");
-  eq(badges[0].textContent, "NEW REQUEST", "badge text");
+  eq(
+    bandHeadings(t.holderFor("dashboard-list")).join(","),
+    "Other messages",
+    "one quiet subheading"
+  );
+});
+
+check("the empty state waits for an enquiry and says nothing technical", () => {
+  const t = load();
+  t.ui.snap = snapshotWith([], { active: true, following: 0 });
+  t.renderDashboard();
+  const text = t.holderFor("dashboard-list").textContent;
+
+  eq(/Waiting for new enquiry/.test(text), true, "it says what it is waiting for");
+  eq(/New enquiries will appear here automatically/.test(text), true, "and that it is automatic");
+  eq(/Check mail/.test(text), false, "it asks nobody to press anything");
+  eq(/mailbox/i.test(text), false, "no mailbox mechanics on an empty desk");
+  eq(t.holderFor("page-head").hidden, true, "and no page title above it");
+});
+
+check("the live indicator is the only status, and it tracks the poll", () => {
+  /* The mailbox counts went; the one fact an operator cannot otherwise know
+     did not. A poll that has started failing must not read as a quiet day. */
+  const t = load();
+  t.ui.snap = snapshotWith([request({})], { active: true, following: 1 });
+  t.renderDashboard();
+
+  eq(t.holderFor("live-label").textContent, "Live", "healthy");
+  eq(t.holderFor("live-indicator").className, "live", "no alarm styling");
+
+  const failing = snapshotWith([request({})], { active: true, following: 1 });
+  failing.poll.error = "PermanentFailure";
+  t.ui.snap = failing;
+  t.renderDashboard();
+
+  eq(t.holderFor("live-label").textContent, "Reconnecting", "the failure surfaces");
+  eq(/live-stalled/.test(t.holderFor("live-indicator").className), true, "and is styled as one");
+});
+
+check("the request card carries the reference and the time, not the field count", () => {
+  const t = load();
+  t.ui.snap = snapshotWith([request({ shipment_fields: 7 })], { active: true, following: 1 });
+  t.renderDashboard();
+  const text = t.holderFor("dashboard-list").textContent;
+
+  eq(/R-1/.test(text), true, "the reference");
+  eq(/Mumbai → Dubai/.test(text), true, "the lane");
+  eq(/field\(s\)/.test(text), false, "extraction bookkeeping is gone");
+  eq(/NEW REQUEST/.test(text), false, "and so is the badge");
 });
 
 check("a waiting-on-client step shows the hourglass, ours shows the dot", () => {
@@ -371,11 +419,168 @@ check("a waiting-on-client step shows the hourglass, ours shows the dot", () => 
   );
 });
 
-check("the check-mail button never renders a null child", () => {
-  const t = load();
-  /* The idle label is a plain string; a null spinner slot used to be
-     stringified into it, giving "nullCheck mail". */
-  eq(t.ui.busy, false, "idle");
+/* --- the page keeps itself up to date, with nothing to press -------------- */
+
+/* A fetch stub that hands back a queue of state snapshots as text, the way the
+   real endpoint does, and counts how many times it was asked. */
+function statePages(...snapshots) {
+  const calls = [];
+  const stub = async (url) => {
+    calls.push(url);
+    const body = JSON.stringify(snapshots[Math.min(calls.length - 1, snapshots.length - 1)]);
+    return { ok: true, status: 200, text: async () => body };
+  };
+  stub.calls = calls;
+  return stub;
+}
+
+checkAsync("the page arms a repeating refresh and never a mailbox poll", async () => {
+  const stub = statePages(snapshotWith([], { active: true }));
+  const t = load(stub);
+
+  t.watchForChanges();
+
+  eq(intervals.length, 1, "one repeating timer");
+  eq(intervals[0].ms, t.REFRESH_MS, "it runs on the page's refresh interval");
+  await intervals[0].fn();
+  eq(stub.calls.length, 1, "the tick read state");
+  eq(stub.calls[0].startsWith("/api/live/state"), true, "state, not an action");
+});
+
+checkAsync("a new request appears without anyone clicking anything", async () => {
+  /* The requirement, stated: the operator opens the dashboard, an enquiry
+     arrives, and the row shows up on a tick of the page's own timer. */
+  const stub = statePages(
+    snapshotWith([], { active: true, following: 0 }),
+    snapshotWith([request({ request_id: "R-FRESH" })], { active: true, following: 1 })
+  );
+  const t = load(stub);
+
+  await t.refresh(true);
+  eq(/Waiting for new enquiry/.test(t.holderFor("dashboard-list").textContent), true, "empty");
+
+  t.watchForChanges();
+  await intervals[0].fn();
+
+  eq(
+    /R-FRESH/.test(t.holderFor("dashboard-list").textContent),
+    true,
+    "the enquiry rendered itself on a timer tick"
+  );
+});
+
+checkAsync("a view change is never dropped behind an in-flight read", async () => {
+  /* A read can sit behind a mailbox poll holding the server's lock. A click
+     discarded in that window would leave the operator on the screen they
+     clicked away from, with nothing to tell them why. */
+  let release = null;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const bodies = [
+    JSON.stringify(snapshotWith([], { active: true })),
+    JSON.stringify(snapshotWith([request({ request_id: "R-SECOND" })], { active: true })),
+  ];
+  let n = 0;
+  const t = load(async () => {
+    const body = bodies[Math.min(n++, bodies.length - 1)];
+    if (n === 1) await gate;
+    return { ok: true, status: 200, text: async () => body };
+  });
+
+  const first = t.refresh(false);      // in flight, and stuck
+  const clicked = t.refresh(true);     // the operator's click lands meanwhile
+  release();
+  await first;
+  await clicked;
+
+  eq(n, 2, "the queued view change ran once the read ahead of it finished");
+  eq(
+    /R-SECOND/.test(t.holderFor("dashboard-list").textContent),
+    true,
+    "and it is what the page ended up showing"
+  );
+});
+
+checkAsync("an unchanged snapshot is not redrawn", async () => {
+  /* A redraw replaces every node on the page. Doing that every few seconds
+     when nothing has changed throws away scroll position and open folds, and
+     reads as flicker rather than as live. */
+  const t = load(statePages(snapshotWith([request({})], { active: true, following: 1 })));
+  await t.refresh(true);
+  const first = t.holderFor("dashboard-list").children[0];
+
+  await t.refresh(false);
+
+  eq(t.holderFor("dashboard-list").children[0] === first, true, "the page was left alone");
+});
+
+checkAsync("the poll clock moves without rebuilding the page", async () => {
+  /* The regression this exists for: the server stamps every poll with the time
+     it read the mailbox, so the payload differs on every tick. Comparing it
+     whole rebuilt the page every few seconds forever — folds closed, scroll
+     jumped, and a click landing mid-rebuild did nothing. */
+  const first = snapshotWith([request({})], { active: true, following: 1 });
+  const later = snapshotWith([request({})], { active: true, following: 1 });
+  later.poll.last_checked_at = "2026-08-29T10:59:00+05:30";
+  const t = load(statePages(first, later));
+
+  await t.refresh(true);
+  const card = t.holderFor("dashboard-list").children[0];
+
+  await t.refresh(false);
+
+  eq(t.holderFor("dashboard-list").children[0] === card, true, "the list was not rebuilt");
+  eq(
+    /10:59/.test(t.holderFor("live-indicator").attrs.title || ""),
+    true,
+    "and the indicator still tracked the read, so a working dashboard is legible"
+  );
+});
+
+checkAsync("a real change still rebuilds the page", async () => {
+  const first = snapshotWith([request({ request_id: "R-1" })], { active: true, following: 1 });
+  const later = snapshotWith([request({ request_id: "R-2" })], { active: true, following: 1 });
+  later.poll.last_checked_at = "2026-08-29T10:59:00+05:30";
+  const t = load(statePages(first, later));
+
+  await t.refresh(true);
+  await t.refresh(false);
+
+  eq(/R-2/.test(t.holderFor("dashboard-list").textContent), true, "the new state rendered");
+});
+
+checkAsync("the refresh pauses while a name is being typed into a decision", async () => {
+  /* Rebuilding the view under a half-typed name takes the caret with it. */
+  const stub = statePages(snapshotWith([], { active: true }));
+  const t = load(stub);
+  t.ui.editing = true;
+  t.watchForChanges();
+
+  await intervals[0].fn();
+
+  eq(stub.calls.length, 0, "no fetch while the operator is typing");
+});
+
+checkAsync("an action releases the typing pause it inherited", async () => {
+  /* The view is rebuilt by the action, so the blur that would have cleared
+     this never fires — and a flag left set pauses the page for good. */
+  const t = load(async () => ({ ok: true, status: 200, json: async () => snapshotWith([], {}) }));
+  t.ui.snap = snapshotWith([], {});
+  t.ui.editing = true;
+
+  await t.post("clarification/approve", { by: "Aayush" }, "Sending\u2026");
+
+  eq(t.ui.editing, false, "the automatic refresh resumes after a decision");
+});
+
+checkAsync("the refresh pauses while an action is in flight", async () => {
+  const stub = statePages(snapshotWith([], { active: true }));
+  const t = load(stub);
+  t.ui.busy = true;
+  t.watchForChanges();
+
+  await intervals[0].fn();
+
+  eq(stub.calls.length, 0, "the action's own response is the newer state");
 });
 
 

@@ -273,11 +273,23 @@ class LiveSession:
         # Messages this process has already routed. The durable store only
         # remembers messages whose work was *committed*, and an enquiry waiting
         # on its clarification commits nothing on purpose — so without this,
-        # every Check mail would re-extract every open enquiry, at one live
-        # model call each. A deferred message is deliberately not added: it has
-        # to be retried once its clarification has gone out.
+        # every poll would re-extract every open enquiry, at one live model
+        # call each. That was expensive when a person pressed the button; with
+        # the server polling on a timer it would be unbounded. A deferred
+        # message is deliberately not added: it has to be retried once its
+        # clarification has gone out.
         self._routed: set[str] = set()
         self.last_poll_new = 0
+        self.last_poll_at: datetime.datetime | None = None
+        """When the mailbox was last read successfully. Displayed, so a room
+        watching a dashboard that has not moved can tell "nothing arrived" from
+        "nothing is running"."""
+
+        self.last_poll_error: str | None = None
+        """The class of the last failed poll, or None. Written by whatever
+        drives the polling — the background poller does, and clears it on the
+        next success — so an unreachable mailbox is visible, not silent."""
+
         self.requests: dict[str, LiveRequest] = {}
         self._restore()
 
@@ -298,7 +310,7 @@ class LiveSession:
         # Messages older than the demonstration are history, not this
         # presentation. Left unread rather than read-and-hidden: extracting a
         # year of newsletters to then not show them would cost a live model
-        # call each and make the first Check mail unusable.
+        # call each and make the first poll unusable.
         in_scope = [e for e in client_mail if self._demonstration.current.covers(e.received_at)]
         self.outside_demonstration = len(client_mail) - len(in_scope)
 
@@ -327,7 +339,7 @@ class LiveSession:
                 # letting it through and catching the refusal below: the
                 # clarification loop calls the model *before* it checks the
                 # transition, so every poll would pay a live call per waiting
-                # reply and Check mail would get slower the longer a
+                # reply and every poll would get slower the longer a
                 # conversation stayed open.
                 self.blocked_messages += 1
                 waiting = self.requests[blocking].waiting_replies
@@ -355,15 +367,30 @@ class LiveSession:
                 self._routed.add(email.message_id)
 
         self._search_rates_for_validated()
+        self.last_poll_at = self._clock.now()
 
     def start_demonstration(self) -> None:
         """Begin a fresh demonstration from this moment.
 
         Deletes nothing — not a Gmail message, not a persisted request, not an
-        audit entry. Earlier work stays exactly where it was and stays visible;
-        it simply stops being what the interface leads with.
+        audit entry. What it does is set the cutoff and empty the *live view*:
+        work from before this moment stays in the durable store, stays
+        correlatable, and stops being surfaced as active.
+
+        Both halves matter. Keeping earlier requests on screen was the previous
+        behaviour and it does not survive a mailbox with history in it: a
+        restarted server rebuilt every persisted request into the interface,
+        and the background poller then ran rate search against each one — so
+        old work did not merely appear, it advanced. Dropping them here is what
+        makes "only the current request is active" true of the session rather
+        than of the page rendering it.
         """
         self._demonstration.start(self._clock.now())
+        self.requests = {
+            request_id: request
+            for request_id, request in self.requests.items()
+            if self.in_demonstration(request_id)
+        }
 
     @property
     def demonstration(self) -> Demonstration:
@@ -466,11 +493,14 @@ class LiveSession:
             validation=outcome.validation,
             enquiry=email,
         )
-        if routed.request_id not in self.requests:
-            # First sight of this request. Recorded now, so a restarted server
-            # knows exactly which requests the demonstration follows rather
-            # than re-deriving it from timestamps it no longer holds.
-            self._demonstration.include(routed.request_id)
+        # Recorded on every routed message, not only the first. Membership is
+        # "this demonstration processed mail for it", and the case that needs
+        # the difference is a server restarted mid-conversation: the enquiry is
+        # in the durable store but not in this demonstration's list, and the
+        # client's reply — which arrives after the new cutoff and is therefore
+        # legitimately in scope — must bring its request into focus rather than
+        # advance one the interface refuses to show. `include` is idempotent.
+        self._demonstration.include(routed.request_id)
 
         request.state = outcome.state
         request.record = outcome.record
@@ -624,13 +654,24 @@ class LiveSession:
     def _restore(self) -> None:
         """Rebuild the interface's view of requests an earlier session persisted.
 
+        Only the ones this demonstration is following. The durable store is
+        still seeded in full — correlation, duplicate protection and the
+        already-sent record all read it, and none of them may lose history —
+        but a request from another demonstration is not active work, and
+        putting it back in `self.requests` would make it so: the rate-search
+        pass walks that dictionary, so a restored VALIDATED request would be
+        priced and pushed to the approval gate by the next background poll.
+
+        With no demonstration active `focuses` is true of everything, so a
+        session built without one restores exactly what it always did.
+
         Validation is recomputed rather than stored: it is a pure function of
         the record, so deriving it cannot disagree with the validator, whereas
         a stored copy could.
         """
         for thread in self._durable.all_threads():
             stored = self._durable.get_request(thread.request_id)
-            if stored is None:
+            if stored is None or not self.in_demonstration(thread.request_id):
                 continue
             self.requests[stored.request_id] = LiveRequest(
                 request_id=stored.request_id,
@@ -681,6 +722,12 @@ def build_live_session(settings: Settings) -> LiveSession:
     Configuration is checked here so a misconfigured demo fails at start-up
     with a sentence a person can act on, rather than as a 500 in front of an
     audience.
+
+    Starting the demonstration is part of starting the server. There is no
+    button for it and nothing to press: the cutoff is *now*, so the mailbox's
+    history — however much of it there is — is out of scope before the first
+    poll runs, and the first thing this process can process is the enquiry
+    somebody sends after it came up.
     """
     if settings.openrouter.api_key is None:
         raise PermanentFailure("No OpenRouter API key. Set TRANSLOG_OPENROUTER__API_KEY in .env.")
@@ -692,4 +739,6 @@ def build_live_session(settings: Settings) -> LiveSession:
         raise PermanentFailure(
             "No internal approver address. Set TRANSLOG_GMAIL__APPROVER_ADDRESS in .env."
         )
-    return LiveSession(settings)
+    session = LiveSession(settings)
+    session.start_demonstration()
+    return session

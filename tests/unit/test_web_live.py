@@ -491,7 +491,6 @@ def test_the_live_surfaces_are_closed_whitelists() -> None:
     }
     assert set(_LIVE_ACTIONS) == {
         "poll",
-        "demonstration/start",
         "clarification/approve",
         "quotation/decide",
     }
@@ -536,9 +535,14 @@ def call(
 
 def test_the_live_server_serves_the_live_page(live_server: DemoServer) -> None:
     status, payload = call(live_server, "GET", "/")
+    page = str(payload["raw"])
 
     assert status == 200
-    assert "LIVE — REAL GMAIL" in str(payload["raw"])
+    # The live view, not the scripted POC's page. Asserted on the script it
+    # loads rather than on a badge: wording is a design decision and this test
+    # is about which file is served.
+    assert '<script src="/live.js" defer></script>' in page
+    assert 'id="live-indicator"' in page
 
 
 def test_the_live_server_refuses_paths_outside_the_whitelist(
@@ -915,22 +919,62 @@ def test_the_timeline_survives_a_restart(settings: Settings, sink: CollectingEma
     assert rows["clarification_sent"]["at"]
 
 
-# --- provenance disclosure ------------------------------------------------------
+# --- the capability strip is gone; the rate disclosure is not -------------------
 
 
-def test_the_provenance_strip_itemises_real_and_simulated(
+def test_the_capability_strip_is_not_in_the_payload(
     settings: Settings, sink: CollectingEmailSink
 ) -> None:
+    """The "Email inbound REAL / Rate provider SIMULATED" strip was internal
+    mechanics on
+    a client-facing screen. Removed from the payload as well as from the page:
+    leaving the data in and hiding it in the browser is how a "removed" feature
+    comes back."""
     session = session_for(settings, sink)
 
-    mode = live_serialize.snapshot(session)["mode"]  # type: ignore[index]
-    values = {row["label"]: row["value"] for row in mode["provenance"]}
+    assert "provenance" not in live_serialize.snapshot(session)["mode"]  # type: ignore[operator]
 
-    assert values["Email inbound"] == "REAL"
-    assert values["Email outbound"] == "REAL"
-    assert values["AI extraction"] == "LIVE"
-    assert values["Rate provider"] == "SIMULATED"
-    assert mode["banner"] == SIMULATED_BANNER
+
+def test_the_capability_strip_is_gone_from_the_page() -> None:
+    static = Path(live_serialize.__file__).resolve().parent / "static"
+    html = (static / "live.html").read_text(encoding="utf-8")
+    js = (static / "live.js").read_text(encoding="utf-8")
+
+    assert 'id="provenance"' not in html
+    assert "provenanceStrip" not in js
+
+
+def test_no_developer_readout_survives_on_the_page() -> None:
+    """The dashboard is for somebody quoting a shipment, not for whoever wrote
+    it. Mailbox counts, poll timings and extraction bookkeeping are removed
+    from the page — the values stay in the payload, where the liveness
+    indicator and the tests can still read them."""
+    static = Path(live_serialize.__file__).resolve().parent / "static"
+    html = (static / "live.html").read_text(encoding="utf-8")
+    js = (static / "live.js").read_text(encoding="utf-8")
+
+    for readout in (
+        "older mailbox message(s) not read",
+        "new message(s) last check",
+        "internal mail skipped",
+        "Shipment details found",
+        "request(s) received since this session started",
+        "send-only credential",
+        "RFC IN-REPLY-TO",
+    ):
+        assert readout not in js, readout
+    assert 'id="demo-scope"' not in html
+    assert 'id="poll-note"' not in html
+
+
+def test_the_simulated_rate_disclosure_survives_the_cleanup(
+    settings: Settings, sink: CollectingEmailSink
+) -> None:
+    """The strip went; the thing that actually matters did not. A simulated
+    price must still announce itself wherever it is shown."""
+    session = session_for(settings, sink)
+
+    assert live_serialize.snapshot(session)["mode"]["banner"] == SIMULATED_BANNER  # type: ignore[index]
 
 
 def test_one_held_draft_does_not_block_every_other_message(
@@ -1112,18 +1156,36 @@ def test_an_error_response_names_the_class_and_nothing_else(
     assert payload == {"error": "RuntimeError"}
 
 
-# --- the page must not open on an empty dashboard by accident -------------------
+# --- the page reads the mailbox by no action of anyone's ------------------------
 
 
-def test_the_frontend_checks_mail_when_it_loads_with_nothing_to_show() -> None:
-    """A freshly started server genuinely knows nothing until it reads the
-    mailbox — an open enquiry is not persisted, by design. Leaving the operator
-    to discover that by pressing a button on an empty page is a missing step,
-    not a design."""
+def test_no_manual_mailbox_control_exists_on_the_page() -> None:
+    """K. Not "the button is hidden": there is no control, no handler and no
+    call. The mailbox is read by the server's own poller, so a demonstration
+    cannot stall on somebody not knowing to click."""
+    static = Path(live_serialize.__file__).resolve().parent / "static"
+    html = (static / "live.html").read_text(encoding="utf-8")
+    js = (static / "live.js").read_text(encoding="utf-8")
+
+    assert "Check mail" not in html
+    assert "btn-poll" not in html
+    assert "Start new demonstration" not in html
+    assert "btn-new-demo" not in html
+    assert "checkMail" not in js
+    assert '"poll"' not in js, "nothing on the page asks the server to read the mailbox"
+    assert "demonstration/start" not in js
+
+
+def test_the_page_watches_for_changes_on_a_timer() -> None:
+    """L, at the level source can prove: the page arms a repeating refresh at
+    load. That it actually redraws on new state is driven for real in
+    tests/js/live_ui.test.js."""
     static = Path(live_serialize.__file__).resolve().parent / "static"
     js = (static / "live.js").read_text(encoding="utf-8")
 
-    assert "if (ui.snap && !ui.snap.requests.length) checkMail();" in js
+    assert "REFRESH_MS" in js
+    assert "setInterval" in js
+    assert "watchForChanges();" in js
 
 
 def test_the_frontend_bounds_how_long_it_will_wait() -> None:
@@ -1270,20 +1332,6 @@ def test_the_label_follows_the_audit_event_and_not_the_request_state(
     sent = [e for e in restarted.audit.events if e.event.value == "clarification_sent"]
     assert sent, "the confirming event must survive the restart"
     assert clarification_row(restarted)["label"] == "Clarification sent"
-
-
-# --- the button label -----------------------------------------------------------
-
-
-def test_the_check_mail_button_renders_no_null_child() -> None:
-    """`replaceChildren` stringifies whatever it is given, so a `null` child
-    renders as the literal text "null" — which is how the button came to read
-    "nullCheck mail" when idle."""
-    static = Path(live_serialize.__file__).resolve().parent / "static"
-    js = (static / "live.js").read_text(encoding="utf-8")
-
-    button_render = js[js.index('const poll = document.getElementById("btn-poll")') :][:600]
-    assert ".filter((child) => child != null)" in button_render
 
 
 # --- the clarification approval still reaches the real Gmail send path ----------
@@ -1733,10 +1781,14 @@ def test_an_old_reply_cannot_attach_itself_to_a_new_demonstration(
     assert only_request(session).reply_received is False  # type: ignore[attr-defined]
 
 
-def test_a_request_from_before_the_demonstration_stays_out_of_focus(
+def test_a_request_from_before_the_demonstration_leaves_the_live_view(
     settings: Settings, sink: CollectingEmailSink
 ) -> None:
-    """Kept, shown, and not led with. Starting a demonstration deletes nothing."""
+    """E, at the session level. A new session leads with its own work and
+    nothing else — and it drops the earlier request from the *session*, not
+    from the page: a request left in `session.requests` is still walked by the
+    rate-search pass on every background poll, so filtering it in the browser
+    would hide work that was still being done."""
     session = session_for(settings, sink)
     session.poll()
     old_id = only_request(session).request_id  # type: ignore[attr-defined]
@@ -1744,7 +1796,8 @@ def test_a_request_from_before_the_demonstration_stays_out_of_focus(
     session.start_demonstration()
 
     assert session.in_demonstration(old_id) is False
-    assert old_id in session.requests, "the earlier request is kept, not discarded"
+    assert old_id not in session.requests, "it is no longer active work"
+    assert live_serialize.snapshot(session)["requests"] == []
 
 
 def test_starting_a_demonstration_deletes_no_persisted_work(
@@ -1763,15 +1816,11 @@ def test_starting_a_demonstration_deletes_no_persisted_work(
 def test_the_focus_survives_a_restart(settings: Settings, sink: CollectingEmailSink) -> None:
     """Membership is recorded, not re-derived from timestamps a restarted
     server may no longer hold."""
-    session = LiveSession(
-        settings,
-        source=StubSource(ENQUIRY),  # type: ignore[arg-type]
-        sink=sink,
-        extractor=ScriptedExtractor(ENQUIRY_EXTRACTION),
-    )
+    session = scoped_session(settings, sink, emails=(ENQUIRY,), extractions=(ENQUIRY_EXTRACTION,))
     session.start_demonstration()
     session.poll()
     request_id = only_request(session).request_id  # type: ignore[attr-defined]
+    session.approve_clarification(by=APPROVER)  # commits it, so a restart can see it
 
     restarted = LiveSession(
         settings,
@@ -1782,16 +1831,17 @@ def test_the_focus_survives_a_restart(settings: Settings, sink: CollectingEmailS
 
     assert restarted.demonstration.is_active is True
     assert restarted.in_demonstration(request_id) is True
+    assert request_id in restarted.requests, "a followed request is still restored"
 
 
 # --- what the dashboard is told -------------------------------------------------
 
 
-def test_the_snapshot_leads_with_the_demonstration_and_admits_the_rest(
+def test_the_snapshot_carries_this_session_and_admits_what_it_skipped(
     settings: Settings, sink: CollectingEmailSink
 ) -> None:
-    """Focus, not concealment: the earlier request is still listed, and the
-    count of unread older mail is stated outright."""
+    """E. One active request on the dashboard — and the mailbox history that
+    was left unread is stated outright rather than quietly dropped."""
     from translog_quote.adapters.clock import FixedClock
 
     stale = ENQUIRY.model_copy(
@@ -1825,22 +1875,15 @@ def test_the_snapshot_leads_with_the_demonstration_and_admits_the_rest(
 
     assert demo["active"] is True
     assert demo["following"] == 1
-    assert demo["earlier_requests"] == 1
     assert demo["outside_messages"] == 1, "the three-day-old message was not read"
-    # Focus first, history after — ordered by the session, not the browser.
-    assert snap["requests"][0]["in_demonstration"] is True  # type: ignore[index]
-    assert snap["requests"][-1]["in_demonstration"] is False  # type: ignore[index]
+    ids = [row["request_id"] for row in snap["requests"]]  # type: ignore[index]
+    assert len(ids) == 1, "the earlier request is not active work in this session"
 
 
 def test_a_fresh_untouched_request_is_flagged_as_new(
     settings: Settings, sink: CollectingEmailSink
 ) -> None:
-    session = LiveSession(
-        settings,
-        source=StubSource(ENQUIRY),  # type: ignore[arg-type]
-        sink=sink,
-        extractor=ScriptedExtractor(ENQUIRY_EXTRACTION),
-    )
+    session = scoped_session(settings, sink, emails=(ENQUIRY,), extractions=(ENQUIRY_EXTRACTION,))
     session.start_demonstration()
     session.poll()
 
@@ -1851,26 +1894,11 @@ def test_the_new_badge_clears_once_the_request_is_under_way(
     settings: Settings, sink: CollectingEmailSink
 ) -> None:
     """Once a clarification has gone out the badge would be describing the past."""
-    session = LiveSession(
-        settings,
-        source=StubSource(ENQUIRY),  # type: ignore[arg-type]
-        sink=sink,
-        extractor=ScriptedExtractor(ENQUIRY_EXTRACTION),
-    )
+    session = scoped_session(settings, sink, emails=(ENQUIRY,), extractions=(ENQUIRY_EXTRACTION,))
     session.start_demonstration()
     session.poll()
 
     session.approve_clarification(by=APPROVER)
-
-    assert live_serialize.snapshot(session)["requests"][0]["is_new"] is False  # type: ignore[index]
-
-
-def test_an_earlier_request_is_never_badged_new(
-    settings: Settings, sink: CollectingEmailSink
-) -> None:
-    session = session_for(settings, sink)
-    session.poll()
-    session.start_demonstration()
 
     assert live_serialize.snapshot(session)["requests"][0]["is_new"] is False  # type: ignore[index]
 
@@ -1899,17 +1927,15 @@ def test_a_completed_step_is_never_marked_as_waiting_on_anyone(
             assert row["waiting_on"] is None
 
 
-# --- starting a demonstration over HTTP -----------------------------------------
+# --- the demonstration starts itself --------------------------------------------
 
 
-def test_a_demonstration_can_be_started_from_the_browser(
-    live_server: DemoServer, sink: CollectingEmailSink
-) -> None:
-    status, snap = call(live_server, "POST", "/api/live/demonstration/start", {})
+def test_the_browser_cannot_start_a_demonstration(live_server: DemoServer) -> None:
+    """The control is gone from the page and the endpoint behind it is gone
+    from the server. A demonstration begins when the process does."""
+    status, _ = call(live_server, "POST", "/api/live/demonstration/start", {})
 
-    assert status == 200
-    assert snap["demonstration"]["active"] is True  # type: ignore[index]
-    assert sink.sent == [], "starting a demonstration sends nothing"
+    assert status == 404
 
 
 # --- same-origin guard: CSRF and DNS rebinding ----------------------------------

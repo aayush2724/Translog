@@ -23,6 +23,7 @@ from urllib.parse import unquote
 from translog_quote.domain.quotation import NotADecision
 from translog_quote.errors import TranslogError
 from translog_quote.interface.web import live_serialize, serialize
+from translog_quote.interface.web.live_poller import LivePoller
 from translog_quote.interface.web.live_session import (
     LiveSequenceError,
     LiveSession,
@@ -98,17 +99,15 @@ def _selected(query: str) -> str | None:
 
 
 def _live_poll(session: LiveSession, body: dict[str, object]) -> None:
-    session.poll()
+    """Read the mailbox once. Reads and processes; sends nothing.
 
-
-def _live_start_demonstration(session: LiveSession, body: dict[str, object]) -> None:
-    """Begin a fresh demonstration from this moment.
-
-    Deletes nothing: not a Gmail message, not a persisted request, not an audit
-    entry. It records a cutoff, and earlier work stops being what the interface
-    leads with.
+    The same call `LivePoller` makes on its timer, which is what actually
+    drives the demonstration — no page offers this and nobody has to invoke it.
+    It stays reachable because it is the one live action with no side effect
+    outside the session, and it is how the flow is driven end to end over real
+    HTTP in the tests.
     """
-    session.start_demonstration()
+    session.poll()
 
 
 def _live_approve_clarification(session: LiveSession, body: dict[str, object]) -> None:
@@ -146,7 +145,6 @@ def _live_decide(session: LiveSession, body: dict[str, object]) -> None:
 #: Every live action a browser may take. A literal table, like the static one.
 _LIVE_ACTIONS: dict[str, Callable[[LiveSession, dict[str, object]], None]] = {
     "poll": _live_poll,
-    "demonstration/start": _live_start_demonstration,
     "clarification/approve": _live_approve_clarification,
     "quotation/decide": _live_decide,
 }
@@ -181,12 +179,23 @@ class DemoServer(ThreadingHTTPServer):
         settings: Settings | None = None,
         *,
         live_session: LiveSession | None = None,
+        poll_interval_seconds: float | None = None,
     ) -> None:
         super().__init__(address, DemoRequestHandler)
         self._settings = settings
         self.lock = threading.Lock()
         self.session = DemoSession(settings)
         self.live = live_session
+        # The live view has no "check mail": the mailbox is read here, on a
+        # timer, under the same lock the request handlers take. Started only
+        # when an interval is given, so a test that wants to drive `poll()`
+        # itself gets a server that reads nothing behind its back.
+        self.poller: LivePoller | None = None
+        if live_session is not None and poll_interval_seconds is not None:
+            self.poller = LivePoller(
+                live_session, lock=self.lock, interval_seconds=poll_interval_seconds
+            )
+            self.poller.start()
 
     @property
     def is_live(self) -> bool:
@@ -194,6 +203,12 @@ class DemoServer(ThreadingHTTPServer):
 
     def reset_session(self) -> None:
         self.session = DemoSession(self._settings)
+
+    def server_close(self) -> None:
+        """Stop polling before the socket goes. Sends nothing on the way out."""
+        if self.poller is not None:
+            self.poller.stop()
+        super().server_close()
 
 
 #: Host header values a browser may legitimately send to a loopback server.
@@ -411,19 +426,32 @@ def run(
     is built *before* the port is bound, so a missing credential or approver
     address stops the process with a readable sentence rather than serving a
     page that fails on its first click.
+
+    Building it also fixes the demonstration's cutoff at this moment and starts
+    the background poller. Between them that is the whole of "open the
+    dashboard and send an enquiry": the mailbox's history is out of scope
+    before the first read, and every read after that happens on its own.
     """
     live_session = None
+    interval: float | None = None
     if live:
         from translog_quote.config import load_settings
 
+        live_settings = settings or load_settings()
         try:
-            live_session = build_live_session(settings or load_settings())
+            live_session = build_live_session(live_settings)
         except TranslogError as exc:
             print(f"Cannot start the live demo: {exc}")
             return 2
+        interval = live_settings.demo.poll_interval_seconds
 
-    with DemoServer((host, port), settings, live_session=live_session) as server:
-        if live_session is None:
+    with DemoServer(
+        (host, port), settings, live_session=live_session, poll_interval_seconds=interval
+    ) as server:
+        if live_session is None or interval is None:
+            # The scripted POC. Both are set together or not at all, so this
+            # reads as one condition rather than two: there is no live session
+            # without the poll that drives it.
             print(f"Translog POC — http://{host}:{port}/")
             print("  Rates: demo data (no WebCargo request is made)")
             print("  Email: not connected (drafts only; nothing can send)")
@@ -434,6 +462,8 @@ def run(
             print("  Rates:    SIMULATED WEBCARGO DATA — DEMO ONLY")
             print(f"  Approver: {live_session.approver_address}")
             print("  Approval: human — nothing sends without an explicit click")
+            print(f"  Mailbox:  read automatically every {interval:g}s — no button to press")
+            print("  Scope:    mail that arrives from now on; the inbox's history is ignored")
         print("  Ctrl+C stops the server.")
         try:
             server.serve_forever()

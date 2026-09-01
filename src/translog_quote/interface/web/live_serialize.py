@@ -419,20 +419,22 @@ def _headline(request: LiveRequest) -> str:
 _UNTOUCHED = frozenset({RequestState.RECEIVED, RequestState.EXTRACTED, RequestState.NEEDS_INFO})
 
 
-def request_summary(request: LiveRequest, *, in_demonstration: bool = True) -> Json:
+def request_summary(request: LiveRequest) -> Json:
     """One dashboard row.
 
     Carries enough to be useful before extraction has filled anything in: the
     subject and the received time come from the email itself, so a request that
     is still being processed reads as a real enquiry rather than as an empty
     row of dashes.
+
+    Every row is a request of the current demonstration — the snapshot passes
+    nothing else — so there is no longer a flag saying which ones are.
     """
     received = request.enquiry.received_at if request.enquiry else None
     fields = request.shipment_field_count
     return {
         "request_id": request.request_id,
-        "in_demonstration": in_demonstration,
-        "is_new": in_demonstration and request.state in _UNTOUCHED,
+        "is_new": request.state in _UNTOUCHED,
         "headline": _headline(request),
         # What the pipeline's own extraction found, reported so the operator
         # can see *why* a message is grouped where it is rather than trusting
@@ -476,7 +478,6 @@ def request_detail(session: LiveSession, request: LiveRequest) -> Json:
         "request_id": request.request_id,
         "headline": _headline(request),
         "subject": request.subject or None,
-        "in_demonstration": session.in_demonstration(request.request_id),
         "is_enquiry": request.looks_like_an_enquiry,
         "shipment_fields": request.shipment_field_count,
         "timeline": timeline_json(request, session.audit.events),
@@ -524,16 +525,17 @@ def request_detail(session: LiveSession, request: LiveRequest) -> Json:
 
 
 def snapshot(session: LiveSession, *, selected: str | None = None) -> Json:
-    """Everything the browser may know, in one shape."""
-    requests = list(session.requests.values())
+    """Everything the browser may know, in one shape.
+
+    Only the requests this demonstration is following. Not a display filter:
+    the session drops out-of-focus work when a demonstration starts and never
+    restores it, so this reports what is actually active rather than hiding
+    what is not. Anything from an earlier demonstration remains in the durable
+    store, correlatable and unaltered — it is simply not this session's work.
+    """
+    focused = [r for r in session.requests.values() if session.in_demonstration(r.request_id)]
     chosen = session.requests.get(selected) if selected else None
     demonstration = session.demonstration
-
-    # Focus first, history after. Ordered here rather than in the browser so
-    # the interface cannot disagree with the session about what it is
-    # following.
-    focused = [r for r in requests if session.in_demonstration(r.request_id)]
-    earlier = [r for r in requests if not session.in_demonstration(r.request_id)]
     return {
         "demonstration": {
             "active": demonstration.is_active,
@@ -541,23 +543,11 @@ def snapshot(session: LiveSession, *, selected: str | None = None) -> Json:
             if demonstration.started_at
             else None,
             "following": len(focused),
-            "earlier_requests": len(earlier),
             "outside_messages": session.outside_demonstration,
         },
         "mode": {
             "badge": "LIVE — REAL GMAIL",
             "banner": SIMULATED_BANNER,
-            # What is real and what is not, itemised. The whole credibility of
-            # the demonstration rests on this being visible and specific rather
-            # than a single vague "demo mode" badge.
-            "provenance": [
-                {"label": "Email inbound", "value": "REAL", "tone": "green"},
-                {"label": "Email outbound", "value": "REAL", "tone": "green"},
-                {"label": "AI extraction", "value": "LIVE", "tone": "green"},
-                {"label": "Validation", "value": "REAL", "tone": "green"},
-                {"label": "Rate provider", "value": "SIMULATED", "tone": "amber"},
-                {"label": "Approval", "value": "HUMAN", "tone": "green"},
-            ],
             "notes": {
                 "inbound": "Real Gmail, read-only credential",
                 "outbound": "Real Gmail, separate send-only credential",
@@ -568,17 +558,20 @@ def snapshot(session: LiveSession, *, selected: str | None = None) -> Json:
             },
             "approver_address": session.approver_address,
         },
-        "requests": [
-            *(request_summary(request, in_demonstration=True) for request in focused),
-            *(request_summary(request, in_demonstration=False) for request in earlier),
-        ],
+        "requests": [request_summary(request) for request in focused],
         "selected": None if chosen is None else request_detail(session, chosen),
         "audit": audit_json(session.audit.events),
         "poll": {
             "new_messages": session.last_poll_new,
             "skipped_internal": session.skipped_internal,
             "deferred": session.blocked_messages,
-            "enquiries": sum(1 for request in requests if request.looks_like_an_enquiry),
-            "unrecognised": sum(1 for request in requests if not request.looks_like_an_enquiry),
+            "enquiries": sum(1 for request in focused if request.looks_like_an_enquiry),
+            "unrecognised": sum(1 for request in focused if not request.looks_like_an_enquiry),
+            # The mailbox is read by a background thread now, so the page has
+            # no click to infer liveness from. These two are how a dashboard
+            # that has not moved tells "nothing arrived" from "nothing is
+            # running", and the error is a class name — never provider detail.
+            "last_checked_at": session.last_poll_at.isoformat() if session.last_poll_at else None,
+            "error": session.last_poll_error,
         },
     }

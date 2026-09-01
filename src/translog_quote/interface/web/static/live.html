@@ -19,19 +19,13 @@
         <span class="brand-sub">Quotation Desk</span>
       </span>
     </div>
-    <div class="topbar-actions">
-      <button id="btn-new-demo" class="btn btn-demo" type="button"><span class="btn-icon" aria-hidden="true">&#9654;</span>Start new demonstration</button>
-      <button id="btn-poll" class="btn btn-primary" type="button">Check mail</button>
-      <span class="badge-live" title="Real Gmail in and out; rates are simulated">LIVE — REAL GMAIL</span>
-    </div>
+    <!-- The one status the operator needs: whether the desk is watching the
+         mailbox. It turns amber when the background poll is failing, so a
+         dashboard that has quietly stopped receiving work says so. -->
+    <p id="live-indicator" class="live" role="status" aria-live="polite">
+      <span class="live-dot" aria-hidden="true"></span><span id="live-label">Live</span>
+    </p>
   </header>
-
-  <div class="notice-bar" role="note">
-    Rate data is <strong>SIMULATED WEBCARGO DATA — DEMO ONLY</strong>. Email is real: inbound on a
-    read-only credential, outbound on a separate send-only credential.
-  </div>
-
-  <div id="provenance" class="provenance-bar"></div>
 
   <p id="busy-banner" class="busy-banner" role="status" aria-live="polite" hidden></p>
   <!-- Outside both views on purpose: an action can fail from either one,
@@ -40,11 +34,9 @@
 
   <main class="container">
     <section id="view-dashboard">
-      <div class="page-head">
+      <div id="page-head" class="page-head" hidden>
         <h1>Quotation requests</h1>
-        <span id="poll-note" class="muted small"></span>
       </div>
-      <p id="demo-scope" class="demo-scope" hidden></p>
       <div id="dashboard-list"></div>
     </section>
 

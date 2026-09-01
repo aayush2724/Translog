@@ -2,22 +2,32 @@
    Only what the scripted POC has no element for: the live badge, the request
    list, the approval card and the activity timeline. */
 
-.badge-live {
+/* The live indicator. Small, quiet, and the only status on the page: a dot
+   and a word. Amber when the background poll last failed, because a desk that
+   has stopped receiving mail must not look like a desk with no mail. */
+.live {
   display: inline-flex;
   align-items: center;
-  gap: 0.4rem;
-  padding: 0.3rem 0.7rem;
-  border-radius: 999px;
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: #7f1d1d;
-  background: #fee2e2;
-  border: 1px solid #fca5a5;
+  gap: 0.45rem;
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 550;
+  color: #5f6b7d;
 }
 
-.topbar-actions { display: flex; align-items: center; gap: 0.75rem; }
+.live-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: #16a34a;
+  box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.14);
+}
+
+.live-stalled { color: #b45309; }
+.live-stalled .live-dot {
+  background: #d97706;
+  box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.16);
+}
 
 .request-list { display: grid; gap: 0.9rem; }
 
@@ -35,6 +45,44 @@
   padding: 2.5rem 1.5rem;
   text-align: center;
   color: #64748b;
+}
+
+/* Nothing has arrived yet. No card, no border, no counters — a desk that is
+   ready rather than a screen that failed to load. */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 6rem 1.5rem 7rem;
+}
+
+.empty-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 4rem;
+  height: 4rem;
+  margin-bottom: 1.6rem;
+  border-radius: 50%;
+  background: var(--wc-accent-soft, #efe9fc);
+  color: var(--wc-accent, #6d28d9);
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
+.empty-title {
+  margin: 0 0 0.5rem;
+  font-size: 1.3rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: #1f2937;
+}
+
+.empty-sub {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #7a8598;
 }
 
 /* The simulated-rate disclosure. Deliberately loud, and repeated at every
@@ -107,33 +155,6 @@
   .timeline-row { grid-template-columns: 1fr; }
 }
 
-
-/* --- provenance strip: what is real and what is not, itemised ------------- */
-
-.provenance-bar {
-  padding: 0.6rem 1.5rem;
-  background: #f8fafc;
-  border-bottom: 1px solid #e2e8f0;
-}
-
-.provenance { display: flex; flex-wrap: wrap; gap: 0.5rem; }
-
-.prov {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0.4rem;
-  padding: 0.25rem 0.6rem;
-  border-radius: 0.35rem;
-  font-size: 0.74rem;
-  border: 1px solid transparent;
-}
-
-.prov-label { color: #475569; }
-.prov-value { font-weight: 700; letter-spacing: 0.04em; }
-.prov-green { background: #f0fdf4; border-color: #bbf7d0; }
-.prov-green .prov-value { color: #15803d; }
-.prov-amber { background: #fffbeb; border-color: #fde68a; }
-.prov-amber .prov-value { color: #b45309; }
 
 /* --- the request card ----------------------------------------------------- */
 
@@ -213,17 +234,16 @@
 
 /* --- dashboard grouping --------------------------------------------------- */
 
+/* The one subheading the dashboard has, and only when there is a second band
+   to name. The request counts that used to sit beside it were bookkeeping. */
 .group-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 1rem;
-  margin: 1.5rem 0 0.75rem;
+  margin: 2rem 0 0.9rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #8a93a5;
 }
-
-.group-head h2 { margin: 0; font-size: 1rem; letter-spacing: 0.02em; }
-.group-head:first-child { margin-top: 0; }
-.group-muted h2 { color: #64748b; font-weight: 600; }
 
 /* Muted, never hidden. An unrecognised message stays readable and openable —
    the operator has to be able to check the classification, not trust it. */
@@ -289,82 +309,6 @@
   font-size: 0.78rem;
 }
 
-/* --- demonstration focus --------------------------------------------------
-   Earlier work stays on the page. It is dimmed and pushed below, never
-   removed: the point is that the room follows one enquiry, not that the
-   mailbox looks emptier than it is. */
-
-.demo-scope {
-  margin: 0 0 1rem;
-  padding: 0.5rem 0.75rem;
-  border-radius: 0.4rem;
-  background: #f1f5f9;
-  border: 1px solid #e2e8f0;
-  color: #475569;
-  font-size: 0.78rem;
-}
-
-.badge-new {
-  display: inline-block;
-  margin-right: 0.5rem;
-  padding: 0.1rem 0.45rem;
-  border-radius: 0.25rem;
-  background: #dcfce7;
-  border: 1px solid #86efac;
-  color: #15803d;
-  font-size: 0.66rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-}
-
-/* --- "Start new demonstration" -------------------------------------------
-   It reads as the primary action of the page, so it has to look like one.
-   It previously borrowed `.btn-ghost` — transparent, muted grey text — which
-   is the house style for a secondary control and made the button look
-   disabled.
-
-   Given its own class rather than a change to `.btn-ghost`, because that class
-   is shared with the scripted POC's "Restart demo" button, where muted is
-   correct. `live.css` is loaded only by the live view, so this cannot reach it.
-
-   Shape, padding, transition and the hover lift all still come from `.btn` in
-   app.css; only colour is set here.
-
-   Contrast against white, measured: base 7.10:1, hover 8.98:1 — both clear
-   WCAG AAA for normal text, not merely AA. */
-
-.btn-demo {
-  background: #6d28d9;
-  color: #fff;
-  border-color: #6d28d9;
-}
-
-.btn-demo:hover:not(:disabled) {
-  background: #5b21b6;
-  border-color: #5b21b6;
-}
-
-.btn-demo:active:not(:disabled) {
-  background: #4c1d95;
-  border-color: #4c1d95;
-}
-
-/* A visible keyboard focus ring. The lift on hover is mouse-only feedback, so
-   without this the button is markedly harder to use from the keyboard than
-   with a pointer. */
-.btn-demo:focus-visible {
-  outline: 2px solid #4c1d95;
-  outline-offset: 2px;
-}
-
-/* A text glyph, matching the ✓ ⏳ ● ○ the timeline already uses — no icon
-   font or SVG set is introduced for one button. */
-.btn-demo .btn-icon {
-  margin-right: 0.4rem;
-  font-size: 0.72em;
-  vertical-align: 0.08em;
-}
-
 /* ==================================================================== */
 /* Marketplace layer — the live view styled like the rate platforms the  */
 /* room already knows: cool slate workspace, indigo action colour, rate  */
@@ -373,52 +317,69 @@
 /* ==================================================================== */
 
 :root {
-  --wc-bg: #f3f5fb;
+  --wc-bg: #fafafb;
   --wc-card: #ffffff;
-  --wc-ink: #16203a;
+  --wc-ink: #1a2233;
   --wc-accent: #6d28d9;
   --wc-accent-deep: #5b21b6;
   --wc-accent-soft: #efe9fc;
-  --wc-line: #dde2f0;
-  --wc-shadow: 0 1px 2px rgba(22, 32, 58, 0.06), 0 8px 24px rgba(22, 32, 58, 0.07);
-  --wc-shadow-lift: 0 4px 10px rgba(22, 32, 58, 0.1), 0 16px 36px rgba(109, 40, 217, 0.12);
+  --wc-line: #e8eaf0;
+  --wc-shadow: 0 1px 2px rgba(22, 32, 58, 0.04);
+  --wc-shadow-lift: 0 1px 3px rgba(22, 32, 58, 0.07), 0 6px 16px rgba(22, 32, 58, 0.05);
 }
 
-body { background: var(--wc-bg); }
+body { background: var(--wc-bg); color: var(--wc-ink); }
 
+/* A light header. The dark violet slab read as a product banner; an internal
+   desk wants a hairline and its own name, with the accent kept for the mark
+   and the actions rather than spent on a full-width gradient. */
 .topbar {
-  background: linear-gradient(100deg, #190f2e 0%, #26164a 55%, #37206b 100%);
-  border-bottom: 3px solid var(--wc-accent);
+  padding: 0.9rem 2rem;
+  background: var(--wc-card);
+  border-bottom: 1px solid var(--wc-line);
+  color: var(--wc-ink);
 }
-.brand-mark { background: var(--wc-accent); border-radius: 10px; }
+.brand-mark {
+  background: var(--wc-accent);
+  border-radius: 9px;
+  width: 2.1rem;
+  height: 2.1rem;
+  font-size: 0.82rem;
+}
+.brand-name { color: var(--wc-ink); font-size: 1rem; font-weight: 600; }
+.brand-sub { color: #8a93a5; font-size: 0.66rem; letter-spacing: 0.16em; }
+
+.container { max-width: 980px; padding: 2.25rem 1.5rem 4rem; }
 
 .card {
   background: var(--wc-card);
   border: 1px solid var(--wc-line);
   box-shadow: var(--wc-shadow);
   border-radius: 12px;
-  transition: box-shadow 0.25s var(--ease-out), transform 0.25s var(--ease-out);
-  animation: rise 0.35s var(--ease-out) both;
+  padding: 1.4rem 1.6rem;
+  transition: box-shadow 0.2s var(--ease-out), border-color 0.2s var(--ease-out);
 }
-@keyframes rise {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: none; }
-}
-.request-card:hover {
-  box-shadow: var(--wc-shadow-lift);
-  transform: translateY(-2px);
-}
+.request-card:hover { box-shadow: var(--wc-shadow-lift); border-color: #d9dce6; }
 
 .btn-primary {
   background: var(--wc-accent);
-  transition: background 0.2s, box-shadow 0.2s, transform 0.15s;
+  transition: background 0.2s;
 }
-.btn-primary:hover:not(:disabled) {
-  background: var(--wc-accent-deep);
-  box-shadow: 0 6px 16px rgba(109, 40, 217, 0.35);
-  transform: translateY(-1px);
-}
+.btn-primary:hover:not(:disabled) { background: var(--wc-accent-deep); }
 :focus-visible { outline-color: var(--wc-accent); }
+
+/* app.css draws this in the scripted POC's warm stone; against the neutral
+   canvas here it reads as a stray tan line. */
+.footer {
+  max-width: 980px;
+  border-top: 1px solid var(--wc-line);
+  color: #9aa3b2;
+}
+
+h1 { font-size: 1.3rem; font-weight: 600; }
+.page-head { margin-bottom: 1.25rem; }
+.request-title { font-size: 1.05rem; font-weight: 600; }
+.eyebrow { color: #98a1b2; letter-spacing: 0.08em; }
 
 /* ------------------------------------------------ the search strip */
 
@@ -430,7 +391,7 @@ body { background: var(--wc-bg); }
   padding: 0.7rem 1rem;
   margin: 0.75rem 0;
   border-radius: 10px;
-  background: linear-gradient(100deg, #f0f2ff, #f7f8ff);
+  background: #fbfaff;
   border: 1px solid var(--wc-accent-soft);
 }
 .search-leg { display: inline-flex; align-items: center; gap: 0.6rem; font-weight: 650; color: var(--wc-ink); }
@@ -459,13 +420,12 @@ body { background: var(--wc-bg); }
   border: 1px solid var(--wc-line);
   border-radius: 12px;
   background: var(--wc-card);
-  transition: box-shadow 0.2s var(--ease-out), transform 0.2s var(--ease-out), border-color 0.2s;
-  animation: rise 0.35s var(--ease-out) both;
+  transition: box-shadow 0.2s var(--ease-out), border-color 0.2s;
 }
-.rate-card:hover { box-shadow: var(--wc-shadow-lift); transform: translateY(-2px); }
+.rate-card:hover { box-shadow: var(--wc-shadow-lift); border-color: #d9dce6; }
 .rate-card.rate-selected {
-  border: 2px solid var(--wc-accent);
-  background: linear-gradient(100deg, #fbfbff, #f4f6ff);
+  border: 1px solid var(--wc-accent);
+  background: #fcfbff;
 }
 .rate-ribbon {
   position: absolute;
@@ -561,40 +521,25 @@ body { background: var(--wc-bg); }
 
 /* ------------------------------------------------ timeline as a stepper */
 
+/* The timeline as a plain stepper. The pulsing current marker was motion for
+   its own sake: the row is already the only one in accent colour and bold. */
 #timeline .tl { position: relative; }
-#timeline .tl-mark {
-  transition: transform 0.2s var(--ease-out);
-}
-#timeline .tl-current .tl-mark {
-  color: var(--wc-accent);
-  animation: stepPulse 1.6s ease-in-out infinite;
-}
-@keyframes stepPulse {
-  0%, 100% { transform: scale(1); opacity: 1; }
-  50% { transform: scale(1.35); opacity: 0.65; }
-}
+#timeline .tl-current .tl-mark { color: var(--wc-accent); }
 #timeline .tl-done .tl-mark { color: var(--wc-accent-deep); }
 
 /* ------------------------------------------------ busy + errors */
 
 .busy-banner {
-  background: linear-gradient(90deg, var(--wc-accent-soft), #f4f6ff, var(--wc-accent-soft));
-  background-size: 200% 100%;
-  animation: shimmer 1.4s linear infinite;
-  border: 1px solid var(--wc-accent-soft);
+  padding: 0.5rem 2rem;
+  background: var(--wc-accent-soft);
+  border: none;
+  border-bottom: 1px solid #e3daf8;
   color: var(--wc-accent-deep);
-}
-@keyframes shimmer {
-  from { background-position: 200% 0; }
-  to { background-position: 0 0; }
+  font-size: 0.8rem;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .card, .rate-card { animation: none; }
-  #timeline .tl-current .tl-mark { animation: none; }
-  .busy-banner { animation: none; }
-  .rate-card:hover, .request-card:hover, .btn-primary:hover:not(:disabled) { transform: none; }
-}
+/* The only motion left on the page is the spinner on an action the operator
+   started, and it already has a reduced-motion rule of its own. */
 
 /* The hidden attribute must always win: .banner sets display, which would
    otherwise resurrect an empty #action-error strip when there is no error. */
