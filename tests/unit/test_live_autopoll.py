@@ -46,7 +46,7 @@ from translog_quote.adapters.store import JsonFileStore
 from translog_quote.config import Settings
 from translog_quote.domain.quotation import INTERNAL_SUBJECT_PREFIX
 from translog_quote.domain.workflow import RequestState
-from translog_quote.errors import TransientFailure
+from translog_quote.errors import PermanentFailure, TransientFailure
 from translog_quote.interface.web import live_serialize
 from translog_quote.interface.web.live_poller import LivePoller
 from translog_quote.interface.web.live_session import LiveSession, build_live_session
@@ -363,6 +363,117 @@ def test_repeated_polls_after_the_quotation_send_nothing_further(
 
     assert session.requests[request_id].state is RequestState.QUOTATION_SENT
     assert sink.sent == sent_after_decision, "no second quotation reached the client"
+
+
+# --- the mailbox source is built once, not once per poll ------------------------
+
+
+def test_the_gmail_source_is_built_once_and_reused(
+    settings: Settings, sink: CollectingEmailSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A poll on a timer must not rebuild the whole Gmail client stack.
+
+    Constructing a source re-reads the OAuth token file and starts with no
+    access token, so the first call of every poll bought a fresh one from
+    Google. Harmless per button press; on a ten-second timer it is a token
+    refresh and a token-endpoint round trip forever.
+    """
+    builds: list[int] = []
+
+    class Counting:
+        def fetch_new(self) -> tuple[RawEmail, ...]:
+            return ()
+
+    def fake_build(*_args: object, **_kwargs: object) -> Counting:
+        builds.append(1)
+        return Counting()
+
+    monkeypatch.setattr(bootstrap, "build_gmail_email_source", fake_build)
+    session = LiveSession(settings, sink=sink, extractor=ScriptedExtractor(), clock=FixedClock(NOW))
+    session.start_demonstration()
+    poller = poller_for(session)
+
+    for _ in range(5):
+        poller.poll_once()
+
+    assert builds == [1], "five polls, one source"
+
+
+def test_a_source_that_cannot_be_built_is_retried_next_poll(
+    settings: Settings, sink: CollectingEmailSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure is not cached. A missing token file at the moment the first
+    poll runs must not leave the session unable to read mail for the life of
+    the process — the credential can be fixed while the server is up."""
+    attempts: list[int] = []
+
+    class Working:
+        def fetch_new(self) -> tuple[RawEmail, ...]:
+            return ()
+
+    def flaky(*_args: object, **_kwargs: object) -> Working:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise PermanentFailure("no Gmail token file")
+        return Working()
+
+    monkeypatch.setattr(bootstrap, "build_gmail_email_source", flaky)
+    session = LiveSession(settings, sink=sink, extractor=ScriptedExtractor(), clock=FixedClock(NOW))
+    session.start_demonstration()
+    poller = poller_for(session)
+
+    assert poller.poll_once() is False, "the first poll fails"
+    assert session.last_poll_error == "PermanentFailure"
+
+    assert poller.poll_once() is True, "and the next one tries again"
+    assert session.last_poll_error is None
+    assert len(attempts) == 2
+
+
+def test_the_reused_source_still_sees_what_was_sent_after_it_was_built(
+    settings: Settings, sink: CollectingEmailSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Self-sent protection survives the reuse. The source is handed a callable
+    rather than a snapshot, so a source built before a clarification went out
+    still knows about it — which is what stops Translog reading its own words
+    back as a client's."""
+    seen: list[object] = []
+
+    class Recording:
+        def __init__(self, sent_by_us: object) -> None:
+            self.sent_by_us = sent_by_us
+
+        def fetch_new(self) -> tuple[RawEmail, ...]:
+            # Copied, not referenced: the callable hands back the sink's live
+            # set, so keeping the object would make both samples the same one.
+            seen.append(set(self.sent_by_us()))  # type: ignore[operator]
+            return ()
+
+    class TrackingSink(CollectingEmailSink):
+        """A sink that reports provider ids, as the real Gmail one does."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.sent_provider_ids: set[str] = set()
+
+    tracking = TrackingSink()
+    monkeypatch.setattr(
+        bootstrap,
+        "build_gmail_email_source",
+        lambda *_a, **kw: Recording(kw["sent_by_us"]),
+    )
+    session = LiveSession(
+        settings, sink=tracking, extractor=ScriptedExtractor(), clock=FixedClock(NOW)
+    )
+    session.start_demonstration()
+    poller = poller_for(session)
+    poller.poll_once()
+
+    tracking.sent_provider_ids.add("gmail-id-of-something-we-just-sent")
+    poller.poll_once()
+
+    assert seen[0] == set()
+    assert "gmail-id-of-something-we-just-sent" in seen[1]  # type: ignore[operator]
 
 
 # --- G. the existing protections are not weakened by polling automatically ------

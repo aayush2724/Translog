@@ -464,10 +464,28 @@ class LiveSession:
     # ------------------------------------------------------------ internals --
 
     def _fetch(self) -> tuple[RawEmail, ...]:
-        source = self._source or bootstrap.build_gmail_email_source(
-            self._settings, max_results=MESSAGE_LIMIT, sent_by_us=self._sent_provider_ids
-        )
-        return source.fetch_new()
+        """Read the mailbox through this session's own source, built once.
+
+        Every poll used to construct a new one. That was reasonable when a
+        person pressed a button; on a timer it meant re-reading the OAuth token
+        file from disk and buying a fresh access token — a round trip to
+        Google's token endpoint ahead of the first Gmail call, every ten
+        seconds, for the life of the process.
+
+        Nothing about what is read changes: the same credential, the same
+        query, the same ceiling. `sent_by_us` was already a callable precisely
+        so a source could outlive the moment it was built, so a reused one
+        still sees every message sent since.
+
+        A failed build leaves the attribute unset rather than caching the
+        failure, so the next poll tries again — one bad moment must not leave
+        the session permanently unable to read mail.
+        """
+        if self._source is None:
+            self._source = bootstrap.build_gmail_email_source(
+                self._settings, max_results=MESSAGE_LIMIT, sent_by_us=self._sent_provider_ids
+            )
+        return self._source.fetch_new()
 
     def _sent_provider_ids(self) -> Collection[str]:
         """Provider ids of everything this session has delivered.
