@@ -25,6 +25,7 @@ Two rules make it safe to leave running:
 from __future__ import annotations
 
 import threading
+import time
 from typing import TYPE_CHECKING
 
 from translog_quote.observability import get_logger
@@ -33,6 +34,31 @@ if TYPE_CHECKING:
     from translog_quote.interface.web.live_session import LiveSession
 
 _log = get_logger("interface.web.live_poller")
+
+#: Where Linux reports this process's resident set size.
+_STATUS = "/proc/self/status"
+
+
+def resident_kb() -> int | None:
+    """This process's RSS in kB, or None where the kernel does not report it.
+
+    Diagnostic only — nothing branches on it. It exists because the hosting
+    plan this demonstration runs on shows no memory graph, and the instance has
+    been killed for exceeding its limit: without this the only evidence of how
+    memory behaved before a kill is that the log stops. Reading one line of
+    /proc costs nothing and turns every poll into a datapoint.
+
+    Returns None rather than raising anywhere /proc is absent (macOS, Windows),
+    so the poller is unchanged on a developer's machine.
+    """
+    try:
+        with open(_STATUS, encoding="utf-8") as status:  # noqa: PTH123 - /proc, not a path op
+            for line in status:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
 
 
 class LivePoller:
@@ -55,6 +81,10 @@ class LivePoller:
         self._interval = max(0.1, interval_seconds)
         self._stopped = threading.Event()
         self._thread: threading.Thread | None = None
+        self._polls = 0
+        """How many polls this process has run. Logged beside RSS so a memory
+        curve can be read against poll count rather than against wall time,
+        which varies with how slow the instance is that minute."""
 
     @property
     def is_running(self) -> bool:
@@ -65,6 +95,11 @@ class LivePoller:
         """Begin polling. Idempotent, so a double start cannot make two threads."""
         if self.is_running:
             return
+        _log.info(
+            "Mailbox poll starting: interval=%.1fs poll=0 rss=%s kB",
+            self._interval,
+            resident_kb(),
+        )
         self._stopped.clear()
         # A daemon thread: Ctrl+C on the server must not be held open by a poll
         # waiting on a Gmail request that will never answer.
@@ -85,6 +120,8 @@ class LivePoller:
         Public because it is the whole unit of work: a test drives this
         directly and gets exactly what the loop does, with no timing in it.
         """
+        self._polls += 1
+        started = time.monotonic()
         try:
             with self._lock:
                 self._session.poll()
@@ -94,9 +131,27 @@ class LivePoller:
             # process, and the only symptom would be a dashboard that quietly
             # stopped moving.
             self._session.last_poll_error = type(exc).__name__
-            _log.warning("Background mailbox poll failed: %s", exc)
+            _log.warning(
+                "Background mailbox poll %d failed after %.1fs (rss=%s kB): %s",
+                self._polls,
+                time.monotonic() - started,
+                resident_kb(),
+                exc,
+            )
             return False
         self._session.last_poll_error = None
+        # One line per poll: the poll number, how long the lock was held, and
+        # the memory the process is holding at that moment. Enough to tell a
+        # flat curve from a climbing one, and to see the last value before a
+        # kill leaves nothing else behind.
+        _log.info(
+            "Poll %d done in %.1fs, rss=%s kB, requests=%d, audit=%d",
+            self._polls,
+            time.monotonic() - started,
+            resident_kb(),
+            len(self._session.requests),
+            len(self._session.audit.events),
+        )
         return True
 
     def _run(self) -> None:

@@ -205,9 +205,15 @@ class DemoServer(ThreadingHTTPServer):
         self.session = DemoSession(self._settings)
 
     def server_close(self) -> None:
-        """Stop polling before the socket goes. Sends nothing on the way out."""
+        """Stop polling and release the mailbox connections, then close.
+
+        Ordered: the poller first, so nothing is mid-request when the clients
+        it uses are closed underneath it.
+        """
         if self.poller is not None:
             self.poller.stop()
+        if self.live is not None:
+            self.live.close()
         super().server_close()
 
 

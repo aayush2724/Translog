@@ -190,10 +190,28 @@ class HttpxGmailTransport:
         self._timeout = timeout_seconds
         self._max_retries = max_retries
         self._backoff = max(0.0, backoff_seconds)
-        self._client = client
+        # One client for the life of this transport, not one per request.
+        # Creating a client per call was the memory defect behind the hosted
+        # demo's out-of-memory kills: performing TLS through a fresh client
+        # each time cost ~34 MB of RSS across 200 requests and never gave it
+        # back, because the SSL contexts and allocator arenas underneath are
+        # not returned to the OS. The same 200 requests through one client
+        # cost nothing measurable. Reuse also means the connection is pooled
+        # rather than re-handshaked on every call.
+        #
+        # An injected client is borrowed, never owned: the caller that made it
+        # decides when it closes.
+        self._owns_client = client is None
+        self._client = client if client is not None else httpx.Client(timeout=timeout_seconds)
         self._sleep = sleep
         self._jitter = jitter
         self._access_token: str | None = None
+
+    def close(self) -> None:
+        """Release the pooled connection. Idempotent, and never closes a
+        client somebody else made and handed in."""
+        if self._owns_client:
+            self._client.close()
 
     def get_json(self, path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
         try:
@@ -232,13 +250,7 @@ class HttpxGmailTransport:
         url = f"{GMAIL_API_BASE}/{path}"
         headers = {"Authorization": f"Bearer {self._ensure_access_token()}"}
         try:
-            if self._client is not None:
-                response = self._client.get(
-                    url, params=params, headers=headers, timeout=self._timeout
-                )
-            else:
-                with httpx.Client(timeout=self._timeout) as client:
-                    response = client.get(url, params=params, headers=headers)
+            response = self._client.get(url, params=params, headers=headers, timeout=self._timeout)
         except httpx.TimeoutException as exc:
             raise TransientFailure(f"Gmail request timed out after {self._timeout}s") from exc
         except httpx.HTTPError as exc:
@@ -263,11 +275,7 @@ class HttpxGmailTransport:
             "grant_type": "refresh_token",
         }
         try:
-            if self._client is not None:
-                response = self._client.post(GOOGLE_TOKEN_URL, data=payload, timeout=self._timeout)
-            else:
-                with httpx.Client(timeout=self._timeout) as client:
-                    response = client.post(GOOGLE_TOKEN_URL, data=payload)
+            response = self._client.post(GOOGLE_TOKEN_URL, data=payload, timeout=self._timeout)
         except httpx.TimeoutException as exc:
             raise TransientFailure("Gmail token refresh timed out") from exc
         except httpx.HTTPError as exc:
@@ -582,6 +590,17 @@ class GmailEmailSource:
         self._max_results = max_results
         self._sent_by_us_ids = sent_by_us
         self._metadata: dict[str, GmailMessageMetadata] = {}
+
+    def close(self) -> None:
+        """Release the transport's pooled connection, if it has one.
+
+        Duck-typed rather than declared on `GmailTransport`: that protocol describes
+        one operation, and widening it to a lifecycle would oblige every test
+        double and fixture in the suite to grow a method none of them need.
+        """
+        closer = getattr(self._transport, "close", None)
+        if callable(closer):
+            closer()
 
     def provider_metadata(self, message_id: str) -> GmailMessageMetadata | None:
         """Gmail's own ids for a message this source returned, if any."""

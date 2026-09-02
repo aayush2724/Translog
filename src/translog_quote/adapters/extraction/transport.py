@@ -117,7 +117,19 @@ class HttpxChatTransport:
         self._timeout = timeout_seconds
         self._max_retries = max_retries
         self._backoff = max(0.0, backoff_seconds)
-        self._client = client
+        # One client for the life of this transport, not one per request.
+        # Creating a client per call was the memory defect behind the hosted
+        # demo's out-of-memory kills: performing TLS through a fresh client
+        # each time cost ~34 MB of RSS across 200 requests and never gave it
+        # back, because the SSL contexts and allocator arenas underneath are
+        # not returned to the OS. The same 200 requests through one client
+        # cost nothing measurable. Reuse also pools the connection rather than
+        # re-handshaking on every call.
+        #
+        # An injected client is borrowed, never owned: whoever made it decides
+        # when it closes.
+        self._owns_client = client is None
+        self._client = client if client is not None else httpx.Client(timeout=timeout_seconds)
         self._sleep = sleep
         self._jitter = jitter
 
@@ -129,6 +141,12 @@ class HttpxChatTransport:
             "HTTP-Referer": "https://github.com/translog/quote-demo",
             "X-Title": "Translog Cargo Quotation Demo",
         }
+
+    def close(self) -> None:
+        """Release the pooled connection. Idempotent, and never closes a
+        client somebody else made and handed in."""
+        if self._owns_client:
+            self._client.close()
 
     def post_chat_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Send, retrying transient failures a bounded number of times.
@@ -171,13 +189,9 @@ class HttpxChatTransport:
 
     def _attempt(self, payload: dict[str, Any]) -> dict[str, Any]:
         try:
-            if self._client is not None:
-                response = self._client.post(
-                    self._url, json=payload, headers=self._headers(), timeout=self._timeout
-                )
-            else:
-                with httpx.Client(timeout=self._timeout) as client:
-                    response = client.post(self._url, json=payload, headers=self._headers())
+            response = self._client.post(
+                self._url, json=payload, headers=self._headers(), timeout=self._timeout
+            )
         except httpx.TimeoutException as exc:
             raise TransientFailure(f"OpenRouter request timed out after {self._timeout}s") from exc
         except httpx.HTTPError as exc:

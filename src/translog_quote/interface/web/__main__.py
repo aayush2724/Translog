@@ -7,6 +7,7 @@ import os
 
 from translog_quote.config import ENV_FILE_VAR, load_settings
 from translog_quote.interface.web.server import DEFAULT_HOST, DEFAULT_PORT, run
+from translog_quote.observability import configure_logging
 
 #: A platform that assigns the port tells the process which one through the
 #: environment — Render, Heroku and Cloud Run all use PORT. Read as a *default*
@@ -70,6 +71,14 @@ def main(argv: list[str] | None = None) -> int:
         # demo silently running against whatever .env points at.
         print(exc)
         return 2
+
+    # Nothing had ever called this, so the package logger carried no handler and
+    # no level: every `_log.info` in the application was dropped by Python's
+    # WARNING-only fallback, and a deployed run's logs held nothing but access
+    # lines and tracebacks. The diagnostics the code already writes — messages
+    # skipped, replies deferred, polls timed and sized — only exist once this
+    # runs.
+    configure_logging(settings.log_level)
 
     return run(host=args.host, port=args.port, settings=settings, live=args.live)
 

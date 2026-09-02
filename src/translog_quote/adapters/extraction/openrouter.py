@@ -68,6 +68,17 @@ class OpenRouterExtractionAdapter:
 
     # ---------------------------------------------------------------- port --
 
+    def close(self) -> None:
+        """Release the transport's pooled connection, if it has one.
+
+        Duck-typed rather than declared on `ChatTransport`: that protocol describes
+        one operation, and widening it to a lifecycle would oblige every test
+        double and fixture in the suite to grow a method none of them need.
+        """
+        closer = getattr(self._transport, "close", None)
+        if callable(closer):
+            closer()
+
     def extract_shipment(self, text: str) -> ExtractionResult:
         payload = self._build_payload(text)
         body = self._transport.post_chat_completion(payload)

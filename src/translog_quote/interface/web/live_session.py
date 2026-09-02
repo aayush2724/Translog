@@ -242,12 +242,21 @@ class LiveSession:
         # the session here, not after a client's mail has been processed.
         self._sink = sink if sink is not None else bootstrap.build_gmail_email_sink(settings)
         self._source = source
+        # Built here rather than left to the router so shutdown can reach it.
+        # `build_inbound_router` would otherwise construct the real adapter
+        # itself and keep it private, and the OpenRouter client inside it would
+        # be the one connection nobody could close. Identical timing — the
+        # router built it at this same moment — and an injected extractor still
+        # wins, so every test is unaffected.
+        self._extractor = (
+            extractor if extractor is not None else bootstrap.build_extractor(settings)
+        )
 
         self._router = bootstrap.build_inbound_router(
             settings,
             new_request_id=_request_id_for,
             store=self._working,
-            extractor=extractor,
+            extractor=self._extractor,
             audit=self.audit,
             sink=self._sink,
             clock=self._clock,
@@ -460,6 +469,23 @@ class LiveSession:
         request.state = outcome.state
         bootstrap.commit_request(self._working, self._durable, request_id)
         return request
+
+    def close(self) -> None:
+        """Release the HTTP connections this session's collaborators hold.
+
+        Each of the three keeps one pooled `httpx.Client` for its lifetime, so
+        the sockets outlive any single call and want closing when the server
+        does. Duck-typed on purpose: the stubs a test injects have no
+        connections and no `close`, and the ports they satisfy describe the
+        workflow rather than a lifecycle.
+        """
+        for collaborator in (self._source, self._sink, self._extractor):
+            closer = getattr(collaborator, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception:  # noqa: BLE001 - shutdown must not raise
+                    _log.warning("A collaborator refused to close cleanly", exc_info=True)
 
     # ------------------------------------------------------------ internals --
 
