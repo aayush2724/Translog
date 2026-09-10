@@ -44,6 +44,8 @@ __all__ = [
     "Settings",
     "authorize_gmail",
     "authorize_gmail_send",
+    "authorize_webcargo",
+    "build_browser_rate_provider",
     "build_clarification_workflow",
     "build_console_approval",
     "build_location_resolver",
@@ -536,3 +538,38 @@ def build_demo_rate_provider() -> RateSearchPort:
     from translog_quote.adapters.webcargo import DemoRateProvider
 
     return DemoRateProvider()
+
+
+def build_browser_rate_provider(settings: Settings) -> RateSearchPort:
+    """The real WebCargo provider — constructed ONLY by the browser worker.
+
+    An executable blocker for now, in the project's own tradition: the
+    adapter's page interactions are written exclusively against inspected
+    WebCargo UI evidence, and that extraction layer has not landed yet.
+    Everything around it — the queue, the worker loop, the persistent-session
+    lifecycle, the operator re-authentication — is real and tested, so when
+    the extraction layer arrives this function swaps a refusal for a
+    construction and nothing else moves.
+    """
+    from translog_quote.errors import PermanentFailure
+
+    raise PermanentFailure(
+        "The WebCargo browser adapter's page extraction is not implemented "
+        "yet: selectors are written only from inspected WebCargo UI evidence, "
+        "and none is wired. Run the worker with TRANSLOG_WEBCARGO__MODE=mock "
+        "or =demo until the extraction layer lands."
+    )
+
+
+def authorize_webcargo(settings: Settings) -> None:
+    """Run the interactive, headed WebCargo operator sign-in.
+
+    Only ever called by the explicit `--login` worker command — nothing
+    authorizes automatically, and nothing automates the login itself. The
+    same rule `authorize_gmail` established: authentication is a human
+    ceremony, and the code's whole contribution is opening the door on the
+    persistent profile the worker will reuse.
+    """
+    from translog_quote.adapters.webcargo.browser.reauth import run_operator_login
+
+    run_operator_login(settings)

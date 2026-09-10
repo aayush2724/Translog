@@ -44,7 +44,7 @@ def request(**overrides: object) -> RateSearchJobRequest:
 
 def test_identical_requests_share_one_job_identity() -> None:
     assert request().idempotency_key() == request().idempotency_key()
-    assert request().idempotency_key().startswith("rate-search:")
+    assert request().idempotency_key().startswith("rate-search-")
 
 
 @pytest.mark.parametrize(

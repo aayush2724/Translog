@@ -12,7 +12,6 @@ from translog_quote.errors.taxonomy import (
     PermanentFailure,
     TransientFailure,
     TranslogError,
-    UnresolvedFieldMapping,
     UnresolvedLocation,
 )
 
@@ -22,6 +21,5 @@ __all__ = [
     "PermanentFailure",
     "TransientFailure",
     "TranslogError",
-    "UnresolvedFieldMapping",
     "UnresolvedLocation",
 ]

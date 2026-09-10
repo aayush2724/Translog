@@ -45,15 +45,6 @@ class ContractViolation(TranslogError):
     """
 
 
-class UnresolvedFieldMapping(ContractViolation):
-    """A field's source has not been verified, so no mapping may be written.
-
-    This is how an integration blocker travels as executable code rather than as a
-    comment. The known instance is AMB-1: the real WebCargo transit-time source is
-    unverified, so `RealRateMapper` raises this rather than guessing a field.
-    """
-
-
 class IllegalTransition(TranslogError):
     """A state change was attempted that the transition table does not permit.
 

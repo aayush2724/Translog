@@ -103,7 +103,7 @@ runtime-evaluated-base-classes = ["pydantic.BaseModel", "typing.Protocol"]
 # reasoning already applied to `ports/` below.
 "tests/**" = ["S101", "TC001", "TC002", "TC003"]
 # The failure taxonomy names outcomes, not "Errors": ContractViolation and
-# UnresolvedFieldMapping say what went wrong far better than an -Error suffix.
+# UnresolvedLocation say what went wrong far better than an -Error suffix.
 "src/translog_quote/errors/taxonomy.py" = ["N818"]
 # Same reasoning: `NotADecision` says what went wrong at the raise site far
 # better than `NotADecisionError`, and reads as the sentence it is.

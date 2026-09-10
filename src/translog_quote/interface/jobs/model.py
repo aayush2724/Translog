@@ -96,7 +96,9 @@ class RateSearchJobRequest(BaseModel):
         therefore the digest — stable.
         """
         digest = hashlib.sha256(self.model_dump_json().encode("utf-8")).hexdigest()
-        return f"rate-search:{digest}"
+        # A dash, not a colon: RQ permits only letters, numbers, underscores
+        # and dashes in a job id (verified against a live queue).
+        return f"rate-search-{digest}"
 
     def to_query(self) -> RateQuery:
         """The provider query, carrying stated places and no invented codes."""
