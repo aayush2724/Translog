@@ -174,15 +174,15 @@ def simulate_response(query: RateQuery) -> dict[str, Any]:
 def map_rows(payload: dict[str, Any]) -> tuple[Rate, ...]:
     """Stage two: the simulated payload into normalised ``Rate`` values.
 
-    Mirrors ``RealRateMapper``'s contract: it never drops a row and never
-    reorders. A row missing a price or a transit becomes a ``Rate`` with null
-    fields, and the *filter* excludes it later with a reason — so the demo
+    The mapper contract production must also keep: it never drops a row and
+    never reorders. A row missing a price or a transit becomes a ``Rate`` with
+    null fields, and the *filter* excludes it later with a reason — so the demo
     shows the same exclusion behaviour production will.
 
-    This is a mapper for the **simulated** shape. It is deliberately separate
-    from ``RealRateMapper``, whose ``map_transit`` still refuses because the
-    real WebCargo transit field is unverified (AMB-1). Nothing here weakens
-    that: a shape we invented is one we are allowed to read.
+    This is a mapper for the **simulated** shape only, deliberately separate
+    from the browser adapter's mapper, which may read nothing but what the
+    WebCargo UI actually states. A shape we invented is one we are allowed to
+    read; a provider's shape is mapped only from verified sources.
     """
     rows = payload.get("rates")
     if not isinstance(rows, list):

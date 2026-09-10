@@ -1,15 +1,13 @@
-"""Location resolution — implemented twice, for the two kinds of run.
+"""Location resolution.
 
 `StatedLocationResolver` carries the client's wording forward and attaches no
-identifier, which is all the simulated providers need. `WebCargoLocationResolver`
-is the production path and asks the provider; it is unimplemented and refuses
-rather than approximating.
+identifier, which is all the simulated providers need. The production path is
+the WebCargo browser adapter's own location lookup — WebCargo's UI decides what
+a place means on its network, and records itself as the resolver.
 
-Neither infers a code from a place name, and the second never falls back to the
-first.
+Nothing here infers a code from a place name.
 """
 
 from translog_quote.adapters.routing.stated import StatedLocationResolver
-from translog_quote.adapters.routing.webcargo import WebCargoLocationResolver
 
-__all__ = ["StatedLocationResolver", "WebCargoLocationResolver"]
+__all__ = ["StatedLocationResolver"]

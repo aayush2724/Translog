@@ -1,14 +1,13 @@
-"""The mock/real rate-provider switch, which is the whole integration boundary.
+"""The rate-provider switch, which is the whole integration boundary.
 
-`build_rate_provider` is the only place in the system that decides whether a
-rate comes from fixture data or from a provider. Until the Freightos/WebCargo
-partner contract exists, what matters is that the decision is *explicit*: the
-demo must keep working with nothing configured, and real mode must never
-activate by accident.
+`build_rate_provider` is the only place in the system that decides which
+provider a rate comes from. What matters is that the decision is *explicit*:
+the demo must keep working with nothing configured, and no provider that
+reaches out of the process may ever activate by accident.
 
-These tests exist so that the boundary stays ready. When the official contract
-arrives, the real branch gains an implementation and every assertion here still
-describes behaviour it must keep.
+The production (browser) provider is wired by the browser worker's own
+composition path when its mode is selected; these tests pin the simulated
+modes and the default.
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ from tests.unit.test_rate_search import WHEN, record
 from translog_quote import bootstrap
 from translog_quote.adapters.routing import StatedLocationResolver
 from translog_quote.config import Settings, WebCargoMode
-from translog_quote.errors import PermanentFailure
 from translog_quote.pipeline import build_query
 
 RESOLVER = StatedLocationResolver()
@@ -62,24 +60,27 @@ def test_mock_mode_stated_explicitly_is_still_mock() -> None:
     assert provider.adapter_id.startswith("mock")
 
 
-# --- real mode is opt-in, and currently refuses ---------------------------------
+# --- every simulated provider declares itself simulated --------------------------
 
 
-def test_real_mode_must_be_asked_for_by_configuration() -> None:
-    """The switch is the only route to the real adapter. Nothing else — no
-    credential being present, no environment, no fallback — selects it."""
-    provider = bootstrap.build_rate_provider(settings_with(WebCargoMode.REAL))
+def test_demo_mode_is_opt_in_and_flagged_simulated() -> None:
+    """The switch is the only route to the demo provider, and nothing it
+    returns can be presented as live provider data."""
+    provider = bootstrap.build_rate_provider(settings_with(WebCargoMode.DEMO))
 
-    assert not provider.adapter_id.startswith("mock")
+    result = provider.search(build_query(record(), on_date=WHEN, resolver=RESOLVER))
+
+    assert result.adapter_id == "demo-webcargo"
+    assert result.is_simulated is True
 
 
-def test_real_mode_refuses_at_search_rather_than_inventing_rates() -> None:
-    """Until the partner contract exists, the honest outcome is a refusal that
-    names the reason — never a plausible-looking rate."""
-    provider = bootstrap.build_rate_provider(settings_with(WebCargoMode.REAL))
+def test_browser_mode_refuses_outside_the_browser_worker() -> None:
+    """Only the worker owns the persistent session. Any other process asked
+    for browser mode is told to enqueue a job, not handed a browser."""
+    from translog_quote.errors import PermanentFailure
 
-    with pytest.raises(PermanentFailure, match="not implemented"):
-        provider.search(build_query(record(), on_date=WHEN, resolver=RESOLVER))
+    with pytest.raises(PermanentFailure, match="browser worker"):
+        bootstrap.build_rate_provider(settings_with(WebCargoMode.BROWSER))
 
 
 def test_the_mode_is_controlled_by_the_documented_environment_variable(
@@ -87,21 +88,8 @@ def test_the_mode_is_controlled_by_the_documented_environment_variable(
 ) -> None:
     """`TRANSLOG_WEBCARGO__MODE` is the documented control, and unsetting it
     returns to the mock default rather than to anything that calls out."""
-    monkeypatch.setenv("TRANSLOG_WEBCARGO__MODE", "real")
-    assert Settings().webcargo.mode is WebCargoMode.REAL
+    monkeypatch.setenv("TRANSLOG_WEBCARGO__MODE", "demo")
+    assert Settings().webcargo.mode is WebCargoMode.DEMO
 
     monkeypatch.delenv("TRANSLOG_WEBCARGO__MODE")
     assert Settings(_env_file=None).webcargo.mode is WebCargoMode.MOCK  # type: ignore[call-arg]
-
-
-def test_the_refusal_names_no_endpoint_and_no_credential() -> None:
-    """The error is read by whoever tries to switch modes early. It must say
-    what is missing without publishing a guessed endpoint."""
-    provider = bootstrap.build_rate_provider(settings_with(WebCargoMode.REAL))
-
-    with pytest.raises(PermanentFailure) as excinfo:
-        provider.search(build_query(record(), on_date=WHEN, resolver=RESOLVER))
-
-    message = str(excinfo.value).lower()
-    for forbidden in ("http://", "https://", "webcargonet", "password", "cookie"):
-        assert forbidden not in message

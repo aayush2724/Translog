@@ -486,16 +486,22 @@ def build_clarification_workflow(
 def build_rate_provider(settings: Settings) -> RateSearchPort:
     """The configured rate provider.
 
-    `mock` yields fixture rates and labels them as such; `real` yields an adapter
-    that refuses with the reason, because no WebCargo API contract has been
-    provided. This is the only place either concrete class is named.
+    `mock` yields fixture rates and labels them as such; `demo` yields simulated
+    rates priced from the shipment. The production provider is the WebCargo
+    browser adapter, wired in by the browser worker when its mode is selected.
+    This is the only place a concrete provider class is named.
     """
     from translog_quote.config import WebCargoMode
 
-    if settings.webcargo.mode is WebCargoMode.REAL:
-        from translog_quote.adapters.webcargo import RealWebCargoAdapter
+    if settings.webcargo.mode is WebCargoMode.BROWSER:
+        from translog_quote.errors import PermanentFailure
 
-        return RealWebCargoAdapter(base_url=settings.webcargo.base_url)
+        raise PermanentFailure(
+            "The WebCargo browser provider runs only inside the browser worker, "
+            "which owns the persistent authenticated session. This process must "
+            "enqueue a job through the asynchronous rate-search API instead of "
+            "searching directly."
+        )
 
     if settings.webcargo.mode is WebCargoMode.DEMO:
         return build_demo_rate_provider()
@@ -508,22 +514,12 @@ def build_rate_provider(settings: Settings) -> RateSearchPort:
 def build_location_resolver(settings: Settings) -> LocationResolverPort:
     """How a place the client named becomes something a provider understands.
 
-    The only place either resolver is named, and the only place the choice is
-    made. `real` gets the provider's own lookup, which refuses until WebCargo
-    has a published contract; everything else gets the resolver that carries the
-    client's wording forward with no identifier attached.
-
-    The demo resolver is never a fallback for the real one. If production cannot
-    resolve a place, that request fails and says so — substituting demo
-    behaviour would put an unverified location on a real client's quotation.
+    The only place a resolver is named, and the only place the choice is made.
+    The simulated modes get the resolver that carries the client's wording
+    forward with no identifier attached. In production the WebCargo browser
+    adapter resolves places through WebCargo's own location lookup and records
+    itself as the resolver — never a table, never a code inferred from a name.
     """
-    from translog_quote.config import WebCargoMode
-
-    if settings.webcargo.mode is WebCargoMode.REAL:
-        from translog_quote.adapters.routing import WebCargoLocationResolver
-
-        return WebCargoLocationResolver(base_url=settings.webcargo.base_url)
-
     from translog_quote.adapters.routing import StatedLocationResolver
 
     return StatedLocationResolver()

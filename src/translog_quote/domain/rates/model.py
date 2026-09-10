@@ -13,6 +13,7 @@ from translog_quote.domain.shipment import CargoDimensions
 
 
 class TransitUnit(StrEnum):
+    MINUTES = "minutes"
     HOURS = "hours"
     DAYS = "days"
 
@@ -30,9 +31,29 @@ class TransitTime(BaseModel):
     unit: TransitUnit
 
     @property
+    def minutes(self) -> int:
+        """Comparable magnitude. The single ordering key for BR-1.
+
+        Minutes rather than hours, because a duration derived from a provider's
+        own departure and arrival stamps is rarely a whole number of hours.
+        Rounding one so that it could be ranked would place an approximated
+        figure behind a quotation, and would make 37h20m and 37h55m compare
+        equal when they are 35 minutes apart.
+        """
+        if self.unit is TransitUnit.MINUTES:
+            return self.value
+        if self.unit is TransitUnit.HOURS:
+            return self.value * 60
+        return self.value * 24 * 60
+
+    @property
     def hours(self) -> int:
-        """Comparable magnitude. The single ordering key for BR-1."""
-        return self.value if self.unit is TransitUnit.HOURS else self.value * 24
+        """Completed whole hours. For display and audit only, never for ranking.
+
+        Truncates a minute-precision duration, which is exactly why `minutes`
+        is what selection compares.
+        """
+        return self.minutes // 60
 
 
 class RateRestrictions(BaseModel):

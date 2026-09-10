@@ -12,13 +12,8 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from translog_quote.adapters.routing import StatedLocationResolver, WebCargoLocationResolver
-from translog_quote.adapters.webcargo import (
-    DEMO_RATES,
-    MockWebCargoAdapter,
-    RealRateMapper,
-    RealWebCargoAdapter,
-)
+from translog_quote.adapters.routing import StatedLocationResolver
+from translog_quote.adapters.webcargo import DEMO_RATES, MockWebCargoAdapter
 from translog_quote.domain.rates import (
     FASTEST_ELIGIBLE,
     ExclusionReason,
@@ -35,12 +30,7 @@ from translog_quote.domain.rates import (
 )
 from translog_quote.domain.shipment import CargoDimensions, RequestSource, ShipmentRecord
 from translog_quote.domain.workflow import RequestState
-from translog_quote.errors import (
-    ContractViolation,
-    PermanentFailure,
-    UnresolvedFieldMapping,
-    UnresolvedLocation,
-)
+from translog_quote.errors import ContractViolation, UnresolvedLocation
 from translog_quote.pipeline import RateSearchStage, build_query
 
 DIMS = CargoDimensions(length=34, width=24, height=6)
@@ -108,10 +98,20 @@ def test_an_unfamiliar_place_is_accepted_rather_than_refused() -> None:
     assert query.origin.resolved_by is None
 
 
+class _RefusingResolver:
+    """A resolver that cannot answer. The contract every production resolver
+    must keep: refuse loudly, never fall back to a guessed identifier."""
+
+    resolver_id = "refusing-test-resolver"
+
+    def resolve(self, place: str) -> object:
+        raise UnresolvedLocation(f"cannot resolve {place!r}; refusing rather than guessing")
+
+
 def test_a_resolver_that_cannot_resolve_refuses_rather_than_guessing() -> None:
     """A guessed airport code searches the wrong lane and looks successful."""
     with pytest.raises(UnresolvedLocation):
-        build_query(record(origin="Dubai"), on_date=WHEN, resolver=WebCargoLocationResolver())
+        build_query(record(origin="Dubai"), on_date=WHEN, resolver=_RefusingResolver())
 
 
 def test_a_query_needs_weight_and_dimensions() -> None:
@@ -349,85 +349,6 @@ def test_the_mock_makes_no_network_call() -> None:
     assert not any(hasattr(adapter, attr) for attr in ("_client", "_url", "_api_key", "_password"))
 
 
-# --- 4. the real adapter refuses ---------------------------------------------------
-
-
-def test_the_real_adapter_refuses_with_the_reason() -> None:
-    adapter = RealWebCargoAdapter()
-    query = build_query(record(), on_date=WHEN, resolver=RESOLVER)
-
-    with pytest.raises(PermanentFailure, match="not implemented"):
-        adapter.search(query)
-
-
-def test_the_real_adapter_accepts_no_credential() -> None:
-    """There is nothing to authenticate against; a password parameter would
-    invite one to be configured for an integration that does not exist."""
-    with pytest.raises(TypeError):
-        RealWebCargoAdapter(username="u", password="p")  # type: ignore[call-arg]
-
-
-# --- 2, 3. mapping the documented response -------------------------------------
-
-
-def test_the_mapper_reads_the_documented_fields() -> None:
-    mapped = RealRateMapper().map_row(
-        {
-            "airline": "Emirates",
-            "product": "GEN",
-            "total": 20762.10,
-            "currency": "INR",
-            "accepts_liquids": True,
-        }
-    )
-
-    assert mapped.carrier_name == "Emirates"
-    assert mapped.total_amount == Decimal("20762.1")
-    assert mapped.restrictions.accepts_liquids is True
-
-
-def test_the_mapper_leaves_transit_unmapped_and_says_why() -> None:
-    """AMB-1 as an executable blocker rather than a comment."""
-    with pytest.raises(UnresolvedFieldMapping, match="transit-time source is unverified"):
-        RealRateMapper().map_transit({"airline": "Emirates"})
-
-
-def test_an_unmapped_transit_becomes_an_exclusion_not_a_crash() -> None:
-    mapped = RealRateMapper().map_row(
-        {"airline": "Emirates", "product": "GEN", "total": 1, "currency": "INR"}
-    )
-
-    assert mapped.transit is None
-    assert filter_rates((mapped,)).excluded[0].reason is ExclusionReason.UNRANKABLE_NO_TRANSIT
-
-
-@pytest.mark.parametrize(
-    "row",
-    [
-        "not an object",
-        {"product": "GEN"},
-        {"airline": "", "product": "GEN"},
-        {"airline": "Emirates"},
-        {"airline": "Emirates", "product": "GEN", "total": "not-a-number"},
-        {"airline": "Emirates", "product": "GEN", "total": True},
-    ],
-)
-def test_a_malformed_row_is_a_contract_violation(row: object) -> None:
-    """External data is validated before it enters the domain."""
-    with pytest.raises(ContractViolation):
-        RealRateMapper().map_row(row)  # type: ignore[arg-type]
-
-
-def test_the_mapper_never_drops_a_row() -> None:
-    """A mapper that discarded rows would hide the integration gaps this stage
-    exists to surface."""
-    rows = [{"airline": f"C{i}", "product": "GEN", "total": i + 1} for i in range(4)]
-
-    mapped = [RealRateMapper().map_row(r) for r in rows]
-
-    assert len(mapped) == len(rows)
-
-
 # --- 12. no secret leakage ----------------------------------------------------------
 
 
@@ -439,12 +360,3 @@ def test_nothing_in_the_rate_path_carries_a_credential() -> None:
     dumped = repr(outcome)
     for secret in ("password", "api_key", "Bearer", "Authorization", "session="):
         assert secret.lower() not in dumped.lower()
-
-
-def test_the_real_adapter_error_names_no_endpoint_or_credential() -> None:
-    with pytest.raises(PermanentFailure) as excinfo:
-        RealWebCargoAdapter().search(build_query(record(), on_date=WHEN, resolver=RESOLVER))
-
-    message = str(excinfo.value)
-    assert "webcargonet.com" not in message
-    assert "password" not in message.lower()

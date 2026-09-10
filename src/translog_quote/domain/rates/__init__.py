@@ -38,6 +38,7 @@ from translog_quote.domain.rates.strategy import (
     SortKey,
     SortOrder,
 )
+from translog_quote.domain.rates.transit import UndeterminableTransit, elapsed_transit
 
 __all__ = [
     "FASTEST_ELIGIBLE",
@@ -56,9 +57,11 @@ __all__ = [
     "SortOrder",
     "TransitTime",
     "TransitUnit",
+    "UndeterminableTransit",
     "drop_incomplete_rate",
     "drop_restricted_carrier",
     "drop_unrankable_rate",
+    "elapsed_transit",
     "filter_rates",
     "select_rate",
 ]

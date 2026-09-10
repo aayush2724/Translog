@@ -56,7 +56,11 @@ class WebCargoMode(StrEnum):
     """Simulated WebCargo-shaped rates, priced from the shipment being quoted.
     What the client-facing demo runs on. Still invented, still disclosed."""
 
-    REAL = "real"
+    BROWSER = "browser"
+    """The real provider: a persistent, authenticated WebCargo browser session
+    driven by the single browser worker. Only the worker process may construct
+    it — any other process asked for this mode refuses and points at the
+    asynchronous rate-search API instead."""
 
 
 class OpenRouterSettings(BaseModel):
@@ -93,15 +97,77 @@ class OpenRouterSettings(BaseModel):
 class WebCargoSettings(BaseModel):
     """Rate provider configuration.
 
-    `mode` selects the adapter. The real adapter's credentials stay empty: no
-    undocumented endpoint or credential is written anywhere in this codebase, and
-    the real integration is blocked on AMB-1 and AMB-3 regardless.
+    `mode` selects the adapter. The credential fields exist for the browser
+    worker's one-time interactive login; no credential is ever written in this
+    codebase, and the simulated modes need none.
     """
 
     mode: WebCargoMode = WebCargoMode.MOCK
     base_url: str | None = None
     username: SecretStr | None = None
     password: SecretStr | None = None
+
+    # --- browser worker (mode=browser) --------------------------------------
+
+    user_data_dir: Path = Path(".browser/webcargo-profile")
+    """Where the persistent Chromium profile lives — cookies, local storage,
+    and therefore the authenticated WebCargo session that must survive across
+    jobs and across worker restarts.
+
+    **Deployment note:** this only persists if the directory itself does. An
+    ephemeral filesystem (a rebuilt container, a redeployed instance without a
+    disk) wipes the profile and the operator must re-authenticate. Point this
+    at mounted persistent storage in any real deployment, exactly as
+    `render.yaml` already does for the demo's state directory."""
+
+    headless: bool = True
+    """Headless in normal operation. The operator re-authentication command
+    runs headed regardless, because a person has to complete the login."""
+
+    navigation_timeout_seconds: int = Field(default=30, gt=0)
+    """Ceiling for one page navigation inside the WebCargo UI."""
+
+    search_timeout_seconds: int = Field(default=180, gt=0)
+    """Ceiling for one complete rate search — form fill, results, detail
+    reads, pagination. A job that cannot finish inside this is failed with the
+    reason rather than left holding the worker."""
+
+
+class QueueSettings(BaseModel):
+    """The Redis/RQ job queue joining the API service to the browser worker.
+
+    One queue, one worker, one job at a time. The single-worker rule is an
+    architectural correctness decision: the browser session is shared state,
+    WebCargo interaction is stateful, and serial execution keeps runs
+    deterministic, keeps provider load controlled, and keeps failures easy to
+    reason about.
+    """
+
+    redis_url: str = "redis://localhost:6379/0"
+
+    rate_search_queue: str = "rate-search"
+    """The queue name both sides agree on. API-side pagination of jobs and
+    WebCargo's own result-table pagination are unrelated concepts."""
+
+    job_timeout_seconds: int = Field(default=600, gt=0)
+    """RQ kills a job that exceeds this — a hung browser search must not hold
+    the single worker forever."""
+
+    result_ttl_seconds: int = Field(default=24 * 3600, gt=0)
+    """How long a finished job's result stays fetchable. Also the idempotency
+    window: an identical request inside it returns the same job."""
+
+    failure_ttl_seconds: int = Field(default=7 * 24 * 3600, gt=0)
+    """Failed jobs are kept longer than results: a failure is evidence."""
+
+    worker_lock_key: str = "translog:rate-search:browser-worker"
+    """The startup lock guaranteeing one browser worker per queue. A second
+    worker started by accident refuses loudly instead of silently running
+    concurrent WebCargo automation."""
+
+    worker_lock_ttl_seconds: int = Field(default=120, gt=0)
+    """Lock lease; the running worker refreshes it, and a crashed worker's
+    lock expires on its own so a restart is never wedged."""
 
 
 class GmailSettings(BaseModel):
@@ -238,6 +304,7 @@ class Settings(BaseSettings):
 
     openrouter: OpenRouterSettings = OpenRouterSettings()
     webcargo: WebCargoSettings = WebCargoSettings()
+    queue: QueueSettings = QueueSettings()
     gmail: GmailSettings = GmailSettings()
     demo: DemoSettings = DemoSettings()
 

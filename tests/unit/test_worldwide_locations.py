@@ -8,7 +8,7 @@ matter are the ones a table could not give us:
 - an unfamiliar place progresses all the way to the human approval gate;
 - no code is ever attached to a place unless something resolved it, and
   whatever resolved it is named — so a guess has nowhere to hide;
-- the production resolver refuses rather than falling back to the demo one;
+- a resolver that cannot answer refuses rather than guessing;
 - a refusal is one request's problem, never the batch's;
 - the approval gates are exactly where they were.
 
@@ -25,9 +25,9 @@ import pytest
 from tests.unit.test_gmail_thread import ScriptedExtractor, StubSource
 
 from translog_quote.adapters.email import CollectingEmailSink
-from translog_quote.adapters.routing import StatedLocationResolver, WebCargoLocationResolver
+from translog_quote.adapters.routing import StatedLocationResolver
 from translog_quote.adapters.webcargo import DemoRateProvider
-from translog_quote.config import Settings, WebCargoMode
+from translog_quote.config import Settings
 from translog_quote.domain.email import RawEmail
 from translog_quote.domain.extraction import ExtractedValue, ExtractionResult
 from translog_quote.domain.rates import LocationRef
@@ -197,38 +197,11 @@ def test_no_rate_is_fabricated_for_an_unfamiliar_lane(origin: str, destination: 
 # --- F: a genuine refusal, and no fallback --------------------------------------
 
 
-def test_the_production_resolver_refuses_rather_than_resolving() -> None:
-    """F. And it names no code of any kind in the refusal."""
-    with pytest.raises(UnresolvedLocation) as raised:
-        WebCargoLocationResolver().resolve("Dubai")
-
-    assert "not implemented" in str(raised.value)
-
-
-def test_the_production_resolver_never_falls_back_to_the_demo_one() -> None:
-    """The hard requirement: real must not degrade into stated.
-
-    Checked by behaviour rather than by reading the source — every place the
-    demo resolver would happily accept must still refuse here.
-    """
-    real = WebCargoLocationResolver()
-
-    for origin, destination in WORLDWIDE:
-        for place in (origin, destination):
-            assert StatedLocationResolver().resolve(place).stated == place
-            with pytest.raises(UnresolvedLocation):
-                real.resolve(place)
-
-
-def test_real_mode_wires_the_refusing_resolver(settings: Settings) -> None:
-    """A production run must not be handed the demo resolver by the wiring."""
+def test_simulated_modes_wire_the_stated_resolver(settings: Settings) -> None:
+    """F. The wiring hands the simulated modes the resolver that attaches no
+    identifier — never anything that could invent an airport code."""
     from translog_quote import bootstrap
 
-    real = settings.model_copy(
-        update={"webcargo": settings.webcargo.model_copy(update={"mode": WebCargoMode.REAL})}
-    )
-
-    assert isinstance(bootstrap.build_location_resolver(real), WebCargoLocationResolver)
     assert isinstance(bootstrap.build_location_resolver(settings), StatedLocationResolver)
 
 

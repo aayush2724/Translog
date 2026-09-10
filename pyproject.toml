@@ -29,6 +29,23 @@ dev = [
 gmail = [
     "google-auth-oauthlib>=1.2",
 ]
+# The asynchronous rate-search API service. A separate process from the
+# browser worker, joined only by the Redis queue.
+api = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "redis>=5.0",
+    "rq>=1.16",
+]
+# The browser worker: one queue consumer owning one persistent headless
+# Chromium with an authenticated WebCargo session. Deliberately not part of
+# the core install — the demo and the tests need none of it, and every import
+# of these packages is lazy so a clean checkout still imports everywhere.
+worker = [
+    "redis>=5.0",
+    "rq>=1.16",
+    "playwright>=1.47",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/translog_quote"]
@@ -56,6 +73,13 @@ warn_unreachable = true
 # a type check of the runtime code, which does not import it at all.
 [[tool.mypy.overrides]]
 module = ["google_auth_oauthlib.*"]
+ignore_missing_imports = true
+
+# The API/worker optional dependencies, absent from a core install for the
+# same reason. All runtime imports of these are lazy; their absence must not
+# fail a type check of code paths that never reach them.
+[[tool.mypy.overrides]]
+module = ["fastapi.*", "uvicorn.*", "redis.*", "rq.*", "playwright.*"]
 ignore_missing_imports = true
 
 [tool.ruff]
@@ -86,6 +110,9 @@ runtime-evaluated-base-classes = ["pydantic.BaseModel", "typing.Protocol"]
 "src/translog_quote/domain/quotation/decide.py" = ["N818"]
 # And `IncompatibleService`, for the same reason again.
 "src/translog_quote/domain/quotation/compose.py" = ["N818"]
+# And `UndeterminableTransit`: the raise site reads "this provider data does not
+# determine a transit", which is precisely the outcome a caller acts on.
+"src/translog_quote/domain/rates/transit.py" = ["N818"]
 # Ports are the project's published contracts and are read far more often than
 # they are imported. Hiding their types behind TYPE_CHECKING to save an import
 # makes a six-line interface harder to read for no runtime benefit.

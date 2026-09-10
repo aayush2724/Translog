@@ -14,6 +14,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from translog_quote.domain.rates.model import TransitUnit
 from translog_quote.domain.rates.strategy import (
     Selection,
     SelectionStrategy,
@@ -31,15 +32,20 @@ _ABSENT_NUMBER = Decimal("-1")
 def _key_for(rate: Rate, field: SortField) -> object:
     """The comparable magnitude for one sort key.
 
-    Transit compares in hours, never as a raw number: "2 days" and "2 hours"
-    are the same integer and a factor of twelve apart. `TransitTime.hours` is
-    the single canonical ordering, and nothing here reads `value` directly.
+    Transit compares in minutes, never as a raw number: "2 days" and "2 hours"
+    are the same integer and a day apart. `TransitTime.minutes` is the single
+    canonical ordering, and nothing here reads `value` directly.
+
+    Minutes rather than hours because a duration derived from a provider's
+    departure and arrival stamps carries minute precision, and comparing on
+    whole hours would silently tie two rates half an hour apart — handing the
+    decision to the price tie-break instead of to the actual duration.
     """
     if field is SortField.TRANSIT:
         # Unrankable rates cannot reach selection — filtering removes them — so
         # a missing transit here would be a programming error, not a thin market.
         assert rate.transit is not None, "unrankable rate reached selection"
-        return rate.transit.hours
+        return rate.transit.minutes
     if field is SortField.TOTAL_AMOUNT:
         return rate.total_amount if rate.total_amount is not None else _ABSENT_NUMBER
     return rate.carrier_code
@@ -94,7 +100,17 @@ def _describe(winner: Rate, strategy: SelectionStrategy) -> str:
 
 
 def _spell_transit(transit: TransitTime) -> str:
-    """ "1 day", not "1 days". This string reaches a quotation maker."""
+    """ "1 day", not "1 days". This string reaches a quotation maker.
+
+    A minute-precision duration is spelled as hours and minutes ("37h 20m")
+    rather than as a bare minute count, which nobody reads as a transit time.
+    """
+    if transit.unit is TransitUnit.MINUTES:
+        hours, minutes = divmod(transit.value, 60)
+        if hours and minutes:
+            return f"{hours}h {minutes:02d}m"
+        return f"{hours}h" if hours else f"{minutes} min"
+
     unit = transit.unit.value
     return f"{transit.value} {unit.rstrip('s') if transit.value == 1 else unit}"
 

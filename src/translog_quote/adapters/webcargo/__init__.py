@@ -7,10 +7,10 @@ Implements RateSearchPort.
     DemoRateProvider     — simulated WebCargo-shaped rates, priced from the
                            shipment actually being quoted. Used by the demo.
                            Makes no network call.
-    RealWebCargoAdapter  — refuses, with the reason. No published API contract,
-                           no confirmed authentication, no transit-time source.
-    RealRateMapper       — the documented field mapping, with transit left as an
-                           executable blocker (AMB-1).
+
+The real provider path is the browser adapter (WebCargo has no published API
+contract), which lives in `adapters.webcargo.browser` and extracts only what
+the WebCargo UI actually states.
 
 Nothing here presents invented data as real WebCargo data: both simulating
 adapters flag every result ``is_simulated=True``.
@@ -23,9 +23,7 @@ from translog_quote.adapters.webcargo.demo import (
     map_rows,
     simulate_response,
 )
-from translog_quote.adapters.webcargo.mapper import RealRateMapper
 from translog_quote.adapters.webcargo.mock import DEMO_RATES, MockWebCargoAdapter
-from translog_quote.adapters.webcargo.real import RealWebCargoAdapter
 
 __all__ = [
     "DEMO_CARRIERS",
@@ -33,8 +31,6 @@ __all__ = [
     "DISCLOSURE",
     "DemoRateProvider",
     "MockWebCargoAdapter",
-    "RealRateMapper",
-    "RealWebCargoAdapter",
     "map_rows",
     "simulate_response",
 ]
