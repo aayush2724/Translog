@@ -543,21 +543,32 @@ def build_demo_rate_provider() -> RateSearchPort:
 def build_browser_rate_provider(settings: Settings) -> RateSearchPort:
     """The real WebCargo provider — constructed ONLY by the browser worker.
 
-    An executable blocker for now, in the project's own tradition: the
-    adapter's page interactions are written exclusively against inspected
-    WebCargo UI evidence, and that extraction layer has not landed yet.
-    Everything around it — the queue, the worker loop, the persistent-session
-    lifecycle, the operator re-authentication — is real and tested, so when
-    the extraction layer arrives this function swaps a refusal for a
-    construction and nothing else moves.
+    One persistent, already-authenticated Chromium session serves every job;
+    each job gets a fresh page. Refuses to build without a configured
+    WebCargo URL: no endpoint is written in this repository, ever — the
+    deployment states where the app lives (TRANSLOG_WEBCARGO__BASE_URL).
     """
+    from translog_quote.adapters.webcargo.browser import (
+        ManagedBrowser,
+        PlaywrightWebCargoDriver,
+        WebCargoBrowserAdapter,
+        launch_persistent_chromium,
+    )
     from translog_quote.errors import PermanentFailure
 
-    raise PermanentFailure(
-        "The WebCargo browser adapter's page extraction is not implemented "
-        "yet: selectors are written only from inspected WebCargo UI evidence, "
-        "and none is wired. Run the worker with TRANSLOG_WEBCARGO__MODE=mock "
-        "or =demo until the extraction layer lands."
+    base_url = settings.webcargo.base_url
+    if not base_url:
+        raise PermanentFailure(
+            "No WebCargo URL configured. Set TRANSLOG_WEBCARGO__BASE_URL to "
+            "the app URL the operator signs in to; nothing here invents one."
+        )
+
+    return WebCargoBrowserAdapter(
+        manager=ManagedBrowser(lambda: launch_persistent_chromium(settings)),
+        base_url=base_url,
+        wrap_page=PlaywrightWebCargoDriver,
+        search_timeout_seconds=settings.webcargo.search_timeout_seconds,
+        navigation_timeout_seconds=settings.webcargo.navigation_timeout_seconds,
     )
 
 

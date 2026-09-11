@@ -34,6 +34,7 @@ def request(**overrides: object) -> RateSearchJobRequest:
         "weight_kg": 500.0,
         "dimensions_in": DIMS,
         "search_date": date(2026, 9, 15),
+        "commodity": "General Cargo",
     }
     base.update(overrides)
     return RateSearchJobRequest(**base)  # type: ignore[arg-type]
@@ -55,6 +56,7 @@ def test_identical_requests_share_one_job_identity() -> None:
         {"weight_kg": 501.0},
         {"dimensions_in": CargoDimensions(length=35, width=24, height=6)},
         {"search_date": date(2026, 9, 16)},
+        {"commodity": "Pharmaceuticals"},
         {"cargo_is_liquid": True},
         {"requires_door_delivery": True},
     ],
@@ -76,6 +78,17 @@ def test_the_request_rejects_a_nonpositive_weight() -> None:
         request(weight_kg=0)
 
 
+def test_commodity_is_required_and_never_defaulted() -> None:
+    """VR-5's mirror: commodity is stated by the caller, or the request does
+    not exist. No 'General Cargo' appears on anyone's behalf."""
+    fields = request().model_dump()
+    del fields["commodity"]
+    with pytest.raises(ValidationError):
+        RateSearchJobRequest(**fields)
+    with pytest.raises(ValidationError):
+        request(commodity="")
+
+
 def test_the_query_carries_stated_places_and_no_invented_code() -> None:
     query = request().to_query()
 
@@ -84,6 +97,7 @@ def test_the_query_carries_stated_places_and_no_invented_code() -> None:
     assert query.origin.resolved_by is None
     assert query.destination.stated == "Manila"
     assert query.date == date(2026, 9, 15)
+    assert query.commodity == "General Cargo"  # stated, never substituted
 
 
 # --- RQ statuses become exactly four client-visible states ------------------------

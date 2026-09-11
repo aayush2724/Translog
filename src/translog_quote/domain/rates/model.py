@@ -173,6 +173,17 @@ class RateQuery(BaseModel):
     dimensions_in: CargoDimensions
     date: date  # AMB-8: source unconfirmed
 
+    commodity: str | None = None
+    """The commodity the search runs under, as the caller stated it.
+
+    A provider search parameter, not an eligibility rule: WebCargo's search
+    form refuses to run without a commodity, so a query that will reach it
+    must carry one. The simulated providers ignore it. ``None`` means the
+    caller did not state one — and a provider that requires it then refuses
+    that request with the reason, never substitutes a default. VR-5 already
+    makes commodity a required business fact, so a validated shipment always
+    has one to state."""
+
 
 class RateSearchResult(BaseModel):
     """What a rate provider returns.
@@ -202,6 +213,16 @@ class RateSearchResult(BaseModel):
     (AMB-1, consequence 5). It exists so the *presentation* layer can disclose
     what a viewer is looking at.
     """
+
+    completeness: str | None = None
+    """The provider's own statement of the candidate set, verbatim.
+
+    WebCargo's results page says, in its own words, e.g. "Showing the 60
+    lowest rates". Selection over these candidates is selection over *these
+    candidates* — nothing downstream may present the winner as globally
+    fastest beyond the set the provider returned, and this field is what lets
+    a review view say so honestly. ``None`` means the provider made no such
+    statement (fixtures, simulations)."""
 
 
 class ExclusionReason(StrEnum):

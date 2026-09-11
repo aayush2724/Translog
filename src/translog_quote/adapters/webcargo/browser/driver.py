@@ -27,6 +27,50 @@ if TYPE_CHECKING:
     from translog_quote.config import Settings
 
 
+class PlaywrightWebCargoDriver:
+    """`pages.BrowserDriver`, implemented on a Playwright page.
+
+    Selector-free on purpose: every selector belongs to `pages.py`, and this
+    class only knows how to perform the protocol's operations on a real page.
+    """
+
+    def __init__(self, page: Any) -> None:
+        self._page = page
+
+    def goto(self, url: str) -> None:
+        self._page.goto(url)
+
+    def click(self, selector: str) -> None:
+        self._page.click(selector)
+
+    def fill(self, selector: str, text: str) -> None:
+        self._page.fill(selector, text)
+
+    def press(self, selector: str, key: str) -> None:
+        self._page.press(selector, key)
+
+    def wait_visible(self, selector: str, timeout_seconds: float) -> bool:
+        try:
+            self._page.wait_for_selector(
+                selector, timeout=timeout_seconds * 1000, state="visible"
+            )
+        except Exception:  # noqa: BLE001 - "did not appear" is an answer, not a crash
+            return False
+        return True
+
+    def option_texts(self, selector: str) -> list[str]:
+        texts = self._page.locator(selector).all_text_contents()
+        return [str(text) for text in texts]
+
+    def click_option(self, selector: str, text: str) -> None:
+        self._page.locator(selector, has_text=text).first.click()
+
+    def evaluate(self, script: str, argument: object = None) -> object:
+        if argument is None:
+            return self._page.evaluate(script)
+        return self._page.evaluate(script, argument)
+
+
 class PlaywrightHandle:
     """One persistent Chromium context, shaped as a `BrowserHandle`.
 

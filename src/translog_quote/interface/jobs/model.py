@@ -84,6 +84,15 @@ class RateSearchJobRequest(BaseModel):
     weight_kg: float = Field(gt=0)
     dimensions_in: CargoDimensions
     search_date: date
+
+    commodity: str = Field(min_length=1)
+    """Required, with no default, mirroring VR-5: commodity is a business
+    fact the caller states. WebCargo's search form refuses to run without
+    one, and injecting "General Cargo" on the caller's behalf would be
+    business data nobody stated. The browser adapter selects the WebCargo
+    commodity option that matches this wording exactly — or fails the job
+    naming the mismatch, never guessing."""
+
     cargo_is_liquid: bool | None = None
     requires_door_delivery: bool = False
 
@@ -108,6 +117,7 @@ class RateSearchJobRequest(BaseModel):
             weight_kg=self.weight_kg,
             dimensions_in=self.dimensions_in,
             date=self.search_date,
+            commodity=self.commodity,
         )
 
 
@@ -128,6 +138,11 @@ class RateSearchJobResult(BaseModel):
     query: RateQuery
     filtered: FilterOutcome
     selection: Selection | None
+
+    completeness: str | None = None
+    """The provider's own statement of the candidate set (e.g. "Showing the
+    60 lowest rates"), carried so no consumer can present the selection as
+    globally fastest beyond the candidates the provider actually returned."""
 
 
 class JobStatus(BaseModel):

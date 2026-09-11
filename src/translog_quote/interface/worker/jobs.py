@@ -77,4 +77,5 @@ def run_rate_search(payload: dict[str, Any]) -> dict[str, Any]:
         query=query,
         filtered=filtered,
         selection=selection,
+        completeness=result.completeness,
     ).model_dump(mode="json")

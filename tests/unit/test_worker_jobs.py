@@ -93,13 +93,15 @@ def test_a_malformed_payload_is_rejected_before_any_search() -> None:
     assert calls == []  # validation is the edge; nothing leaked past it
 
 
-def test_browser_mode_without_the_extraction_layer_refuses_loudly(
+def test_browser_mode_without_a_configured_url_refuses_loudly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The executable blocker: no extraction layer, no browser searches —
-    and certainly no silent fallback to simulated rates."""
+    """No endpoint is written in this repository: browser mode without a
+    configured WebCargo URL refuses with the reason — and certainly never
+    falls back to simulated rates."""
     worker_jobs.set_provider(None)
     monkeypatch.setenv("TRANSLOG_WEBCARGO__MODE", "browser")
+    monkeypatch.setenv("TRANSLOG_WEBCARGO__BASE_URL", "")
 
-    with pytest.raises(PermanentFailure, match="inspected WebCargo UI evidence"):
+    with pytest.raises(PermanentFailure, match="No WebCargo URL configured"):
         worker_jobs.run_rate_search(payload())
