@@ -120,9 +120,24 @@ class WebCargoSettings(BaseModel):
     at mounted persistent storage in any real deployment, exactly as
     `render.yaml` already does for the demo's state directory."""
 
-    headless: bool = True
-    """Headless in normal operation. The operator re-authentication command
-    runs headed regardless, because a person has to complete the login."""
+    headless: bool = False
+    """Run a real, headed Chromium — never headless.
+
+    WebCargo refuses to honour an authenticated session from a headless
+    browser: any client advertising the ``HeadlessChrome`` user-agent is
+    redirected to login, and every supported headless mode (Chromium old and
+    new headless, and the real-Chrome channel) emits that token. This was
+    established by read-only investigation; the only fixes that would make
+    headless authenticate are user-agent/fingerprint spoofing, which this
+    project does not do.
+
+    So the worker runs a genuine headed browser. On a server with no physical
+    display that means a **virtual display (Xvfb)** — launch the worker under
+    ``xvfb-run`` (see ``docs/webcargo-operator-auth.md``). This is not
+    disguising the browser: it is a real Chromium rendering to a virtual
+    screen. The operator re-authentication command is headed for the same
+    reason. Nothing here spoofs identity, and no headless mode is offered,
+    because none authenticates against this provider."""
 
     navigation_timeout_seconds: int = Field(default=30, gt=0)
     """Ceiling for one page navigation inside the WebCargo UI."""

@@ -4,6 +4,9 @@
 !.env.example
 # Gmail OAuth client file and authorized-user token (Phase 10.3). Never committed.
 .secrets/
+# Persistent WebCargo browser profile — holds the authenticated session
+# (cookies/storage). Never committed.
+.browser/
 
 # Python
 __pycache__/

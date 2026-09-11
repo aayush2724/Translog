@@ -19,7 +19,16 @@ MFA or CAPTCHA — is a person's action, performed here.
 # From the repo root, in the project venv:
 pip install -e '.[worker]'          # playwright, redis, rq
 python -m playwright install chromium
+# A real (headed) browser is required — WebCargo refuses headless sessions.
+# On a server with no physical display, install a virtual display:
+sudo dnf install xorg-x11-server-Xvfb   # Fedora/RHEL
+# (Debian/Ubuntu: sudo apt-get install xvfb)
 ```
+
+**Why headed + Xvfb:** WebCargo redirects any `HeadlessChrome` client to
+login, so the worker runs a genuine headed Chromium. On a headless server that
+browser renders to a virtual display (Xvfb) via `xvfb-run`. This is a real
+browser on a virtual screen — no user-agent or fingerprint disguising.
 
 Configuration (in `.env` or the environment) — no endpoint is written in the
 repo, so the operator supplies it:
@@ -50,7 +59,15 @@ should reach the search form without a login page.
 
 ## Running the worker after authentication
 
+The worker runs a **headed** browser. On a machine with a physical display it
+runs directly; on a headless server, run it under a virtual display:
+
 ```bash
+# Server (no physical display) — real browser on a virtual screen:
+xvfb-run -a --server-args="-screen 0 1280x720x24" \
+  python -m translog_quote.interface.worker
+
+# Machine with a display:
 python -m translog_quote.interface.worker
 ```
 
