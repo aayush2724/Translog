@@ -111,9 +111,7 @@ def test_via_cannot_become_transit() -> None:
         record(
             duration="",
             itinerary="BLRDOHMNL",
-            legs=(
-                FlightLegRecord(departure="15/09/2026 04:00", arrival="15/09/2026 05:30"),
-            ),
+            legs=(FlightLegRecord(departure="15/09/2026 04:00", arrival="15/09/2026 05:30"),),
         )
     )
 
@@ -220,11 +218,188 @@ def test_a_single_containing_option_wins() -> None:
         ("XYZ", ["AAA - Anaa", "AAE - Annaba"]),
     ],
 )
-def test_no_single_match_is_a_refusal_listing_the_options(
-    stated: str, options: list[str]
-) -> None:
+def test_no_single_match_is_a_refusal_listing_the_options(stated: str, options: list[str]) -> None:
     with pytest.raises(LookupError):
         pages._choose_option(stated, options)
+
+
+# --- the debounced-autocomplete predicate wait -------------------------------------
+
+
+class _DebouncedOptions:
+    """A driver stub whose option list is empty (the disabled placeholder is
+    excluded by the selector) for the first few reads, then yields the real
+    option — reproducing the async airport lookup under headed Chromium/Xvfb."""
+
+    def __init__(self, appears_after: int, options: list[str]) -> None:
+        self._appears_after = appears_after
+        self._options = options
+        self.reads = 0
+
+    def option_texts(self, selector: str) -> list[str]:
+        self.reads += 1
+        return list(self._options) if self.reads > self._appears_after else []
+
+
+def test_the_wait_holds_through_the_debounce_then_returns_the_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It must not read the (excluded) placeholder as readiness: it polls until
+    a matching ENABLED option appears, then returns it — no arbitrary sleep."""
+    monkeypatch.setattr(pages, "_OPTION_POLL_SECONDS", 0.0)  # keep the test fast
+    driver = _DebouncedOptions(appears_after=3, options=["MNL - Manila"])
+
+    chosen = pages._choose_available_option(driver, pages.DROPDOWN_OPTION, "MNL", timeout_seconds=5)
+
+    assert chosen == "MNL - Manila"
+    assert driver.reads >= 4  # it genuinely waited past the empty reads
+
+
+def test_the_wait_returns_immediately_when_the_option_is_already_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pages, "_OPTION_POLL_SECONDS", 0.0)
+    driver = _DebouncedOptions(appears_after=0, options=["BLR - Bangalore"])
+
+    chosen = pages._choose_available_option(driver, pages.DROPDOWN_OPTION, "BLR", timeout_seconds=5)
+
+    assert chosen == "BLR - Bangalore"
+    assert driver.reads == 1  # matched on the first read, no waiting
+
+
+def test_the_wait_refuses_when_no_matching_option_ever_appears(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The debounce tolerance must not become a guess: if only the placeholder
+    (empty, here) is ever present, it raises rather than inventing a match."""
+    monkeypatch.setattr(pages, "_OPTION_POLL_SECONDS", 0.0)
+    driver = _DebouncedOptions(appears_after=10_000, options=["MNL - Manila"])
+
+    with pytest.raises(LookupError):
+        pages._choose_available_option(driver, pages.DROPDOWN_OPTION, "MNL", timeout_seconds=0.05)
+
+
+# --- the commodity (Goods Type) selector -------------------------------------------
+
+
+def test_commodity_targets_the_goods_type_select_not_a_generic_field() -> None:
+    """The commodity control/field must be scoped to the Goods Type select's
+    stable id hook — never a bare `.ant-select-search__field`, which also
+    matches the left-nav search once origin/destination are chosen."""
+    assert pages.COMMODITY_INPUT.startswith('[id^="goodsType"]')
+    assert ".ant-select-search__field" in pages.COMMODITY_INPUT
+    # not the old generic, id-excluding selector that resolved to 2 elements:
+    assert ":not(#originAirport)" not in pages.COMMODITY_INPUT
+    # the control opened is the Goods Type AntD select wrapper, scoped to the id:
+    assert '[id^="goodsType"]' in pages.COMMODITY_CONTROL
+    assert ".ant-select" in pages.COMMODITY_CONTROL
+
+    driver = FakeDriver(rows=rows_payload(1))
+    chosen = pages._fill_commodity(driver, "General Cargo", timeout_seconds=5)
+
+    assert chosen == "0000 - General Cargo"
+    assert ("click", pages.COMMODITY_CONTROL) in driver.calls  # opened the select first
+    assert ("fill", f"{pages.COMMODITY_INPUT}=General Cargo") in driver.calls
+    # never touches origin/destination fields:
+    assert all(pages.ORIGIN_INPUT not in detail for _, detail in driver.calls)
+
+
+def test_commodity_opens_the_control_before_using_the_hidden_search_field() -> None:
+    """The Goods Type search field is hidden until the select is opened, so the
+    visible control must be engaged BEFORE any use of the search input."""
+    driver = FakeDriver(rows=rows_payload(1))
+
+    pages._fill_commodity(driver, "General Cargo", timeout_seconds=5)
+
+    commodity_calls = [
+        (kind, detail)
+        for kind, detail in driver.calls
+        if detail == pages.COMMODITY_CONTROL or detail.startswith(pages.COMMODITY_INPUT)
+    ]
+    assert commodity_calls[0] == ("click", pages.COMMODITY_CONTROL)  # opened first
+    assert any(
+        kind == "fill" and detail.startswith(pages.COMMODITY_INPUT)
+        for kind, detail in commodity_calls
+    )  # then the now-visible search field is typed into
+
+
+def test_commodity_refuses_when_the_search_field_never_becomes_visible() -> None:
+    """If opening the select does not reveal the search field, refuse — the
+    commodity is never guessed, skipped, or typed into a hidden field."""
+
+    class _NeverOpens(FakeDriver):
+        def click(self, selector: str) -> None:  # opening has no effect here
+            self.calls.append(("click", selector))
+
+    driver = _NeverOpens(rows=rows_payload(1))
+
+    with pytest.raises(PermanentFailure, match="Goods Type"):
+        pages._fill_commodity(driver, "General Cargo", timeout_seconds=0.01)
+
+    # it never typed into the hidden field:
+    assert all(not detail.startswith(f"{pages.COMMODITY_INPUT}=") for _, detail in driver.calls)
+
+
+def test_commodity_selects_the_matching_general_cargo_option() -> None:
+    driver = FakeDriver(rows=rows_payload(1))
+
+    chosen = pages._fill_commodity(driver, "General Cargo", timeout_seconds=5)
+
+    assert chosen == "0000 - General Cargo"
+    assert ("option", "0000 - General Cargo") in driver.calls  # via the existing matcher
+
+
+def test_commodity_ambiguous_match_is_still_a_loud_refusal() -> None:
+    """Deterministic matching is unchanged: two "General Cargo" options refuse
+    rather than guess."""
+    driver = FakeDriver(
+        rows=rows_payload(1),
+        options={"General Cargo": ["0000 - General Cargo", "9999 - General Cargo (other)"]},
+    )
+
+    with pytest.raises(PermanentFailure, match="did not match exactly one"):
+        pages._fill_commodity(driver, "General Cargo", timeout_seconds=1)
+
+
+# --- the readonly AntD DatePicker interaction --------------------------------------
+
+
+def test_departure_date_is_set_through_the_calendar_and_verified() -> None:
+    """The readonly display starts on a default; the requested date is typed
+    into the calendar input, committed, and confirmed on the display."""
+    driver = FakeDriver(rows=rows_payload(1))  # default display: 11/09/2026
+    pages._fill_departure_date(driver, date(2026, 9, 21), timeout_seconds=5)
+
+    assert driver._date_value == "21/09/2026"
+    assert ("click", pages.DATE_TRIGGER) in driver.calls
+    assert ("fill", f"{pages.CALENDAR_INPUT}=21/09/2026") in driver.calls
+    assert ("press", f"{pages.CALENDAR_INPUT}:Enter") in driver.calls
+
+
+def test_departure_date_is_idempotent_when_already_selected() -> None:
+    driver = FakeDriver(rows=rows_payload(1))
+    driver._date_value = "21/09/2026"
+    pages._fill_departure_date(driver, date(2026, 9, 21), timeout_seconds=5)
+
+    # already correct → the picker is never opened or typed into
+    assert all(pages.CALENDAR_INPUT not in detail for _, detail in driver.calls)
+    assert ("click", pages.DATE_TRIGGER) not in driver.calls
+
+
+def test_a_date_that_will_not_take_is_a_loud_failure_not_a_wrong_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pre-filled default must never be silently accepted: if the display
+    never shows the requested date, the search refuses."""
+    monkeypatch.setattr(pages, "_OPTION_POLL_SECONDS", 0.0)
+
+    class _StuckDate(FakeDriver):
+        def press(self, selector: str, key: str) -> None:  # never commits
+            self.calls.append(("press", f"{selector}:{key}"))
+
+    driver = _StuckDate(rows=rows_payload(1))  # stays on 11/09/2026
+    with pytest.raises(ContractViolation, match="unconfirmed date"):
+        pages._fill_departure_date(driver, date(2026, 9, 21), timeout_seconds=0.05)
 
 
 # --- the search flow, against a scripted driver -------------------------------------
@@ -282,6 +457,12 @@ class FakeDriver:
         self.never_settles = never_settles
         self.calls: list[tuple[str, str]] = []
         self._pending_options: list[str] = []
+        # DatePicker model: readonly display starts on a default; typing into
+        # the calendar input + Enter commits the new value.
+        self._date_value = "11/09/2026"
+        self._date_pending: str | None = None
+        # The Goods Type AntD select hides its inner search field until opened.
+        self._commodity_open = False
 
     # -- protocol --------------------------------------------------------
 
@@ -290,17 +471,28 @@ class FakeDriver:
 
     def click(self, selector: str) -> None:
         self.calls.append(("click", selector))
+        if selector == pages.COMMODITY_CONTROL:
+            self._commodity_open = True  # opening the select reveals its search field
 
     def fill(self, selector: str, text: str) -> None:
         self.calls.append(("fill", f"{selector}={text}"))
+        if selector == pages.CALENDAR_INPUT:
+            self._date_pending = text
+            return
         self._pending_options = self.options.get(text, [])
 
     def press(self, selector: str, key: str) -> None:
         self.calls.append(("press", f"{selector}:{key}"))
+        if selector == pages.CALENDAR_INPUT and key == "Enter" and self._date_pending:
+            self._date_value = self._date_pending  # commit the typed date
 
     def wait_visible(self, selector: str, timeout_seconds: float) -> bool:
         if selector == pages.AUTHENTICATED_MARKER:
             return self.authenticated
+        if selector == pages.CALENDAR_INPUT:
+            return True  # clicking the readonly input opens the calendar panel
+        if selector == pages.COMMODITY_INPUT:
+            return self._commodity_open  # hidden until the Goods Type select is opened
         return bool(self._pending_options)
 
     def option_texts(self, selector: str) -> list[str]:
@@ -310,6 +502,8 @@ class FakeDriver:
         self.calls.append(("option", text))
 
     def evaluate(self, script: str, argument: object = None) -> object:
+        if "departureDate" in script:  # _date_input_value read
+            return self._date_value
         if "hasPassword" in script:
             return {"hasPassword": True, "hasSearchForm": False, "onApp": True}
         if "CM|IN" in script:
@@ -393,7 +587,7 @@ def test_the_flow_sets_units_dates_and_escapes_the_dropdown() -> None:
 
     search_with(driver)
 
-    assert ("fill", f"{pages.DATE_INPUT}=15/09/2026") in driver.calls
+    assert ("fill", f"{pages.CALENDAR_INPUT}=15/09/2026") in driver.calls  # via the picker
     assert ("press", f"{pages.ORIGIN_INPUT}:Escape") in driver.calls
     assert ("fill", f"{pages.UNITS_INPUT}=1") in driver.calls
     assert ("fill", f"{pages.WEIGHT_INPUT}=500") in driver.calls
@@ -462,6 +656,142 @@ def test_a_results_page_that_never_settles_fails_loudly() -> None:
 
     with pytest.raises(ContractViolation, match="did not settle"):
         search_with(driver)
+
+
+# --- the authenticated-shell probe (read-only; never a login) ----------------------
+
+
+def test_is_authenticated_is_true_when_the_search_form_renders() -> None:
+    driver = FakeDriver(authenticated=True)
+
+    assert pages.is_authenticated(
+        driver, base_url="https://example.invalid/app/", timeout_seconds=1
+    )
+    assert ("goto", pages.search_url("https://example.invalid/app/")) in driver.calls
+    assert [c for c in driver.calls if c[0] == "fill"] == []  # a probe, never a login
+
+
+def test_is_authenticated_is_false_when_the_search_form_never_appears() -> None:
+    driver = FakeDriver(authenticated=False)
+
+    assert not pages.is_authenticated(
+        driver, base_url="https://example.invalid/app/", timeout_seconds=0.05
+    )
+    assert [c for c in driver.calls if c[0] == "fill"] == []  # still never a login
+
+
+# --- the operator sign-in ceremony (on a LIVE session; no launch/close) -------------
+
+
+def test_operator_login_reports_success_only_after_the_form_is_visible(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from translog_quote.adapters.webcargo.browser.reauth import run_operator_login
+
+    driver = FakeDriver(authenticated=True)
+    prompts: list[str] = []
+
+    run_operator_login(
+        driver,
+        base_url="https://example.invalid/app/",
+        navigation_timeout_seconds=1,
+        prompt=lambda msg: prompts.append(msg) or "",
+    )
+
+    assert prompts  # the human ceremony ran
+    assert "Authenticated" in capsys.readouterr().out  # printed only after verify
+    assert [c for c in driver.calls if c[0] == "fill"] == []  # never signed in for them
+
+
+def test_operator_login_refuses_when_the_form_never_appears() -> None:
+    from translog_quote.adapters.webcargo.browser.reauth import run_operator_login
+
+    driver = FakeDriver(authenticated=False)
+
+    with pytest.raises(WebCargoSessionLost):
+        run_operator_login(
+            driver,
+            base_url="https://example.invalid/app/",
+            navigation_timeout_seconds=0.05,
+            prompt=lambda _msg: "",
+        )
+
+
+class _AuthOnNavigate(FakeDriver):
+    """A fresh page: the authenticated search form appears only AFTER the flow
+    navigates to the search surface — the way a real per-job blank page behaves
+    (and the opposite of an operator page that is already on the form)."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self._navigated = False
+
+    def goto(self, url: str) -> None:
+        super().goto(url)
+        if pages.SEARCH_HASH in url:
+            self._navigated = True
+
+    def wait_visible(self, selector: str, timeout_seconds: float) -> bool:
+        if selector == pages.AUTHENTICATED_MARKER:
+            return self._navigated  # not on the form until we navigate to it
+        return super().wait_visible(selector, timeout_seconds)
+
+
+def test_verify_accepts_the_current_authenticated_page_without_navigating() -> None:
+    """The operator has just signed in and the form is visible: verify must NOT
+    navigate away (a fresh navigation can bounce the session back to login)."""
+    driver = FakeDriver(authenticated=True)
+
+    pages.verify_authenticated(
+        driver, base_url="https://host/ajaxnew/?rand=408788&ctry=in", timeout_seconds=1
+    )
+
+    assert [c for c in driver.calls if c[0] == "goto"] == []  # stayed on the live page
+
+
+def test_verify_navigates_to_the_canonical_url_when_not_already_on_the_form() -> None:
+    driver = _AuthOnNavigate()
+
+    pages.verify_authenticated(
+        driver, base_url="https://host/ajaxnew/?rand=408788&ctry=in", timeout_seconds=1
+    )
+
+    gotos = [detail for kind, detail in driver.calls if kind == "goto"]
+    assert len(gotos) == 1  # navigated exactly once, to the search surface
+    assert "rand=" not in gotos[0]  # the canonical, rand-free URL
+    assert "ctry=in" in gotos[0]  # country context preserved
+
+
+def test_verify_still_reports_session_loss_when_the_form_never_appears() -> None:
+    driver = FakeDriver(authenticated=False)  # form absent before AND after nav
+
+    with pytest.raises(WebCargoSessionLost):
+        pages.verify_authenticated(
+            driver, base_url="https://host/ajaxnew/?rand=1", timeout_seconds=0.01
+        )
+
+    assert any(kind == "goto" for kind, _ in driver.calls)  # it did try the canonical URL
+
+
+def test_per_job_navigation_uses_the_canonical_rand_free_url() -> None:
+    """The fix must apply to the job path too: a fresh job page navigates to
+    the same canonical (rand-stripped) search URL before searching."""
+    driver = _AuthOnNavigate(rows=rows_payload(1))
+
+    result = run_rate_search(
+        driver,
+        QUERY,
+        base_url="https://host/ajaxnew/?rand=408788&ctry=in",
+        search_timeout_seconds=0.05,
+        navigation_timeout_seconds=1,
+        poll_interval_seconds=0.001,
+    )
+
+    gotos = [detail for kind, detail in driver.calls if kind == "goto"]
+    assert gotos, "a fresh job page must navigate to the search form"
+    assert all("rand=" not in g for g in gotos)  # canonical everywhere, no stale nonce
+    assert any("ctry=in" in g for g in gotos)
+    assert len(result.records) == 1  # and the search still completes
 
 
 def test_flight_legs_are_captured_as_audit_data() -> None:

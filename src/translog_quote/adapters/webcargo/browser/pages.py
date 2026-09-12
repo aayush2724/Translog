@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import time
 from typing import TYPE_CHECKING, Protocol
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from translog_quote.adapters.webcargo.browser.records import (
     FlightLegRecord,
@@ -29,6 +30,8 @@ from translog_quote.adapters.webcargo.browser.records import (
 from translog_quote.errors import ContractViolation, PermanentFailure, UnresolvedLocation
 
 if TYPE_CHECKING:
+    from datetime import date
+
     from translog_quote.domain.rates import RateQuery
 
 # --- where things are -------------------------------------------------------------
@@ -37,9 +40,35 @@ SEARCH_HASH = "#ebookings/search-and-book"
 RESULTS_HASH = "#ebookings/dynamic-results"
 
 # The search form (verified ids and placeholders).
-ORIGIN_INPUT = "#originAirport"
-DESTINATION_INPUT = "#destinationAirport"
+#
+# The `input` tag qualifier is load-bearing: WebCargo puts the id on BOTH the
+# AntD `<div class="ant-select">` wrapper and its inner `<input>`, so a bare
+# `#originAirport` matches two elements and Playwright's `fill` grabs the
+# unfillable div first. `input#…` resolves to the one fillable field (verified
+# live), and stays a valid visible marker for the authenticated shell.
+ORIGIN_INPUT = "input#originAirport"
+DESTINATION_INPUT = "input#destinationAirport"
 DATE_INPUT = ".ant-calendar-picker-input"
+#: The departure-date field. The visible input carries a stable `data-cy` hook
+#: and is READONLY — it cannot be typed into directly. Clicking it opens the
+#: AntD calendar panel, whose own `.ant-calendar-input` IS editable; typing the
+#: date there and pressing Enter commits it back to the readonly display.
+DATE_TRIGGER = 'input[data-cy="departureDate"]'
+CALENDAR_INPUT = ".ant-calendar-input"
+
+#: The Goods Type / commodity search field. Scoped to the Goods Type select's
+#: stable ``id="goodsType"`` hook (``^=`` tolerates a trailing space in the
+#: attribute), so it is the ONE commodity field — never the left-nav "Find a
+#: page" search or any other ``.ant-select-search__field``, which a bare,
+#: id-excluding selector matched once origin/destination were chosen.
+COMMODITY_INPUT = '[id^="goodsType"] .ant-select-search__field'
+#: The visible Goods Type control to open before the (hidden) search field can
+#: be used. WebCargo puts the ``goodsType`` id on the AntD ``<div
+#: class="ant-select">`` wrapper itself (see the ORIGIN_INPUT note), so this
+#: scopes to that one wrapper — clicking it opens the select and reveals
+#: ``COMMODITY_INPUT``. The inner ``.ant-select-search__field`` does not carry
+#: the ``ant-select`` class, so this never resolves to the hidden input.
+COMMODITY_CONTROL = '.ant-select[id^="goodsType"]'
 UNITS_INPUT = "#units-0"
 LENGTH_INPUT = 'input[placeholder="Length"]'
 WIDTH_INPUT = 'input[placeholder="Width"]'
@@ -48,7 +77,19 @@ WEIGHT_INPUT = "#weight-0"
 SEARCH_BUTTON = "button.searchFlights"
 
 #: Location/commodity suggestions render into AntD dropdowns.
-DROPDOWN_OPTION = ".ant-select-dropdown li.ant-select-dropdown-menu-item"
+#
+# The `:not(...-disabled)` is load-bearing: the origin/destination lookup is
+# a debounced async request, and while it is in flight WebCargo shows a
+# *disabled* placeholder `li` reading "No results found". Without the
+# exclusion, `wait_visible` returns on that placeholder and `option_texts`
+# reads "No results found" before the real options arrive, so a valid place
+# is refused as unresolved. Excluding the disabled placeholder makes the wait
+# hold until a genuine option appears (verified live), and never reads the
+# placeholder as an option. Harmless for the commodity dropdown too.
+DROPDOWN_OPTION = (
+    ".ant-select-dropdown li.ant-select-dropdown-menu-item"
+    ":not(.ant-select-dropdown-menu-item-disabled)"
+)
 
 #: The Matrix/Full-list view toggle is an Ant Design radio group. The wrapper
 #: keeps a stable CSS-module *stem* (`view_selector_radio_buttons`, only the
@@ -332,72 +373,202 @@ def _choose_option(stated: str, options: list[str]) -> str:
     if len(containing) == 1:
         return containing[0]
 
-    raise LookupError(
-        f"{stated!r} did not match exactly one provider option; offered: {cleaned!r}"
+    raise LookupError(f"{stated!r} did not match exactly one provider option; offered: {cleaned!r}")
+
+
+#: How often the option list is re-checked while the debounced async lookup
+#: settles. This is the cadence of a *condition* wait — the wait returns the
+#: instant a matching option exists — not a fixed delay that assumes readiness.
+_OPTION_POLL_SECONDS = 0.25
+
+
+def _choose_available_option(
+    driver: BrowserDriver, container: str, stated: str, *, timeout_seconds: float
+) -> str:
+    """Wait until an ENABLED option matching `stated` exists, then return it.
+
+    The origin/destination/commodity lookups are debounced async requests: for
+    the first moment the only option is the disabled "No results found"
+    placeholder (already excluded by ``container``), and the real results
+    arrive a second or two later — longer under a loaded or virtual display.
+    So rather than reading the list once, this re-applies the deterministic
+    ``_choose_option`` match until a unique match appears, and returns it the
+    instant it does.
+
+    The placeholder is never mistaken for readiness (the selector excludes it)
+    and nothing is ever guessed (the match stays ``_choose_option``). A
+    ``LookupError`` is raised only when no unique match has appeared by the
+    deadline; the caller turns that into the appropriate refusal.
+    ``timeout_seconds`` is the caller's configured navigation timeout — no new
+    timeout is introduced.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    last_error: LookupError | None = None
+    while True:
+        try:
+            return _choose_option(stated, driver.option_texts(container))
+        except LookupError as exc:
+            last_error = exc
+        if time.monotonic() >= deadline:
+            assert last_error is not None
+            raise last_error
+        time.sleep(_OPTION_POLL_SECONDS)
+
+
+def _date_input_value(driver: BrowserDriver) -> str:
+    """The departure-date display value, as WebCargo currently shows it.
+
+    Read-only observation via `evaluate` — used to drive the interaction and to
+    verify the outcome, never to set the date (which goes through the UI)."""
+    value = driver.evaluate(
+        "() => { const e = document.querySelector('input[data-cy=\"departureDate\"]');"
+        " return e ? e.value : ''; }"
     )
+    return str(value) if value is not None else ""
 
 
-def _fill_location(driver: BrowserDriver, selector: str, stated: str) -> str:
+def _fill_departure_date(driver: BrowserDriver, requested: date, *, timeout_seconds: float) -> None:
+    """Set the departure date through the AntD DatePicker UI, and verify it.
+
+    The visible ``input[data-cy="departureDate"]`` is readonly and carries a
+    default date, so it cannot be filled directly. Clicking it opens the
+    calendar panel; the panel's ``.ant-calendar-input`` is editable, so the
+    requested date is typed there (DD/MM/YYYY, the UI's format) and committed
+    with Enter. The readonly display is then polled until it shows exactly the
+    requested date — the pre-filled default is never silently accepted, and a
+    date that will not take is a loud failure rather than a wrong quotation.
+
+    Idempotent: if the field already shows the requested date, it returns
+    without touching the picker.
+    """
+    wanted = requested.strftime("%d/%m/%Y")
+    if _date_input_value(driver) == wanted:
+        return
+
+    driver.click(DATE_TRIGGER)
+    if not driver.wait_visible(CALENDAR_INPUT, timeout_seconds=timeout_seconds):
+        raise ContractViolation(
+            "the WebCargo departure-date calendar did not open; cannot set the date"
+        )
+    driver.fill(CALENDAR_INPUT, wanted)
+    driver.press(CALENDAR_INPUT, "Enter")
+
+    deadline = time.monotonic() + timeout_seconds
+    while _date_input_value(driver) != wanted:
+        if time.monotonic() >= deadline:
+            raise ContractViolation(
+                f"the departure date still reads {_date_input_value(driver)!r} after "
+                f"selecting {wanted!r}; refusing to search under an unconfirmed date"
+            )
+        time.sleep(_OPTION_POLL_SECONDS)
+
+
+def _fill_location(
+    driver: BrowserDriver, selector: str, stated: str, *, timeout_seconds: float
+) -> str:
     """Type the stated place, select WebCargo's own suggestion, close the list.
 
     Returns the option text actually selected — the resolver evidence.
     """
     driver.click(selector)
     driver.fill(selector, stated)
-    if not driver.wait_visible(DROPDOWN_OPTION, timeout_seconds=10):
-        raise UnresolvedLocation(
-            f"WebCargo offered no location suggestion for {stated!r}; "
-            "refusing rather than guessing an airport"
-        )
     try:
-        chosen = _choose_option(stated, driver.option_texts(DROPDOWN_OPTION))
+        chosen = _choose_available_option(
+            driver, DROPDOWN_OPTION, stated, timeout_seconds=timeout_seconds
+        )
     except LookupError as exc:
-        raise UnresolvedLocation(str(exc)) from exc
+        raise UnresolvedLocation(
+            f"WebCargo offered no matching location suggestion for {stated!r}; "
+            f"refusing rather than guessing an airport ({exc})"
+        ) from exc
     driver.click_option(DROPDOWN_OPTION, chosen)
     driver.press(selector, "Escape")  # the list lingers and swallows clicks
     return chosen
 
 
-def _fill_commodity(driver: BrowserDriver, stated: str) -> str:
+def _fill_commodity(driver: BrowserDriver, stated: str, *, timeout_seconds: float) -> str:
     """Select the WebCargo commodity matching the caller's wording, exactly.
 
     The commodity select is the Goods Type AntD select; suggestions look
     like "0000 - General Cargo". No match, no search — and never a default.
+
+    The AntD select keeps its inner search field hidden until the select is
+    opened, so the visible control is engaged first and the (now revealed)
+    scoped search field is waited for before anything is typed into it —
+    typing into a hidden field is what timed out the click before.
     """
-    commodity_input = (
-        ".ant-select-search__field:not(#originAirport):not(#destinationAirport)"
-    )
-    driver.click(commodity_input)
-    driver.fill(commodity_input, stated)
-    if not driver.wait_visible(DROPDOWN_OPTION, timeout_seconds=10):
+    driver.click(COMMODITY_CONTROL)
+    if not driver.wait_visible(COMMODITY_INPUT, timeout_seconds=timeout_seconds):
         raise PermanentFailure(
-            f"WebCargo offered no commodity option for {stated!r}; the search "
-            "cannot run under a commodity nobody stated"
+            "the WebCargo Goods Type search field never became visible after "
+            "opening the commodity select; the search cannot choose a commodity blind"
         )
+    driver.fill(COMMODITY_INPUT, stated)
     try:
-        chosen = _choose_option(stated, driver.option_texts(DROPDOWN_OPTION))
+        chosen = _choose_available_option(
+            driver, DROPDOWN_OPTION, stated, timeout_seconds=timeout_seconds
+        )
     except LookupError as exc:
-        raise PermanentFailure(f"commodity {exc}") from exc
+        raise PermanentFailure(
+            f"WebCargo offered no matching commodity option for {stated!r}; the "
+            f"search cannot run under a commodity nobody stated ({exc})"
+        ) from exc
     driver.click_option(DROPDOWN_OPTION, chosen)
     return chosen
 
 
-def search_url(base_url: str) -> str:
-    """The search surface URL for a configured base.
+#: A brief check for the form on the CURRENT page before deciding to navigate.
+#: Long enough for an already-rendered form to be seen instantly (Playwright
+#: returns as soon as the selector is visible), short enough that a blank
+#: fresh page falls through to navigation without a real stall.
+_CURRENT_PAGE_PROBE_SECONDS = 2.0
 
-    WebCargo routes on the fragment, and the configured base carries a query
-    string (`...?rand=...&ctry=in`). So the search hash is appended directly:
-    any existing fragment is dropped first, and no path separator is inserted
-    — a "/" here would land inside the query value and corrupt it.
+
+def search_url(base_url: str) -> str:
+    """The canonical Search & Book URL for a configured base.
+
+    WebCargo routes on the fragment, so any existing fragment is dropped and
+    the search hash appended. The volatile ``rand`` cache-buster is stripped:
+    it is a single-use nonce, and re-navigating to a stale one redirects an
+    authenticated session back to login. Every other query parameter (e.g.
+    ``ctry``, the country context) is preserved verbatim. No ``rand`` is ever
+    invented — the canonical URL simply omits it.
     """
-    without_fragment = base_url.split("#", 1)[0]
-    return without_fragment + SEARCH_HASH
+    parts = urlsplit(base_url)
+    kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != "rand"]
+    canonical = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(kept), ""))
+    return canonical + SEARCH_HASH
+
+
+def _search_form_visible(driver: BrowserDriver, *, timeout_seconds: float) -> bool:
+    """Whether the authenticated search form is on the CURRENT page. No navigation."""
+    return driver.wait_visible(AUTHENTICATED_MARKER, timeout_seconds=timeout_seconds)
+
+
+def is_authenticated(driver: BrowserDriver, *, base_url: str, timeout_seconds: float) -> bool:
+    """Whether the authenticated shell renders, navigating to the canonical
+    search surface first. A read-only probe.
+
+    It never fills, submits, or bypasses any login control — the answer is
+    "yes/no", never a sign-in."""
+    driver.goto(search_url(base_url))
+    return _search_form_visible(driver, timeout_seconds=timeout_seconds)
 
 
 def verify_authenticated(driver: BrowserDriver, *, base_url: str, timeout_seconds: float) -> None:
-    """The persistent session, or a loud stop. Never a login attempt."""
+    """Ensure the driver sits on the authenticated Search & Book form, or stop.
+
+    The CURRENT page is checked first, so an operator who has just signed in
+    and is already looking at the form is accepted WITHOUT navigating away from
+    it — a fresh navigation to the app can bounce a just-established session
+    back to login. Only when the form is not already present do we navigate to
+    the canonical (rand-free) search URL and check again. A login is never
+    attempted; if the form cannot be reached, the session is declared lost.
+    """
+    if _search_form_visible(driver, timeout_seconds=_CURRENT_PAGE_PROBE_SECONDS):
+        return
     driver.goto(search_url(base_url))
-    if driver.wait_visible(AUTHENTICATED_MARKER, timeout_seconds=timeout_seconds):
+    if _search_form_visible(driver, timeout_seconds=timeout_seconds):
         return
     state = driver.evaluate(_JS_LOGIN_CHECK)
     raise WebCargoSessionLost(
@@ -432,13 +603,19 @@ def run_rate_search(
 
     verify_authenticated(driver, base_url=base_url, timeout_seconds=navigation_timeout_seconds)
 
-    _fill_location(driver, ORIGIN_INPUT, query.origin.stated)
-    _fill_location(driver, DESTINATION_INPUT, query.destination.stated)
+    _fill_location(
+        driver, ORIGIN_INPUT, query.origin.stated, timeout_seconds=navigation_timeout_seconds
+    )
+    _fill_location(
+        driver,
+        DESTINATION_INPUT,
+        query.destination.stated,
+        timeout_seconds=navigation_timeout_seconds,
+    )
 
-    driver.fill(DATE_INPUT, query.date.strftime("%d/%m/%Y"))
-    driver.press(DATE_INPUT, "Enter")
+    _fill_departure_date(driver, query.date, timeout_seconds=navigation_timeout_seconds)
 
-    _fill_commodity(driver, query.commodity)
+    _fill_commodity(driver, query.commodity, timeout_seconds=navigation_timeout_seconds)
 
     driver.fill(UNITS_INPUT, "1")
     driver.fill(LENGTH_INPUT, _figure(query.dimensions_in.length))
@@ -553,9 +730,7 @@ def _count_from(phrase: str) -> int | None:
 def _record_from(raw: object) -> WebCargoRateRecord:
     if not isinstance(raw, dict):
         raise ContractViolation(f"extracted row was {type(raw).__name__}, expected an object")
-    legs = tuple(
-        FlightLegRecord(**leg) for leg in raw.get("legs", ()) if isinstance(leg, dict)
-    )
+    legs = tuple(FlightLegRecord(**leg) for leg in raw.get("legs", ()) if isinstance(leg, dict))
     return WebCargoRateRecord(
         company=str(raw.get("company", "")),
         itinerary=str(raw.get("itinerary", "")),

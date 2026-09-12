@@ -44,7 +44,6 @@ __all__ = [
     "Settings",
     "authorize_gmail",
     "authorize_gmail_send",
-    "authorize_webcargo",
     "build_browser_rate_provider",
     "build_clarification_workflow",
     "build_console_approval",
@@ -66,6 +65,7 @@ __all__ = [
     "build_quotation_stage",
     "commit_request",
     "commit_thread",
+    "ensure_worker_session_authenticated",
     "load_settings",
     "persistent_state_files",
     "seed_store",
@@ -572,15 +572,20 @@ def build_browser_rate_provider(settings: Settings) -> RateSearchPort:
     )
 
 
-def authorize_webcargo(settings: Settings) -> None:
-    """Run the interactive, headed WebCargo operator sign-in.
+def ensure_worker_session_authenticated(
+    provider: RateSearchPort, *, interactive: bool, prompt: Callable[[str], str] = input
+) -> None:
+    """Gate the browser worker on an authenticated live session, in-process.
 
-    Only ever called by the explicit `--login` worker command — nothing
-    authorizes automatically, and nothing automates the login itself. The
-    same rule `authorize_gmail` established: authentication is a human
-    ceremony, and the code's whole contribution is opening the door on the
-    persistent profile the worker will reuse.
+    For the WebCargo browser provider this brings its one long-lived context
+    to the authenticated search surface before any job runs — the SAME
+    context then serves every job, so the in-memory session cookie stays put
+    and nothing is exported. A no-op for providers that need no browser
+    session (mock, demo). It never launches a second browser and never logs
+    in without an operator: `interactive=False` refuses an unauthenticated
+    session rather than automating a sign-in.
     """
-    from translog_quote.adapters.webcargo.browser.reauth import run_operator_login
+    from translog_quote.adapters.webcargo.browser import WebCargoBrowserAdapter
 
-    run_operator_login(settings)
+    if isinstance(provider, WebCargoBrowserAdapter):
+        provider.ensure_authenticated(interactive=interactive, prompt=prompt)

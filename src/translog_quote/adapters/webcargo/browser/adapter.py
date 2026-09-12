@@ -25,8 +25,10 @@ from typing import TYPE_CHECKING, Any
 from translog_quote.adapters.webcargo.browser.mapper import ADAPTER_ID, map_records
 from translog_quote.adapters.webcargo.browser.pages import (
     WebCargoSessionLost,
+    is_authenticated,
     run_rate_search,
 )
+from translog_quote.adapters.webcargo.browser.reauth import run_operator_login
 from translog_quote.domain.rates import RateSearchResult
 
 if TYPE_CHECKING:
@@ -87,6 +89,47 @@ class WebCargoBrowserAdapter:
             is_simulated=False,
             completeness=result_set.stated_phrase or None,
         )
+
+    def ensure_authenticated(
+        self, *, interactive: bool, prompt: Callable[[str], str] = input
+    ) -> None:
+        """Bring the long-lived session to the authenticated search surface
+        before any job runs — on the SAME context the worker serves from.
+
+        Leases one page (closed here); the context, and its in-memory session
+        cookie, stay alive so every later job rides the very session the
+        operator signed into. No cookie is ever exported or re-injected.
+
+        ``interactive=True``  — an operator may sign in, in the open window,
+        once; only a visible search form counts as success.
+        ``interactive=False`` — an unauthenticated session is refused (marked
+        expired), never logged into automatically and never on a new browser.
+        """
+        with self._manager.job_page() as page:
+            driver = self._wrap_page(page)
+            if is_authenticated(
+                driver, base_url=self._base_url, timeout_seconds=self._navigation_timeout
+            ):
+                return
+            if not interactive:
+                reason = (
+                    "the WebCargo session is not authenticated at worker startup; "
+                    "start the worker with --login so an operator can sign in"
+                )
+                self._manager.mark_session_expired(reason)
+                raise WebCargoSessionLost(reason)
+            try:
+                run_operator_login(
+                    driver,
+                    base_url=self._base_url,
+                    navigation_timeout_seconds=self._navigation_timeout,
+                    prompt=prompt,
+                )
+            except WebCargoSessionLost:
+                self._manager.mark_session_expired(
+                    "operator sign-in did not reach the WebCargo search form"
+                )
+                raise
 
     def close(self) -> None:
         """Shut the persistent session down. The worker calls this once, at

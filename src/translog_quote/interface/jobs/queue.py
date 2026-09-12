@@ -12,6 +12,8 @@ Playwright.
 
 from __future__ import annotations
 
+import contextlib
+import threading
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -25,6 +27,8 @@ from translog_quote.interface.jobs.model import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from translog_quote.config import Settings
 
 #: The function RQ executes, as a dotted path (see module docstring).
@@ -160,6 +164,74 @@ class WorkerLock:
         holder = self._connection.get(self._key)
         if holder is not None and holder == self._token.encode("utf-8"):
             self._connection.delete(self._key)
+
+
+class LockHeartbeat:
+    """Keeps an acquired `WorkerLock`'s lease alive for the worker's whole life.
+
+    A daemon thread refreshes the lock every ~ttl/2 seconds, so a worker that
+    is merely idle — `SimpleWorker` blocked waiting for the next job — does not
+    let its lease lapse and then lose the lock on the following job. The moment
+    the process dies the daemon thread dies with it: nothing refreshes the
+    lease, it expires on its own TTL, and a successor may acquire it. That is
+    exactly the crash-recovery the lock relies on, unchanged.
+
+    Ownership is never weakened. The thread calls the very same
+    `WorkerLock.refresh`, which still refuses (`PermanentFailure`) the instant
+    the lease is no longer this worker's. That refusal is surfaced through
+    `on_lock_lost` so the worker can stop warmly, and then the thread exits —
+    it never spins on a lost lock and never lingers past `stop()`.
+
+    A *transient* refresh error (a Redis blip) is tolerated: the tick is
+    skipped and the next one retried. If the outage outlives the lease, the
+    first successful read afterwards sees a lost lock and takes the stop path.
+    """
+
+    def __init__(
+        self,
+        lock: WorkerLock,
+        *,
+        interval_seconds: float,
+        on_lock_lost: Callable[[BaseException], None],
+    ) -> None:
+        self._lock = lock
+        self._interval = interval_seconds
+        self._on_lock_lost = on_lock_lost
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="worker-lock-heartbeat", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def is_alive(self) -> bool:
+        return self._thread.is_alive()
+
+    def stop(self) -> None:
+        """Stop beating and join the thread, so none outlives worker shutdown."""
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=self._interval + 5.0)
+
+    def _run(self) -> None:
+        # wait() returns True the moment stop() is called (exit cleanly), or
+        # False on timeout (a tick: time to refresh). The first refresh is one
+        # interval in, which is safe — the lease was just acquired at full TTL.
+        while not self._stop.wait(self._interval):
+            try:
+                self._lock.refresh()
+            except PermanentFailure as lost:
+                # Ownership is gone. Existing semantics: stop. Surface it, then
+                # end the thread — never keep beating on a lock that isn't ours.
+                self._notify_lost(lost)
+                return
+            except Exception:  # noqa: BLE001 - a transient refresh error must not
+                # kill the worker; skip this tick and retry on the next one.
+                continue
+
+    def _notify_lost(self, lost: BaseException) -> None:
+        # A faulty callback must not leak the thread: surface, but never raise.
+        with contextlib.suppress(Exception):
+            self._on_lock_lost(lost)
 
 
 def acquire_worker_lock(settings: Settings) -> WorkerLock:

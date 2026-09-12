@@ -6,6 +6,8 @@ against a dictionary-backed fake connection.
 
 from __future__ import annotations
 
+import threading
+import time
 from datetime import date
 from typing import Any
 
@@ -18,6 +20,7 @@ from translog_quote.domain.shipment import CargoDimensions
 from translog_quote.errors import ContractViolation, PermanentFailure
 from translog_quote.interface.jobs import (
     JobState,
+    LockHeartbeat,
     RateSearchJobRequest,
     RateSearchJobResult,
     WorkerLock,
@@ -217,3 +220,112 @@ def test_release_never_removes_another_workers_lock() -> None:
     lock.release()
 
     assert redis.store["lock"] == b"someone-else"
+
+
+# --- the lock heartbeat: keep the lease alive while the worker is idle -------------
+
+
+class _CountingRedis(FakeRedis):
+    """FakeRedis that counts EXPIRE calls and signals once a threshold is hit,
+    so a test can wait for real heartbeat refreshes without blind sleeps."""
+
+    def __init__(self, *, signal_after: int = 2) -> None:
+        super().__init__()
+        self.expire_calls = 0
+        self._signal_after = signal_after
+        self.reached = threading.Event()
+
+    def expire(self, key: str, ttl: int) -> None:
+        super().expire(key, ttl)
+        self.expire_calls += 1
+        if self.expire_calls >= self._signal_after:
+            self.reached.set()
+
+
+def test_heartbeat_refreshes_an_acquired_lock_while_idle() -> None:
+    redis = _CountingRedis(signal_after=2)
+    lock = WorkerLock(redis, key="lock", ttl_seconds=120)
+    lock.acquire()
+    lost: list[BaseException] = []
+    beat = LockHeartbeat(lock, interval_seconds=0.01, on_lock_lost=lost.append)
+
+    beat.start()
+    try:
+        assert redis.reached.wait(timeout=2)  # it refreshed the lease on its own
+    finally:
+        beat.stop()
+
+    assert redis.expire_calls >= 2  # kept the lease alive across idle ticks
+    assert lost == []  # ownership never lost
+    assert not beat.is_alive()
+
+
+def test_heartbeat_stops_beating_after_shutdown() -> None:
+    redis = _CountingRedis(signal_after=1)
+    lock = WorkerLock(redis, key="lock", ttl_seconds=120)
+    lock.acquire()
+    beat = LockHeartbeat(lock, interval_seconds=0.01, on_lock_lost=lambda _e: None)
+    beat.start()
+    assert redis.reached.wait(timeout=2)
+
+    beat.stop()
+    assert not beat.is_alive()
+
+    settled = redis.expire_calls
+    time.sleep(0.1)  # many intervals would have elapsed had it kept beating
+    assert redis.expire_calls == settled  # a stopped heartbeat refreshes nothing
+
+
+def test_a_lost_lock_is_surfaced_and_ends_the_heartbeat() -> None:
+    redis = FakeRedis()
+    lock = WorkerLock(redis, key="lock", ttl_seconds=120)
+    lock.acquire()
+    redis.store["lock"] = b"another-worker"  # the lease lapsed; someone else holds it
+
+    surfaced: list[BaseException] = []
+    done = threading.Event()
+
+    def on_lost(exc: BaseException) -> None:
+        surfaced.append(exc)
+        done.set()
+
+    beat = LockHeartbeat(lock, interval_seconds=0.01, on_lock_lost=on_lost)
+    beat.start()
+    try:
+        assert done.wait(timeout=2)
+    finally:
+        beat.stop()
+
+    assert len(surfaced) == 1
+    assert isinstance(surfaced[0], PermanentFailure)  # the existing lock semantics
+    assert not beat.is_alive()  # it stops the instant ownership is gone
+
+
+def test_a_dead_heartbeat_lets_the_lease_expire_for_a_successor() -> None:
+    """If the worker dies, the heartbeat dies with it, the un-refreshed lease
+    lapses, and another worker can take the lock — the crash-recovery path."""
+    redis = FakeRedis()
+    lock = WorkerLock(redis, key="lock", ttl_seconds=120)
+    lock.acquire()
+    beat = LockHeartbeat(lock, interval_seconds=100, on_lock_lost=lambda _e: None)
+    beat.start()
+
+    beat.stop()  # the worker process ended: nothing refreshes the lease now
+    assert not beat.is_alive()
+
+    redis.delete("lock")  # real Redis would expire the un-refreshed TTL; model it
+    WorkerLock(redis, key="lock", ttl_seconds=120).acquire()  # successor, no raise
+
+
+def test_no_heartbeat_thread_leaks_after_shutdown() -> None:
+    redis = _CountingRedis(signal_after=1)
+    lock = WorkerLock(redis, key="lock", ttl_seconds=120)
+    lock.acquire()
+    beat = LockHeartbeat(lock, interval_seconds=0.01, on_lock_lost=lambda _e: None)
+    beat.start()
+    assert redis.reached.wait(timeout=2)
+
+    beat.stop()
+
+    assert not beat.is_alive()
+    assert all(t.name != "worker-lock-heartbeat" for t in threading.enumerate())

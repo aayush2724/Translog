@@ -109,6 +109,80 @@ def test_an_expired_session_fails_this_job_and_every_next_one_fast() -> None:
     assert launcher.calls == 1  # and the login page was never hammered
 
 
+# --- startup authentication: one live context, then serve --------------------------
+
+
+def test_ensure_authenticated_returns_on_a_live_session_without_a_ceremony() -> None:
+    handle = FakeHandle(1)
+    launcher = Launcher(handle)
+    adapter, _ = adapter_over(launcher, [FakeDriver(authenticated=True)])
+    prompts: list[str] = []
+
+    adapter.ensure_authenticated(interactive=True, prompt=lambda m: prompts.append(m) or "")
+
+    assert prompts == []  # already authenticated: no operator prompt
+    assert launcher.calls == 1  # one context
+    assert not handle.closed  # the authenticated context stays ALIVE
+    assert handle.pages[0].closed  # only the probe page was disposed
+    assert adapter._manager.state is SessionState.READY  # noqa: SLF001
+
+
+def test_ensure_authenticated_lets_the_operator_sign_in_on_the_same_context() -> None:
+    handle = FakeHandle(1)
+    launcher = Launcher(handle)
+    driver = FakeDriver(authenticated=False)
+    adapter, _ = adapter_over(launcher, [driver])
+
+    def sign_in(_msg: str) -> str:
+        driver.authenticated = True  # operator completes login IN the live context
+        return ""
+
+    adapter.ensure_authenticated(interactive=True, prompt=sign_in)
+
+    assert launcher.calls == 1  # no relaunch: same context the operator signed into
+    assert not handle.closed  # never closed → the in-memory session survives
+    assert adapter._manager.state is SessionState.READY  # noqa: SLF001
+
+
+def test_ensure_authenticated_non_interactive_refuses_an_unauthenticated_session() -> None:
+    handle = FakeHandle(1)
+    adapter, _ = adapter_over(Launcher(handle), [FakeDriver(authenticated=False)])
+
+    with pytest.raises(WebCargoSessionLost):
+        adapter.ensure_authenticated(interactive=False)
+
+    assert adapter._manager.state is SessionState.SESSION_EXPIRED  # noqa: SLF001
+    assert not handle.closed  # refusal doesn't tear down; the process exit will
+
+
+def test_ensure_authenticated_refuses_if_the_operator_never_completes_login() -> None:
+    handle = FakeHandle(1)
+    adapter, _ = adapter_over(Launcher(handle), [FakeDriver(authenticated=False)])
+
+    with pytest.raises(WebCargoSessionLost):
+        adapter.ensure_authenticated(interactive=True, prompt=lambda _m: "")  # never signs in
+
+    assert adapter._manager.state is SessionState.SESSION_EXPIRED  # noqa: SLF001
+
+
+def test_after_authentication_the_same_context_serves_jobs_on_fresh_pages() -> None:
+    """The point of Option 1: authenticate once, then every job runs a fresh
+    page on that SAME live context — no relaunch, no second login."""
+    handle = FakeHandle(1)
+    launcher = Launcher(handle)
+    adapter, _ = adapter_over(
+        launcher,
+        [FakeDriver(authenticated=True), FakeDriver(rows=rows_payload(2))],
+    )
+
+    adapter.ensure_authenticated(interactive=True, prompt=lambda _m: "")
+    result = adapter.search(QUERY)
+
+    assert launcher.calls == 1  # the auth context and the serving context are one
+    assert len(result.rates) == 2
+    assert all(page.closed for page in handle.pages)  # probe + job pages both disposed
+
+
 def test_a_crashed_session_is_relaunched_once_and_the_job_completes() -> None:
     dead, replacement = FakeHandle(1, dead=True), FakeHandle(2)
     launcher = Launcher(dead, replacement)

@@ -18,16 +18,29 @@ that are easy to reason about.
 
 from __future__ import annotations
 
+import os
+import signal
 from typing import TYPE_CHECKING, Any
 
 from translog_quote import bootstrap
 from translog_quote.config import WebCargoMode
-from translog_quote.interface.jobs import acquire_worker_lock
+from translog_quote.interface.jobs import LockHeartbeat, acquire_worker_lock
 from translog_quote.interface.worker import jobs
 
 if TYPE_CHECKING:
     from translog_quote.config import Settings
     from translog_quote.ports import RateSearchPort
+
+
+def _stop_worker_on_lock_loss(_lost: BaseException) -> None:
+    """Warmly stop this process when the heartbeat finds the lease lost.
+
+    Sends SIGINT to ourselves so RQ runs its normal warm shutdown — never a
+    hard kill. Invoked from the heartbeat thread; the signal is handled on the
+    main thread, which unblocks ``SimpleWorker.work()`` and runs the finally
+    cleanup (stop heartbeat, close browser, release — a no-op once the lock is
+    another worker's)."""
+    os.kill(os.getpid(), signal.SIGINT)
 
 
 def build_provider(settings: Settings) -> RateSearchPort:
@@ -43,21 +56,41 @@ def build_provider(settings: Settings) -> RateSearchPort:
     return bootstrap.build_rate_provider(settings)
 
 
-def run_worker(settings: Settings) -> None:
-    """Run until interrupted. Lock, provider, then serial consumption."""
+def run_worker(settings: Settings, *, interactive_login: bool = False) -> None:
+    """Run until interrupted. Lock, provider, authenticate, then serial consumption.
+
+    The provider's persistent browser context is authenticated once, before
+    the queue loop, and that same live context serves every job — fresh page
+    per job, session cookie held in memory. ``interactive_login`` lets an
+    operator sign in at startup; without it an unauthenticated session is
+    refused loudly rather than logged into automatically.
+    """
     from redis import Redis
     from rq import Queue, SimpleWorker
 
     lock = acquire_worker_lock(settings)
+    heartbeat: LockHeartbeat | None = None
     provider: RateSearchPort | None = None
 
     try:
+        # Keep the lease alive for the worker's ENTIRE life — the idle waits
+        # between jobs and any interactive operator login, not only per job —
+        # so a merely-idle worker never lets its lock lapse. Refresh at ~ttl/2;
+        # the TTL itself is unchanged.
+        heartbeat = LockHeartbeat(
+            lock,
+            interval_seconds=max(1.0, settings.queue.worker_lock_ttl_seconds / 2),
+            on_lock_lost=_stop_worker_on_lock_loss,
+        )
+        heartbeat.start()
+
         provider = build_provider(settings)
+        bootstrap.ensure_worker_session_authenticated(provider, interactive=interactive_login)
         jobs.set_provider(provider)
 
         class LockRefreshingWorker(SimpleWorker):
-            """Refreshes the single-worker lease as it works, so a live
-            worker keeps its lock and a dead one loses it by silence."""
+            """Re-checks single-worker ownership right before each job; the
+            heartbeat keeps the same lease alive in the idle gaps between."""
 
             def execute_job(self, job: Any, queue: Any) -> None:
                 lock.refresh()
@@ -68,6 +101,8 @@ def run_worker(settings: Settings) -> None:
         worker = LockRefreshingWorker([rq_queue], connection=connection)
         worker.work(with_scheduler=False)
     finally:
+        if heartbeat is not None:
+            heartbeat.stop()
         jobs.set_provider(None)
         close = getattr(provider, "close", None)
         if callable(close):

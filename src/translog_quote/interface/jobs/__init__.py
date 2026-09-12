@@ -14,6 +14,7 @@ from translog_quote.interface.jobs.model import (
 )
 from translog_quote.interface.jobs.queue import (
     RATE_SEARCH_JOB,
+    LockHeartbeat,
     WorkerLock,
     acquire_worker_lock,
     enqueue_rate_search,
@@ -24,6 +25,7 @@ __all__ = [
     "RATE_SEARCH_JOB",
     "JobState",
     "JobStatus",
+    "LockHeartbeat",
     "RateSearchJobRequest",
     "RateSearchJobResult",
     "WorkerLock",
