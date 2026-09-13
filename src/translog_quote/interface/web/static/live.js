@@ -26,6 +26,12 @@ const ui = {
   error: null,
 };
 
+/* The live approver field's re-sync, if a decision field is on screen. The
+   refresh tick calls it so a name that reached the DOM with no input event —
+   browser autofill, a password manager, any programmatic fill — is still read
+   back into the model and stops leaving the decision button wrongly disabled. */
+let syncApprover = null;
+
 /* An action — approving a clarification, deciding a quotation — sends a real
    email, so it can legitimately take a while. Without a ceiling a stalled
    request leaves the page waiting forever with no way to tell that from slow. */
@@ -134,28 +140,40 @@ function canDecide() {
    controls directly is what makes both true at once: the field keeps focus,
    and the buttons track what is actually in it. */
 function approverField(...dependents) {
-  const sync = () => dependents.forEach((control) => {
+  let field;
+  const applyDisabled = () => dependents.forEach((control) => {
     control.disabled = !canDecide();
   });
+  /* Read the live DOM value back into the model. Typing arrives through
+     `onInput` with the event's value, but a value can also reach the field with
+     no input event at all — browser autofill, a password manager, any
+     programmatic fill — which used to leave `ui.approver` empty and the button
+     wrongly disabled even though the name was visibly in the field. `change`,
+     `blur` and the refresh tick call this, so the model can never stay staler
+     than the field the operator is looking at. */
+  const resyncFromDom = () => {
+    ui.approver = field.value;
+    applyDisabled();
+  };
   /* The auto-refresh rebuilds this view, and rebuilding an input the operator
      is typing into takes the caret with it. So the field says when it is in
-     use and the refresh loop leaves the page alone until it is not. Nothing is
-     lost by waiting: the only thing that could change underneath is a client
-     reply, and it will still be there a few seconds later. */
-  const field = el("input", {
+     use and the refresh loop leaves the page alone until it is not. */
+  field = el("input", {
     class: "approver-input",
     type: "text",
     value: ui.approver,
     placeholder: "Your name, for the record",
     onFocus: () => { ui.editing = true; },
-    onBlur: () => { ui.editing = false; },
+    onBlur: () => { ui.editing = false; resyncFromDom(); },
     onInput: (event) => {
       ui.approver = event.target.value;
       ui.editing = true;
-      sync();
+      applyDisabled();
     },
   });
-  sync();
+  field.addEventListener("change", resyncFromDom);
+  syncApprover = resyncFromDom;
+  applyDisabled();
   return field;
 }
 
@@ -254,7 +272,13 @@ function watchForChanges() {
   /* The tick returns the refresh rather than firing and forgetting it, so a
      caller — a test, today — can wait for the redraw it caused instead of
      guessing how long one takes. */
-  setInterval(() => (ui.busy || ui.editing ? null : refresh(false)), REFRESH_MS);
+  setInterval(() => {
+    if (ui.busy || ui.editing) return null;
+    /* Catch a name that reached the field with no input event (autofill) even
+       when nothing else changed and the view is therefore not rebuilt. */
+    if (syncApprover && ui.view === "detail") syncApprover();
+    return refresh(false);
+  }, REFRESH_MS);
 }
 
 async function post(action, body, label) {

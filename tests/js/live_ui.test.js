@@ -115,6 +115,7 @@ function load(fetchStub) {
     "\n;globalThis.__t = { ui, canDecide, sectionClarification, sectionApproval," +
     " renderDashboard, renderTimeline, render, post, sectionRates, refresh," +
     " watchForChanges, REFRESH_MS," +
+    " syncApprover: () => syncApprover && syncApprover()," +
     " holderFor: (id) => document.getElementById(id) };";
   vm.runInContext(source, context);
   return context.__t;
@@ -207,6 +208,41 @@ check("whitespace alone is not a name", () => {
   input.fire("input", { target: { value: "   " } });
 
   eq(approve.disabled, true, "button.disabled for whitespace");
+});
+
+check("an autofilled name (DOM value set, no input event) enables the approve button", () => {
+  /* The live-browser bug: browser/password-manager autofill populates the DOM
+     input's value WITHOUT firing an input event, so ui.approver stayed empty
+     and the button stayed disabled though the name was visibly in the field. */
+  const t = load();
+  const section = t.sectionClarification(awaitingClarification());
+  const input = section.find(isInput);
+  const approve = section.find(isButton);
+
+  eq(approve.disabled, true, "precondition: disabled with an empty field");
+
+  input.value = "aayush";   // autofill sets the DOM value directly...
+  input.fire("change");     // ...and commits with a change event, never input
+
+  eq(approve.disabled, false, "button enabled once the field's value is read back");
+  eq(t.ui.approver, "aayush", "ui.approver picked up the autofilled value");
+});
+
+check("a name that appeared with no event at all is caught by the refresh resync", () => {
+  /* The hardest case: a value is present in the DOM with no event of any kind.
+     The refresh tick calls syncApprover(), which re-reads the live field. */
+  const t = load();
+  const section = t.sectionClarification(awaitingClarification());
+  const input = section.find(isInput);
+  const approve = section.find(isButton);
+
+  input.value = "aayush";   // no event whatsoever is fired
+  eq(approve.disabled, true, "still disabled until a resync runs");
+
+  t.syncApprover();         // what the refresh tick does each tick
+
+  eq(approve.disabled, false, "the resync reads the live DOM and enables it");
+  eq(t.ui.approver, "aayush", "and captures the value");
 });
 
 check("the field keeps its identity across typing, so the caret survives", () => {
