@@ -12,6 +12,9 @@ the static files are committed source with no templating step to leak into.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hmac
 import json
 import os
 import threading
@@ -243,6 +246,58 @@ def _allowed_hosts() -> frozenset[str]:
     }
 
 
+#: A shared secret that, when set, gates every dashboard route behind HTTP Basic
+#: auth. Read from the environment like the host allowlist above rather than
+#: threaded through `Settings`, so the guard is decided in one place and the
+#: value is never copied into a serialised snapshot. Empty or unset means "no
+#: password" — which is refused for a non-loopback live bind (see `run`), so an
+#: exposed dashboard cannot be left open by omission. The Host allowlist stops a
+#: cross-origin browser; this stops anyone who simply knows the URL.
+DASHBOARD_TOKEN_VAR = "TRANSLOG_DASHBOARD_TOKEN"  # noqa: S105 - env var name, not a secret
+
+
+def _dashboard_token() -> str | None:
+    """The configured dashboard password, or None when auth is disabled."""
+    return os.environ.get(DASHBOARD_TOKEN_VAR, "").strip() or None
+
+
+def _credential_matches(header: str | None, token: str) -> bool:
+    """Whether an `Authorization` header carries the configured token.
+
+    HTTP Basic: the browser prompts once and resends the header on every
+    request, so a single shared password protects the whole dashboard with no
+    login page, no session store and no cookie. The username is ignored — the
+    token is the secret — and the comparison is constant-time so a wrong password
+    leaks no timing signal. The credential is never logged.
+    """
+    if not header:
+        return False
+    scheme, _, encoded = header.partition(" ")
+    if scheme.lower() != "basic" or not encoded:
+        return False
+    try:
+        decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        return False
+    _username, separator, password = decoded.partition(":")
+    if not separator:
+        return False
+    return hmac.compare_digest(password, token)
+
+
+def _binds_publicly(host: str) -> bool:
+    """Whether this bind address is reachable from off the machine.
+
+    Loopback is the only address that is not off-box. The all-interfaces
+    wildcards (`0.0.0.0`, `::`) *include* loopback but also every other
+    interface, so they count as public; a LAN or public IP likewise. Anything
+    that is not plainly loopback must not be served without a password.
+    """
+    cleaned = host.strip().lower().strip("[]")
+    is_loopback = cleaned in {"127.0.0.1", "localhost", "::1"} or cleaned.startswith("127.")
+    return not is_loopback
+
+
 class DemoRequestHandler(BaseHTTPRequestHandler):
     server_version = "TranslogPOC/0.1"
 
@@ -251,9 +306,25 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         assert isinstance(self.server, DemoServer)
         return self.server
 
+    def _authenticated(self) -> bool:
+        """Whether this request may proceed.
+
+        No password configured means auth is off — the local-development case,
+        which a non-loopback live bind is separately refused (see `run`), so this
+        can only be reached open on loopback. When a password is set, every route
+        — data reads and state-changing actions alike — requires it.
+        """
+        token = _dashboard_token()
+        if token is None:
+            return True
+        return _credential_matches(self.headers.get("Authorization"), token)
+
     # ------------------------------------------------------------- routing --
 
     def do_GET(self) -> None:  # noqa: N802 - fixed by http.server
+        if not self._authenticated():
+            self._send_unauthorized()
+            return
         raw_path, _, query = self.path.partition("?")
         path = raw_path
 
@@ -305,6 +376,9 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         return content_type != "application/json"
 
     def do_POST(self) -> None:  # noqa: N802 - fixed by http.server
+        if not self._authenticated():
+            self._send_unauthorized()
+            return
         if self._rejects_cross_site():
             self._send_json({"error": "forbidden"}, status=403)
             return
@@ -409,6 +483,24 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             status=status,
         )
 
+    def _send_unauthorized(self) -> None:
+        """A 401 that makes a browser prompt for the dashboard password.
+
+        Carries `WWW-Authenticate: Basic` so the browser shows its native login
+        dialog and resends the credential on every subsequent request. The body
+        names only that authorization is required — never why a given attempt
+        failed, and never any part of the supplied or expected credential.
+        """
+        body = json.dumps({"error": "unauthorized"}).encode("utf-8")
+        self.send_response(401)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("WWW-Authenticate", 'Basic realm="Translog"')
+        for header, value in _SECURITY_HEADERS:
+            self.send_header(header, value)
+        self.end_headers()
+        self.wfile.write(body)
+
     def _send_bytes(self, body: bytes, content_type: str, *, status: int = 200) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -437,7 +529,22 @@ def run(
     the background poller. Between them that is the whole of "open the
     dashboard and send an enquiry": the mailbox's history is out of scope
     before the first read, and every read after that happens on its own.
+
+    A live dashboard reachable from off the machine must carry a password. If
+    the bind is not loopback and no ``TRANSLOG_DASHBOARD_TOKEN`` is set, the
+    process refuses to start rather than serve real client data and a working
+    "approve and send" button to anyone who knows the URL — the Host allowlist
+    stops a cross-origin browser, not a direct request. A loopback bind stays
+    open, so local development is unchanged.
     """
+    if live and _binds_publicly(host) and _dashboard_token() is None:
+        print(
+            f"Refusing to serve the live dashboard on a non-loopback address ({host}) "
+            f"without a password. Set {DASHBOARD_TOKEN_VAR} to require one, or bind to "
+            "127.0.0.1 for local use."
+        )
+        return 2
+
     live_session = None
     interval: float | None = None
     if live:
@@ -467,6 +574,11 @@ def run(
             print("  Outbound: real Gmail (separate send-only credential)")
             print("  Rates:    SIMULATED WEBCARGO DATA — DEMO ONLY")
             print(f"  Approver: {live_session.approver_address}")
+            print(
+                "  Access:   password required (HTTP Basic)"
+                if _dashboard_token() is not None
+                else "  Access:   no password set — loopback only"
+            )
             print("  Approval: human — nothing sends without an explicit click")
             print(f"  Mailbox:  read automatically every {interval:g}s — no button to press")
             print("  Scope:    mail that arrives from now on; the inbox's history is ignored")
