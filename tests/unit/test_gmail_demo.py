@@ -8,7 +8,7 @@ banner, and failure reporting without a mailbox, a token, or a model call.
 from __future__ import annotations
 
 import io
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -49,6 +49,7 @@ COMPLETE = ExtractionResult(
     is_chemical=ExtractedValue[bool].stated(value=False),
     pcs=ExtractedValue[int].stated(10),
     delivery_type=ExtractedValue[DeliveryType].stated(DeliveryType.AIRPORT),
+    ship_date=ExtractedValue[date].stated(date(2026, 9, 15)),
 )
 
 

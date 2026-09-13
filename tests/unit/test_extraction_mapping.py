@@ -7,6 +7,8 @@ be tempting to be clever.
 
 from __future__ import annotations
 
+from datetime import date
+
 from translog_quote.domain.extraction import (
     ExtractedValue,
     ExtractionResult,
@@ -48,6 +50,23 @@ def test_stated_values_carry_across() -> None:
     assert fields.msds_attached is True
     assert fields.pcs == 15
     assert fields.delivery_type is DeliveryType.DOOR
+
+
+def test_a_stated_ship_date_carries_across() -> None:
+    """The client's stated shipment date survives the narrowing unchanged, as
+    the date a WebCargo search will run for (AMB-8)."""
+    result = ExtractionResult(
+        ship_date=ExtractedValue[date].stated(date(2026, 9, 15), evidence="ship on 15 Sept 2026")
+    )
+
+    fields = to_extracted_fields(result)
+
+    assert fields.ship_date == date(2026, 9, 15)
+
+
+def test_an_unstated_ship_date_maps_to_none() -> None:
+    """A silence is never turned into a guessed date."""
+    assert to_extracted_fields(ExtractionResult()).ship_date is None
 
 
 def test_an_empty_result_maps_to_an_all_null_extraction() -> None:

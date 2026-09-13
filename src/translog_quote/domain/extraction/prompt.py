@@ -144,6 +144,17 @@ Fields, with the exact representation required:
                      only when the client asks for delivery there. A pickup
                      or collection address, the shipper's own premises, or
                      an address in a signature is not this field.
+  ship_date          the shipment or pickup date the client asks to ship on,
+                     as an ISO calendar date "YYYY-MM-DD", for example
+                     "2026-09-15". Only `stated` when the email gives a
+                     concrete date; convert an unambiguous written date such
+                     as "15 September 2026" or "15/09/2026" to ISO form, but
+                     never invent the year if the client did not give one.
+                     A relative or vague phrase - "at the earliest", "ASAP",
+                     "next week", "urgent" - is NOT a date: mark it `ambiguous`
+                     with the phrase in `note`, or `not_stated` if the email
+                     says nothing about timing. Never guess today, tomorrow or
+                     any default date.
 
 Include a short `evidence` quote from the email for every field you mark
 `stated`, `denied` or `ambiguous`.

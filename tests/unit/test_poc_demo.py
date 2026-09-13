@@ -9,6 +9,7 @@ its refusal behaviour, not its whitespace.
 from __future__ import annotations
 
 import io
+from datetime import date
 
 import pytest
 
@@ -27,7 +28,8 @@ from translog_quote.interface.demo.poc_demo import (
 
 FAKE_KEY = "test-not-a-real-credential"
 
-#: What a well-behaved model returns for the initial enquiry: four fields short.
+#: What a well-behaved model returns for the initial enquiry: it states the
+#: shipment date up front, leaving four required fields short.
 FIRST = ExtractionResult(
     origin=ExtractedValue[str].stated("Ahmedabad"),
     destination=ExtractedValue[str].stated("Bahrain"),
@@ -36,6 +38,7 @@ FIRST = ExtractionResult(
         CargoDimensions(length=34, width=24, height=6)
     ),
     cargo_type=ExtractedValue[str].stated("Non-Haz"),
+    ship_date=ExtractedValue[date].stated(date(2026, 9, 15)),
 )
 
 #: The reply: exactly the four missing fields, and nothing else.

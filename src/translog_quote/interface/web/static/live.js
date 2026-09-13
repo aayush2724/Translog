@@ -552,6 +552,16 @@ function sectionClarification(detail) {
 function sectionRates(detail) {
   const rates = detail.rates;
   if (!rates) {
+    /* A queued WebCargo search is in flight (browser mode). Shown so the panel
+       reads as working rather than stalled while the worker runs the search. */
+    if (detail.rate_search_pending) {
+      return card(
+        [el("h2", null, "Rate search & selection"), pill("SEARCHING", "blue")],
+        el("p", null, "Searching WebCargo for live rates…"),
+        el("p", { class: "muted small" },
+          "The queued browser search is running. This panel updates on the " +
+          "next mailbox check, when the result is ready."));
+    }
     /* No rates and a reason why. Without this the detail view simply omits the
        section and the request reads as though nothing had been attempted. */
     if (!detail.rate_failure) return null;
@@ -672,6 +682,7 @@ function sectionApproval(detail) {
             ["Reference", approval.reference],
             ["Carrier", approval.carrier],
             ["Service", approval.service],
+            ["Departs", approval.departure_date],
             ["Transit", approval.transit],
             ["Price", approval.price],
             ["Why", approval.reason],

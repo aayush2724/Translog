@@ -9,7 +9,7 @@ Scenario letters match the Phase 6 brief.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -87,6 +87,7 @@ def complete(**overrides: object) -> ExtractionResult:
         "is_chemical": ExtractedValue[bool].stated(value=False),
         "pcs": ExtractedValue[int].stated(15),
         "delivery_type": ExtractedValue[DeliveryType].stated(DeliveryType.AIRPORT),
+        "ship_date": ExtractedValue[date].stated(date(2026, 9, 15)),
     }
     base.update(overrides)
     return ExtractionResult(**base)  # type: ignore[arg-type]

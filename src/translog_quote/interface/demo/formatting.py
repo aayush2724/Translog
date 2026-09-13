@@ -37,6 +37,7 @@ FIELD_LABELS: tuple[tuple[str, str], ...] = (
     ("pcs", "PCS"),
     ("delivery_type", "Delivery Type"),
     ("delivery_address", "Delivery Address"),
+    ("ship_date", "Shipment Date"),
 )
 
 _LABEL_WIDTH = max(len(label) for _, label in FIELD_LABELS) + 1

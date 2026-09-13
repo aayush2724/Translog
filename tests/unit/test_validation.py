@@ -6,12 +6,15 @@ the letter it satisfies so a failure points straight at the brief's own list.
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 from pydantic import ValidationError
 
 from translog_quote.domain.shipment import (
     CargoDimensions,
     DeliveryType,
+    FieldName,
     RequestSource,
     ShipmentRecord,
 )
@@ -33,6 +36,7 @@ def _complete_record(**overrides: object) -> ShipmentRecord:
         "is_chemical": False,
         "pcs": 20,
         "delivery_type": DeliveryType.AIRPORT,
+        "ship_date": date(2026, 9, 15),
     }
     base.update(overrides)
     return ShipmentRecord(**base)
@@ -163,6 +167,27 @@ def test_p_non_door_delivery_never_needs_an_address() -> None:
 
     assert result.is_valid
     assert ValidationRuleId.ADDRESS_REQUIRED_FOR_DOOR not in {i.rule_id for i in result.issues}
+
+
+# --- VR-12. Shipment date is always required --------------------------------
+
+
+def test_vr12_missing_ship_date_is_reported() -> None:
+    """AMB-8: a WebCargo rate search runs for the client's stated shipment
+    date, so a shipment cannot be priced — or validated — without one."""
+    result = validate_shipment(_complete_record(ship_date=None))
+
+    assert not result.is_valid
+    issue = next(i for i in result.issues if i.rule_id == ValidationRuleId.SHIP_DATE_REQUIRED)
+    assert issue.severity is ValidationSeverity.MISSING
+    assert issue.field is FieldName.SHIP_DATE
+
+
+def test_vr12_a_stated_ship_date_passes() -> None:
+    result = validate_shipment(_complete_record(ship_date=date(2026, 9, 15)))
+
+    assert result.is_valid
+    assert ValidationRuleId.SHIP_DATE_REQUIRED not in {i.rule_id for i in result.issues}
 
 
 # --- Q. Multiple simultaneous missing fields --------------------------------

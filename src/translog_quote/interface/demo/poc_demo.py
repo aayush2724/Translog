@@ -53,6 +53,7 @@ FIELD_TITLES: dict[str, str] = {
     "pcs": "Number of pieces",
     "delivery_type": "Delivery type",
     "delivery_address": "Delivery address",
+    "ship_date": "Shipment date",
 }
 
 RULE = "=" * 70

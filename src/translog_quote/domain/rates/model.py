@@ -104,6 +104,14 @@ class Rate(BaseModel):
     restrictions: RateRestrictions = RateRestrictions()  # AMB-3
     source_ref: str = ""  # the adapter's opaque id — audit only
 
+    departure_date_label: str = ""
+    """The provider's own date bucket for this rate, verbatim (e.g.
+    "15/09/2026"), for display and audit only. Because the search aggregates
+    every returned date tab (AMB-8: all-dates candidate set), the winning rate
+    may depart a different day than the searched shipment date — this carries
+    that day exactly as the provider stated it, never reformatted or guessed.
+    Empty when the provider stated none (fixtures, simulations)."""
+
 
 class LocationRef(BaseModel):
     """One end of a lane: what the client called it, and what it resolved to.

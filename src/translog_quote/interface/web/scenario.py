@@ -14,6 +14,7 @@ replace.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import TYPE_CHECKING
 
 from translog_quote.domain.extraction import ExtractedValue, ExtractionResult
@@ -47,7 +48,8 @@ __all__ = [
 CLIENT_NAME = "Priya Nair"
 CLIENT_COMPANY = "Northgate Exports"
 
-#: What the initial enquiry states: five fields, four required ones short.
+#: What the initial enquiry states: six fields (including the shipment date),
+#: four required ones short.
 #: Evidence quotes are the lines of the fictional email they come from.
 ENQUIRY_EXTRACTION = ExtractionResult(
     origin=ExtractedValue[str].stated("Ahmedabad", evidence="Origin: Ahmedabad"),
@@ -58,6 +60,9 @@ ENQUIRY_EXTRACTION = ExtractionResult(
         evidence="Dimensions: 24 (width) x 34 (length) x 6 (breadth) inches",
     ),
     cargo_type=ExtractedValue[str].stated("Non-Haz", evidence="Cargo type: Non-Haz"),
+    ship_date=ExtractedValue[date].stated(
+        date(2026, 9, 15), evidence="Shipment date: 15 September 2026"
+    ),
 )
 
 #: What the reply states: exactly the four gaps, and nothing else, so the merge

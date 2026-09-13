@@ -26,9 +26,10 @@ REQUIRED_ALWAYS: frozenset[FieldName] = frozenset(
         FieldName.IS_CHEMICAL,  # VR-7
         FieldName.PCS,  # VR-9
         FieldName.DELIVERY_TYPE,  # VR-10
+        FieldName.SHIP_DATE,  # VR-12
     }
 )
-"""The nine unconditional rules.
+"""The ten unconditional rules.
 
 The two conditional rules are deliberately not expressible as a set, because each
 depends on another field's value:
@@ -72,6 +73,7 @@ class ValidationRuleId(StrEnum):
     DELIVERY_TYPE_REQUIRED = "DELIVERY_TYPE_REQUIRED"  # VR-10
     MSDS_REQUIRED_FOR_CHEMICAL = "MSDS_REQUIRED_FOR_CHEMICAL"  # VR-8, conditional
     ADDRESS_REQUIRED_FOR_DOOR = "ADDRESS_REQUIRED_FOR_DOOR"  # VR-11, conditional
+    SHIP_DATE_REQUIRED = "SHIP_DATE_REQUIRED"  # VR-12
 
 
 class ValidationIssue(BaseModel):

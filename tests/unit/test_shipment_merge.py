@@ -6,6 +6,8 @@ the R-1002-shaped clarification flow, and the weight conflict.
 
 from __future__ import annotations
 
+from datetime import date
+
 from translog_quote.domain.shipment import (
     CargoDimensions,
     DeliveryType,
@@ -118,6 +120,38 @@ def test_w_multiple_conflicts_are_all_reported() -> None:
 
     fields_in_conflict = {c.field for c in result.conflicts}
     assert fields_in_conflict == {FieldName.WEIGHT_KG, FieldName.CARGO_TYPE}
+
+
+# --- the shipment date fills and conflicts like any other field ---------------
+
+
+def test_a_missing_ship_date_is_filled_from_a_reply() -> None:
+    existing = _blank_record()
+    reply = ExtractedFields(ship_date=date(2026, 9, 15))
+
+    result = merge_shipment(existing, reply)
+
+    assert result.record.ship_date == date(2026, 9, 15)
+    assert result.changed == (FieldName.SHIP_DATE,)
+    assert result.conflicts == ()
+
+
+def test_a_disagreeing_ship_date_is_reported_as_a_conflict_not_resolved() -> None:
+    """A client who first says the 15th and then the 20th has not corrected the
+    date — neither value wins, and both are surfaced for explicit handling."""
+    existing = _blank_record().model_copy(update={"ship_date": date(2026, 9, 15)})
+    reply = ExtractedFields(ship_date=date(2026, 9, 20))
+
+    result = merge_shipment(existing, reply)
+
+    assert result.record.ship_date == date(2026, 9, 15)  # not silently overwritten
+    assert len(result.conflicts) == 1
+    conflict = result.conflicts[0]
+    assert conflict.field is FieldName.SHIP_DATE
+    assert conflict.existing_value == date(2026, 9, 15)
+    assert conflict.new_value == date(2026, 9, 20)
+    assert result.changed == ()
+    assert result.unchanged == ()
 
 
 # --- X. Do not create a new shipment during a merge -----------------------

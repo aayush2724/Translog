@@ -7,6 +7,7 @@ so every step downstream deals with a single format.
 
 from __future__ import annotations
 
+from datetime import date
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -58,6 +59,7 @@ class FieldName(StrEnum):
     PCS = "pcs"
     DELIVERY_TYPE = "delivery_type"
     DELIVERY_ADDRESS = "delivery_address"
+    SHIP_DATE = "ship_date"
 
 
 class ExtractedFields(BaseModel):
@@ -81,6 +83,10 @@ class ExtractedFields(BaseModel):
     pcs: int | None = None
     delivery_type: DeliveryType | None = None
     delivery_address: str | None = None
+    ship_date: date | None = None
+    """The client's stated shipment/pickup date. AMB-8 resolved: this is the
+    date a WebCargo rate search runs for. Never guessed — a vague "at the
+    earliest" is *not* a date and must arrive as ``None``, not an invented one."""
 
 
 class ShipmentRecord(BaseModel):
@@ -108,3 +114,6 @@ class ShipmentRecord(BaseModel):
     pcs: int | None = None
     delivery_type: DeliveryType | None = None
     delivery_address: str | None = None
+    ship_date: date | None = None
+    """The client's stated shipment/pickup date. AMB-8 resolved: this is the
+    date a WebCargo rate search runs for. Never guessed."""

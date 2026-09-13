@@ -32,27 +32,40 @@ demonstration exactly where it was.
 
 from __future__ import annotations
 
-import datetime
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from translog_quote import bootstrap
+from translog_quote.config import WebCargoMode
 from translog_quote.domain.quotation import (
     INTERNAL_SUBJECT_PREFIX,
     ReviewPacket,
     decision_from_choice,
 )
 from translog_quote.domain.rates import FASTEST_ELIGIBLE
+from translog_quote.domain.shipment import DeliveryType
 from translog_quote.domain.validation import validate_shipment
 from translog_quote.domain.workflow import RequestState
-from translog_quote.errors import IllegalTransition, PermanentFailure, TranslogError
+from translog_quote.errors import (
+    ContractViolation,
+    IllegalTransition,
+    PermanentFailure,
+    TranslogError,
+)
 from translog_quote.interface.demo.gmail_thread import _request_id_for
+from translog_quote.interface.jobs import (
+    JobState,
+    RateSearchJobRequest,
+    enqueue_rate_search,
+    fetch_job_status,
+)
 from translog_quote.interface.web.audit_log import JsonFileAuditLog
 from translog_quote.interface.web.demonstration import DemonstrationFile
 from translog_quote.observability import get_logger
-from translog_quote.pipeline import RateSearchStage
+from translog_quote.pipeline import RateSearchOutcome, RateSearchStage
 
 if TYPE_CHECKING:
+    import datetime
     from collections.abc import Collection
 
     from translog_quote.config import Settings
@@ -61,8 +74,9 @@ if TYPE_CHECKING:
     from translog_quote.domain.quotation import ApprovalDecision
     from translog_quote.domain.shipment import ShipmentRecord
     from translog_quote.domain.validation import ValidationResult
+    from translog_quote.interface.jobs import RateSearchJobResult
     from translog_quote.interface.web.demonstration import Demonstration
-    from translog_quote.pipeline import QuotationStage, RateSearchOutcome
+    from translog_quote.pipeline import QuotationStage
     from translog_quote.pipeline.audit import AuditEvent
     from translog_quote.ports import (
         ClockPort,
@@ -76,10 +90,6 @@ if TYPE_CHECKING:
 #: How many mailbox messages one poll may read. A conversation is an enquiry
 #: and its replies; a small ceiling, not a mailbox scan.
 MESSAGE_LIMIT = 10
-
-#: AMB-8: no approved source for a rate-search date exists, so the session
-#: states one rather than letting anything downstream invent it.
-SEARCH_DATE = datetime.date(2026, 9, 2)
 
 _log = get_logger("interface.web.live_session")
 
@@ -143,6 +153,14 @@ class LiveRequest:
     the answer it could not use. Empty for every request that was not."""
 
     rates: RateSearchOutcome | None = None
+    rate_job_id: str | None = None
+    """The queued browser rate-search job serving this request, once enqueued.
+
+    Set on the first poll that enqueues, and reused by every later poll so the
+    job is polled rather than re-submitted (idempotency is also guaranteed
+    queue-side, but this avoids even asking). ``None`` in demo/mock mode, which
+    search synchronously and never touch the queue."""
+
     rate_failure: str | None = None
     """Why rate search could not run for this request, if it could not.
 
@@ -188,6 +206,22 @@ class LiveRequest:
     def awaiting_quotation_decision(self) -> bool:
         """A rate is selected and the gate has not yet been answered."""
         return self.packet is not None and self.decision is None
+
+    @property
+    def rate_search_pending(self) -> bool:
+        """A queued browser rate search is in flight for this request.
+
+        A presentation state, not a domain one: the request stays VALIDATED
+        while the job runs. True only in browser mode, between enqueue and the
+        job reaching a result — so the dashboard can show "Searching WebCargo…"
+        instead of an empty rate panel that reads as a stall.
+        """
+        return (
+            self.state is RequestState.VALIDATED
+            and self.rate_job_id is not None
+            and self.rates is None
+            and self.rate_failure is None
+        )
 
     @property
     def is_settled(self) -> bool:
@@ -583,66 +617,200 @@ class LiveSession:
             bootstrap.commit_thread(self._working, self._durable, routed.request_id)
 
     def _search_rates_for_validated(self) -> None:
-        """Run the rate pipeline for any request that has just validated.
+        """Advance rate search for any request that has just validated.
 
-        Not a gate and not a send: searching, filtering and ranking are
-        deterministic and contact nobody, so they happen as soon as a shipment
-        is complete. The gate is the next step, and it is a person's.
+        Not a gate and not a send: filtering and ranking are deterministic and
+        the gate is the next step, and it is a person's. *How* the candidate
+        rates are obtained depends on the configured provider:
+
+        - demo / mock: searched synchronously in-process, exactly as before —
+          simulated rates, disclosed as such.
+        - browser: the real WebCargo search runs only inside the browser
+          worker, so this session enqueues a job on the shared queue and polls
+          it across successive calls. It never builds a browser provider itself
+          (that owns the one authenticated session) and never falls back to
+          simulated data — a browser-mode failure is reported, not papered over.
         """
-        stage = RateSearchStage(
-            provider=bootstrap.build_demo_rate_provider(),
-            resolver=self._resolver,
-            strategy=FASTEST_ELIGIBLE,
-            audit=self.audit,
-            clock=self._clock,
+        browser_mode = self._settings.webcargo.mode is WebCargoMode.BROWSER
+        stage = (
+            None
+            if browser_mode
+            else RateSearchStage(
+                provider=bootstrap.build_demo_rate_provider(),
+                resolver=self._resolver,
+                strategy=FASTEST_ELIGIBLE,
+                audit=self.audit,
+                clock=self._clock,
+            )
         )
         for request in self.requests.values():
             if request.rates is not None or request.state is not RequestState.VALIDATED:
                 continue
-            try:
-                outcome = stage.run(
-                    request.request_id,
-                    request.record,
-                    on_date=SEARCH_DATE,
-                    cargo_is_liquid=None,  # AMB-3: stated, never derived
+            # AMB-8: the search runs for the client's stated shipment date.
+            # VR-12 makes that date required to validate, so a VALIDATED
+            # request has one — the guard is defensive, not expected to fire,
+            # and it fails loudly rather than inventing a date.
+            if request.record.ship_date is None:
+                request.rate_failure = (
+                    "No shipment date on a validated request; a rate search "
+                    "cannot run without the client's stated shipment date."
                 )
-            except TranslogError as exc:
-                # One request that cannot be priced is one request that cannot
-                # be priced. Before this, an unroutable lane raised out of the
-                # loop, out of `poll`, and out of the request handler as a 500
-                # — so a single enquiry naming a place outside the demo lane
-                # table stopped every *other* request from being searched and
-                # ended the poll that would have read the rest of the mailbox.
-                #
-                # Caught narrowly on purpose. The project taxonomy is the set
-                # of failures a *request* can have — `UnresolvedLocation` among
-                # them, since a place the provider cannot identify is one
-                # enquiry's problem. Anything else is a defect in this process
-                # and must still escape loudly rather than be recorded as a
-                # property of somebody's enquiry.
-                #
-                # Nothing else is touched: the state stays VALIDATED and
-                # `rates` stays None, which is exactly the pair this loop
-                # selects on — so the retry is the next poll, with no queue to
-                # drain and nothing to reset. No packet is built, so the
-                # request cannot reach the approval gate, and no sink is
-                # called, so the failure cannot send anything.
-                request.rate_failure = str(exc)
-                _log.warning("Rate search failed for %s: %s", request.request_id, exc)
                 continue
+            if browser_mode:
+                self._advance_browser_rate_search(request)
+            else:
+                assert stage is not None  # noqa: S101 - non-browser branch always builds one
+                self._run_sync_rate_search(request, stage)
 
+    def _run_sync_rate_search(self, request: LiveRequest, stage: RateSearchStage) -> None:
+        """Search, filter and rank in-process for demo/mock. Unchanged behaviour."""
+        try:
+            outcome = stage.run(
+                request.request_id,
+                request.record,
+                on_date=request.record.ship_date,  # type: ignore[arg-type]
+                cargo_is_liquid=None,  # AMB-3: stated, never derived
+            )
+        except TranslogError as exc:
+            # One request that cannot be priced is one request that cannot be
+            # priced. Caught narrowly: `UnresolvedLocation` and its kin are one
+            # enquiry's problem, and the state stays VALIDATED with `rates`
+            # None so the next poll retries for free. Anything outside the
+            # taxonomy is a defect and still escapes loudly.
+            request.rate_failure = str(exc)
+            _log.warning("Rate search failed for %s: %s", request.request_id, exc)
+            return
+        self._apply_rate_outcome(request, outcome)
+
+    def _advance_browser_rate_search(self, request: LiveRequest) -> None:
+        """Enqueue (once) and then poll the queued WebCargo job for one request.
+
+        Idempotent across polls: the first call submits and records the job id,
+        every later call polls it. On completion the request is hydrated from
+        the worker's own filtered/selected result — the domain selection is not
+        re-run here. A failure is recorded on the request and never replaced by
+        simulated data.
+        """
+        from redis.exceptions import RedisError
+
+        if request.rate_job_id is None:
+            try:
+                job = self._job_request_from_record(request)
+            except (ContractViolation, ValueError) as exc:
+                request.rate_failure = f"Could not build the rate-search request: {exc}"
+                _log.warning("Rate-search request invalid for %s: %s", request.request_id, exc)
+                return
+            try:
+                job_id, _created = enqueue_rate_search(job, self._settings)
+            except RedisError as exc:
+                # The queue being down is transient: leave no job id, so the
+                # next poll retries the enqueue rather than polling nothing.
+                request.rate_failure = "the rate-search queue is unavailable; retry shortly"
+                _log.warning("Could not enqueue rate search for %s: %s", request.request_id, exc)
+                return
+            request.rate_job_id = job_id
             request.rate_failure = None
-            request.rates = outcome
-            request.state = outcome.state
-            if outcome.selection is not None:
-                request.packet = ReviewPacket(
-                    request_id=request.request_id,
-                    record=request.record,
-                    validation=request.validation,
-                    clarification_sent=request.clarification_sent_by is not None,
-                    rates=outcome.filtered,
-                    selection=outcome.selection,
-                )
+            return  # the first result arrives on a later poll
+
+        try:
+            status = fetch_job_status(request.rate_job_id, self._settings)
+        except RedisError as exc:
+            request.rate_failure = "the rate-search queue is unavailable; retry shortly"
+            _log.warning("Could not read rate-search job for %s: %s", request.request_id, exc)
+            return
+
+        if status is None:
+            # The job's result TTL lapsed (or it was never created). Forget it
+            # so the next poll enqueues afresh rather than polling a ghost.
+            request.rate_job_id = None
+            return
+        if status.state is JobState.COMPLETED and status.result is not None:
+            self._apply_rate_outcome(
+                request, self._outcome_from_job_result(request.request_id, status.result)
+            )
+        elif status.state is JobState.FAILED:
+            # Fail loudly and stay failed: the failed job is retained under its
+            # own TTL and is not auto re-enqueued, so a broken search does not
+            # hammer the single browser worker on every poll.
+            request.rate_failure = status.error or "the rate search failed"
+        # QUEUED / PROCESSING: still in flight — reported as pending, nothing to do.
+
+    def _apply_rate_outcome(self, request: LiveRequest, outcome: RateSearchOutcome) -> None:
+        """Record a finished rate outcome and build the approval packet if any."""
+        request.rate_failure = None
+        request.rates = outcome
+        request.state = outcome.state
+        if outcome.selection is not None:
+            request.packet = ReviewPacket(
+                request_id=request.request_id,
+                record=request.record,
+                validation=request.validation,
+                clarification_sent=request.clarification_sent_by is not None,
+                rates=outcome.filtered,
+                selection=outcome.selection,
+            )
+
+    @staticmethod
+    def _job_request_from_record(request: LiveRequest) -> RateSearchJobRequest:
+        """Build the queue request from a validated record's own fields.
+
+        Every field is read from the canonical record — no invented value, and
+        the shipment date is the client's own (AMB-8). Missing any required
+        field raises, which the caller turns into a reported failure rather
+        than a queued job that the worker would only reject.
+        """
+        record = request.record
+        origin = record.origin
+        destination = record.destination
+        weight = record.weight_kg
+        dimensions = record.dimensions_in
+        commodity = record.commodity
+        ship_date = record.ship_date
+        if (
+            not origin
+            or not destination
+            or weight is None
+            or dimensions is None
+            or not commodity
+            or ship_date is None
+        ):
+            raise ContractViolation(
+                "a validated record is missing a field required to search rates"
+            )
+        return RateSearchJobRequest(
+            origin=origin,
+            destination=destination,
+            weight_kg=weight,
+            dimensions_in=dimensions,
+            search_date=ship_date,
+            commodity=commodity,
+            cargo_is_liquid=None,  # AMB-3: stated, never derived
+            requires_door_delivery=record.delivery_type is DeliveryType.DOOR,
+        )
+
+    @staticmethod
+    def _outcome_from_job_result(request_id: str, result: RateSearchJobResult) -> RateSearchOutcome:
+        """Map a completed job result into the outcome the interface already renders.
+
+        A pure re-shaping: the worker already filtered and selected with the
+        same domain code, so this carries those results through unchanged — it
+        does not re-run eligibility or fastest-eligible selection.
+        """
+        target = (
+            RequestState.RATE_SELECTED
+            if result.selection is not None
+            else RequestState.NO_ELIGIBLE_RATE
+        )
+        return RateSearchOutcome(
+            request_id=request_id,
+            state=target,
+            query=result.query,
+            adapter_id=result.adapter_id,
+            returned=result.returned,
+            filtered=result.filtered,
+            selection=result.selection,
+            is_simulated=result.is_simulated,
+        )
 
     def _ids_awaiting_clarification(self) -> dict[str, str]:
         """Message id -> the request holding an unsent draft, for each such request."""

@@ -7,6 +7,8 @@ stage will chain them.
 
 from __future__ import annotations
 
+from datetime import date
+
 from translog_quote.domain.shipment import (
     CargoDimensions,
     DeliveryType,
@@ -75,6 +77,7 @@ def test_reference_thread_flow_only_msds_and_address_remain_missing() -> None:
             weight_kg=500.0,
             dimensions_in=CargoDimensions(length=34, width=24, height=6),
             cargo_type="Non Haz",
+            ship_date=date(2026, 9, 15),
         ),
     )
 
@@ -114,6 +117,7 @@ def test_conflict_scenario_end_to_end() -> None:
             is_chemical=False,
             pcs=20,
             delivery_type=DeliveryType.AIRPORT,
+            ship_date=date(2026, 9, 15),
         ),
     )
     assert validate_shipment(initial).is_valid  # fully valid before the correction

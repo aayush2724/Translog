@@ -164,6 +164,22 @@ def _check_msds_required_for_chemical(record: ShipmentRecord) -> ValidationIssue
     )
 
 
+def _check_ship_date(record: ShipmentRecord) -> ValidationIssue | None:
+    """VR-12: the client's shipment/pickup date is required.
+
+    AMB-8 resolved: a WebCargo rate search runs for the client's stated
+    shipment date, so a shipment cannot be priced without one. A vague "at the
+    earliest" never reaches here as a date — extraction leaves ``ship_date``
+    ``None`` rather than guessing — so a missing date is a real, askable gap.
+    """
+    return _required(
+        FieldName.SHIP_DATE,
+        ValidationRuleId.SHIP_DATE_REQUIRED,
+        "Shipment date is required.",
+        is_missing=record.ship_date is None,
+    )
+
+
 def _check_address_required_for_door(record: ShipmentRecord) -> ValidationIssue | None:
     """VR-11: conditional on ``delivery_type`` being exactly DOOR."""
     if record.delivery_type is not DeliveryType.DOOR:
@@ -186,6 +202,7 @@ _RULES = (
     _check_chemical_status,  # VR-7
     _check_pcs,  # VR-9
     _check_delivery_type,  # VR-10
+    _check_ship_date,  # VR-12
     _check_msds_required_for_chemical,  # VR-8, conditional
     _check_address_required_for_door,  # VR-11, conditional
 )

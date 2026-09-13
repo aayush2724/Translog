@@ -6,6 +6,8 @@ types directly.
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 from pydantic import ValidationError
 
@@ -83,7 +85,7 @@ def test_an_empty_result_is_every_field_not_stated() -> None:
     """The safe default: a model that says nothing has stated nothing."""
     result = ExtractionResult()
 
-    assert len(result.fields_by_status(FieldStatus.NOT_STATED)) == 11
+    assert len(result.fields_by_status(FieldStatus.NOT_STATED)) == 12
     assert result.fields_by_status(FieldStatus.STATED) == ()
 
 
@@ -186,3 +188,38 @@ def test_a_well_formed_payload_round_trips() -> None:
 
     assert result.origin.value == "Ahmedabad"
     assert result.weight_kg.status is FieldStatus.NOT_STATED
+
+
+# --- the shipment date: a concrete date, a silence, or an unusable phrase -----
+
+
+def test_a_concrete_ship_date_is_stated_as_a_calendar_date() -> None:
+    result = ExtractionResult(
+        ship_date=ExtractedValue[date].stated(
+            date(2026, 9, 15), evidence="shipment date: 15 September 2026"
+        )
+    )
+
+    assert result.ship_date.status is FieldStatus.STATED
+    assert result.ship_date.value == date(2026, 9, 15)
+
+
+def test_an_absent_ship_date_defaults_to_not_stated() -> None:
+    """A model that says nothing about timing has stated no date — not a guess."""
+    assert ExtractionResult().ship_date.status is FieldStatus.NOT_STATED
+    assert ExtractionResult().ship_date.value is None
+
+
+def test_a_vague_timing_phrase_is_ambiguous_and_carries_no_date() -> None:
+    """ "at the earliest" is not a calendar date the schema can represent, so it
+    is reported ambiguous with the phrase in `note`, never an invented date."""
+    result = ExtractionResult(
+        ship_date=ExtractedValue[date].ambiguous(
+            note="client wrote 'at the earliest' — no concrete date given",
+            evidence="at the earliest",
+        )
+    )
+
+    assert result.ship_date.status is FieldStatus.AMBIGUOUS
+    assert result.ship_date.value is None
+    assert "earliest" in (result.ship_date.note or "")

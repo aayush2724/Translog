@@ -8,7 +8,7 @@ the order it processes a conversation in, where it stops, and what it refuses.
 from __future__ import annotations
 
 import io
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -50,7 +50,8 @@ REPLY = RawEmail(
         "Commodity: Engineering components\n"
         "Chemical: No\n"
         "Pieces: 10 cartons\n"
-        "Delivery: Airport to airport"
+        "Delivery: Airport to airport\n"
+        "Shipment date: 15 September 2026"
     ),
     received_at=datetime(2026, 9, 1, 10, 0, tzinfo=UTC) + timedelta(hours=4),
     in_reply_to=ENQUIRY_ID,
@@ -72,6 +73,9 @@ REPLY_EXTRACTION = ExtractionResult(
     is_chemical=ExtractedValue[bool].stated(value=False),
     pcs=ExtractedValue[int].stated(10),
     delivery_type=ExtractedValue[DeliveryType].stated(DeliveryType.AIRPORT),
+    ship_date=ExtractedValue[date].stated(
+        date(2026, 9, 15), evidence="Shipment date: 15 September 2026"
+    ),
 )
 
 

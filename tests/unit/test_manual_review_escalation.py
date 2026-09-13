@@ -25,7 +25,7 @@ still proceeds to rate search untouched.
 from __future__ import annotations
 
 import tempfile
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -83,6 +83,7 @@ def enquiry_extraction() -> ExtractionResult:
         msds_attached=ExtractedValue[bool].stated(value=True),
         pcs=ExtractedValue[int].stated(14),
         delivery_type=ExtractedValue[DeliveryType].stated(DeliveryType.AIRPORT),
+        ship_date=ExtractedValue[date].stated(date(2026, 9, 15)),
     )
 
 

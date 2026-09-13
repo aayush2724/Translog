@@ -13,6 +13,7 @@ invalidates an example fails here rather than drifting silently.
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -44,7 +45,7 @@ def _record(result: ExtractionResult, request_id: str = "R-EX"):
 # Example 1 — Complete shipment email (Phase 3 scenario A)
 #
 # Every field stated, both conditionals satisfied. The extraction states all
-# eleven fields and validation passes with nothing outstanding.
+# twelve fields and validation passes with nothing outstanding.
 # ===========================================================================
 
 
@@ -81,6 +82,9 @@ def test_example_1_complete_shipment_email() -> None:
             "Kingdom of Bahrain",
             evidence="Delivery address:",
         ),
+        ship_date=ExtractedValue[date].stated(
+            date(2026, 9, 15), evidence="Shipment date: 15 September 2026"
+        ),
     )
 
     # Every stated value is genuinely in the email.
@@ -89,15 +93,16 @@ def test_example_1_complete_shipment_email() -> None:
     assert "Industrial Adhesive Compound" in body
     assert "15 drums" in body
     assert "Door delivery" in body
+    assert "Shipment date: 15 September 2026" in body
 
-    assert len(expected.fields_by_status(FieldStatus.STATED)) == 11
+    assert len(expected.fields_by_status(FieldStatus.STATED)) == 12
     assert validate_shipment(_record(expected)).is_valid
 
 
 # ===========================================================================
 # Example 2 — Incomplete shipment email (Phase 3 scenario B)
 #
-# Four fields stated, seven silent. The key assertion is what is NOT stated:
+# Four fields stated, eight silent. The key assertion is what is NOT stated:
 # nothing is inferred from the lane, the weight or the dimensions.
 # ===========================================================================
 
@@ -132,6 +137,7 @@ def test_example_2_incomplete_shipment_email() -> None:
         "pcs",
         "delivery_type",
         "delivery_address",
+        "ship_date",
     }
 
     validation = validate_shipment(_record(expected))
@@ -142,6 +148,7 @@ def test_example_2_incomplete_shipment_email() -> None:
         ValidationRuleId.CHEMICAL_STATUS_REQUIRED,
         ValidationRuleId.PCS_REQUIRED,
         ValidationRuleId.DELIVERY_TYPE_REQUIRED,
+        ValidationRuleId.SHIP_DATE_REQUIRED,
     }
 
 
@@ -265,6 +272,9 @@ def test_example_4_and_6_semi_structured_door_delivery() -> None:
             "Muscat, Sultanate of Oman",
             evidence="Delivery address:",
         ),
+        ship_date=ExtractedValue[date].stated(
+            date(2026, 9, 15), evidence="Shipment date: 15 September 2026"
+        ),
     )
 
     assert "door delivery" in body.lower()
@@ -306,6 +316,9 @@ def test_example_5_chemical_shipment_with_msds() -> None:
         pcs=ExtractedValue[int].stated(12, evidence="Pieces: 12 drums"),
         delivery_type=ExtractedValue[DeliveryType].stated(
             DeliveryType.AIRPORT, evidence="Delivery: Airport pickup by consignee"
+        ),
+        ship_date=ExtractedValue[date].stated(
+            date(2026, 9, 15), evidence="Shipment date: 15 September 2026"
         ),
     )
 

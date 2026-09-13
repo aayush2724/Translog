@@ -234,6 +234,13 @@ def approval_json(packet: ReviewPacket, outcome: RateSearchOutcome, *, approver:
         "service": rate.product,
         "transit": render_transit(rate.transit),
         "price": f"{rate.total_amount} {rate.currency}",
+        # The day this rate departs. The search aggregates every returned date
+        # tab (AMB-8: all-dates candidate set), so the winner may leave on a
+        # different day than the searched shipment date — the provider's own
+        # date label is shown when it gave one, falling back to the searched
+        # date. Never reformatted, never guessed.
+        "departure_date": rate.departure_date_label or outcome.query.date.isoformat(),
+        "searched_date": outcome.query.date.isoformat(),
         "reason": packet.selection.reason,
         "excluded": [
             {
@@ -498,6 +505,9 @@ def request_summary(request: LiveRequest) -> Json:
         # Why this request has no rates, when it has none. Reported rather
         # than hidden: a request stuck before pricing looks idle otherwise.
         "rate_failure": request.rate_failure,
+        # A queued WebCargo search is in flight (browser mode): the panel shows
+        # "Searching…" rather than an empty rate section that reads as a stall.
+        "rate_search_pending": request.rate_search_pending,
         "manual_review_notes": list(request.manual_review_notes),
         "waiting_replies": len(request.waiting_replies),
         "awaiting_decision": request.awaiting_quotation_decision,
@@ -525,6 +535,7 @@ def request_detail(session: LiveSession, request: LiveRequest) -> Json:
         "carried": [FIELD_TITLES.get(f, f) for f in request.carried_fields],
         "shipment": shipment_json(request),
         "rate_failure": request.rate_failure,
+        "rate_search_pending": request.rate_search_pending,
         "manual_review_notes": list(request.manual_review_notes),
         "validation": validation_json(request.validation),
         "clarification": None

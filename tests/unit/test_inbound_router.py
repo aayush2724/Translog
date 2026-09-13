@@ -10,7 +10,7 @@ none of the shipment must still leave the record complete.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -37,6 +37,7 @@ ENQUIRY_EXTRACTION = ExtractionResult(
         CargoDimensions(length=34, width=24, height=6)
     ),
     cargo_type=ExtractedValue[str].stated("Non-Haz"),
+    ship_date=ExtractedValue[date].stated(date(2026, 9, 15)),
 )
 
 #: The reply answers exactly the four questions and repeats nothing else.

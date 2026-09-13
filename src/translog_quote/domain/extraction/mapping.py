@@ -30,6 +30,7 @@ _MAPPED_FIELDS: tuple[str, ...] = (
     "pcs",
     "delivery_type",
     "delivery_address",
+    "ship_date",
 )
 
 

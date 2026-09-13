@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import tempfile
 import threading
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -123,6 +123,7 @@ def _complete(origin: str, destination: str) -> ExtractionResult:
         is_chemical=ExtractedValue[bool].stated(value=False),
         pcs=ExtractedValue[int].stated(10),
         delivery_type=ExtractedValue[DeliveryType].stated(DeliveryType.AIRPORT),
+        ship_date=ExtractedValue[date].stated(date(2026, 9, 15)),
     )
 
 

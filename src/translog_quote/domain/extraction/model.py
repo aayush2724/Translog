@@ -14,6 +14,7 @@ this type has already been produced.
 
 from __future__ import annotations
 
+from datetime import date
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -140,6 +141,13 @@ class ExtractionResult(BaseModel):
     pcs: ExtractedValue[int] = ExtractedValue[int].not_stated()
     delivery_type: ExtractedValue[DeliveryType] = ExtractedValue[DeliveryType].not_stated()
     delivery_address: ExtractedValue[str] = ExtractedValue[str].not_stated()
+    ship_date: ExtractedValue[date] = ExtractedValue[date].not_stated()
+    """The client's stated shipment/pickup date, as a calendar date.
+
+    ``STATED`` only for a concrete date the email actually gives. A relative or
+    vague phrase — "at the earliest", "ASAP", "next week" — is not a date this
+    schema can represent, so it is ``AMBIGUOUS`` (with the phrase in ``note``)
+    or ``NOT_STATED``; never a guessed calendar date (BR-7, AMB-8)."""
 
     @model_validator(mode="after")
     def _stated_numbers_are_possible(self) -> ExtractionResult:

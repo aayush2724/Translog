@@ -8,7 +8,7 @@ code path.
 from __future__ import annotations
 
 import io
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -61,6 +61,7 @@ COMPLETE = ExtractionResult(
     pcs=ExtractedValue[int].stated(15),
     delivery_type=ExtractedValue[DeliveryType].stated(DeliveryType.DOOR),
     delivery_address=ExtractedValue[str].stated("Hidd Industrial Area, Bahrain"),
+    ship_date=ExtractedValue[date].stated(date(2026, 9, 15)),
 )
 
 
@@ -183,9 +184,10 @@ def test_every_canonical_field_appears_in_the_extraction_section() -> None:
         "PCS",
         "Delivery Type",
         "Delivery Address",
+        "Shipment Date",
     ):
         assert f"{label}:" in rendered
-    assert "11 of 11 fields stated" in rendered
+    assert "12 of 12 fields stated" in rendered
 
 
 def test_evidence_is_shown_so_values_can_be_checked_against_the_email() -> None:

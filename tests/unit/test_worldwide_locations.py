@@ -18,7 +18,7 @@ The cases are lettered to match the acceptance list they were written against.
 from __future__ import annotations
 
 import tempfile
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -90,6 +90,7 @@ def _complete(origin: str, destination: str) -> ExtractionResult:
         is_chemical=ExtractedValue[bool].stated(value=False),
         pcs=ExtractedValue[int].stated(10),
         delivery_type=ExtractedValue[DeliveryType].stated(DeliveryType.AIRPORT),
+        ship_date=ExtractedValue[date].stated(date(2026, 9, 15)),
     )
 
 
@@ -107,6 +108,7 @@ def _record(origin: str, destination: str) -> ShipmentRecord:
         is_chemical=False,
         pcs=10,
         delivery_type=DeliveryType.AIRPORT,
+        ship_date=date(2026, 9, 15),
     )
 
 

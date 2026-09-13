@@ -242,6 +242,7 @@ def _door_extraction() -> ExtractionResult:
         pcs=ExtractedValue[int].stated(10),
         delivery_type=ExtractedValue[DeliveryType].stated(DeliveryType.DOOR),
         delivery_address=ExtractedValue[str].stated("Warehouse 4, Dubai"),
+        ship_date=ExtractedValue[date].stated(date(2026, 9, 15)),
     )
 
 

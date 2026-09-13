@@ -16,7 +16,7 @@ otherwise. History is shown; nothing is invented.
 from __future__ import annotations
 
 import tempfile
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -81,6 +81,7 @@ COMPLETE_EXTRACTION = ExtractionResult(
     is_chemical=ExtractedValue[bool].stated(value=False),
     pcs=ExtractedValue[int].stated(10),
     delivery_type=ExtractedValue[DeliveryType].stated(DeliveryType.AIRPORT),
+    ship_date=ExtractedValue[date].stated(date(2026, 9, 15)),
 )
 
 

@@ -27,6 +27,7 @@ MISSING_QUESTIONS: dict[FieldName, str] = {
     FieldName.PCS: "The number of pieces, and how they are packed",
     FieldName.DELIVERY_TYPE: "Whether you need door delivery or airport-to-airport",
     FieldName.DELIVERY_ADDRESS: "The full delivery address",
+    FieldName.SHIP_DATE: "The date you would like the shipment to be picked up or shipped",
 }
 
 #: What to ask when the client stated something we cannot use as-is. The ask is
@@ -54,6 +55,7 @@ FIELD_LABELS: dict[FieldName, str] = {
     FieldName.PCS: "Number of pieces",
     FieldName.DELIVERY_TYPE: "Delivery type",
     FieldName.DELIVERY_ADDRESS: "Delivery address",
+    FieldName.SHIP_DATE: "Shipment date",
 }
 
 

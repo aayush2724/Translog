@@ -12,7 +12,7 @@ an earlier run can make a broken path look healthy.
 from __future__ import annotations
 
 import tempfile
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -125,6 +125,7 @@ def complete(origin: str, destination: str) -> ExtractionResult:
         is_chemical=ExtractedValue[bool].stated(value=False),
         pcs=ExtractedValue[int].stated(8),
         delivery_type=ExtractedValue[DeliveryType].stated(DeliveryType.AIRPORT),
+        ship_date=ExtractedValue[date].stated(date(2026, 9, 15)),
     )
 
 

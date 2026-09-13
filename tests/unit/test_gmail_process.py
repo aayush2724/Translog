@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import ast
 import io
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -52,8 +52,9 @@ INCOMPLETE_EMAIL = RawEmail(
     received_at=datetime(2026, 9, 1, 10, 0, tzinfo=UTC),
 )
 
-#: What the model reports for that email. Five fields stated, four silent —
-#: which is what the deterministic validator then has to notice.
+#: What the model reports for that email. Six fields stated (including the
+#: shipment date), four silent — which is what the deterministic validator then
+#: has to notice.
 INCOMPLETE_EXTRACTION = ExtractionResult(
     origin=ExtractedValue[str].stated("Ahmedabad"),
     destination=ExtractedValue[str].stated("Bahrain"),
@@ -62,6 +63,7 @@ INCOMPLETE_EXTRACTION = ExtractionResult(
         CargoDimensions(length=34, width=24, height=6)
     ),
     cargo_type=ExtractedValue[str].stated("Non-Haz"),
+    ship_date=ExtractedValue[date].stated(date(2026, 9, 15)),
 )
 
 COMPLETE_EXTRACTION = ExtractionResult(
@@ -76,6 +78,7 @@ COMPLETE_EXTRACTION = ExtractionResult(
     is_chemical=ExtractedValue[bool].stated(value=False),
     pcs=ExtractedValue[int].stated(10),
     delivery_type=ExtractedValue[DeliveryType].stated(DeliveryType.AIRPORT),
+    ship_date=ExtractedValue[date].stated(date(2026, 9, 15)),
 )
 
 

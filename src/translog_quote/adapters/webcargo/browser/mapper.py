@@ -114,6 +114,7 @@ def map_record(record: WebCargoRateRecord) -> Rate:
         restrictions=RateRestrictions(),
         source_ref=f"{ADAPTER_ID}:{record.date_tab}:{record.service.strip()}"
         f":{record.departure.strip()}",
+        departure_date_label=record.date_tab.strip(),
     )
 
 

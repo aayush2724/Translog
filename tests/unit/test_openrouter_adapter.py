@@ -182,7 +182,7 @@ def test_fields_the_model_omits_default_to_not_stated() -> None:
     result = adapter.extract_shipment("Origin: Vapi")
 
     assert result.origin.value == "Vapi"
-    assert len(result.fields_by_status(FieldStatus.NOT_STATED)) == 10
+    assert len(result.fields_by_status(FieldStatus.NOT_STATED)) == 11
 
 
 @pytest.mark.parametrize(
@@ -375,6 +375,7 @@ def test_a_fixture_email_flows_through_to_validation() -> None:
         ValidationRuleId.CHEMICAL_STATUS_REQUIRED,
         ValidationRuleId.PCS_REQUIRED,
         ValidationRuleId.DELIVERY_TYPE_REQUIRED,
+        ValidationRuleId.SHIP_DATE_REQUIRED,
     }
 
 
