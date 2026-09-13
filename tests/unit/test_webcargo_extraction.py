@@ -658,6 +658,16 @@ def test_zero_results_is_a_valid_outcome_not_an_error() -> None:
     assert result.records == ()  # type: ignore[attr-defined]
 
 
+def test_the_settle_predicate_carries_webcargos_live_empty_wording() -> None:
+    """A node-less guard for the empty-state detection fix: the predicate must
+    keep matching WebCargo's actual zero-rate wording (live-observed 2026-09-13),
+    or an empty search hangs until timeout again. The behavioural check that the
+    !anyCount guard still holds lives in tests/js/results_state.test.js."""
+    predicate = pages._JS_RESULTS_STATE
+    assert "No results found" in predicate
+    assert "There may be no results" in predicate
+
+
 def test_a_count_mismatch_refuses_rather_than_underreporting() -> None:
     """WebCargo says 60, we captured 59: that is missed data, not a result."""
     driver = FakeDriver(rows=rows_payload(59), stated_count=60)

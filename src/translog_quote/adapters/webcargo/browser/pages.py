@@ -203,7 +203,14 @@ _JS_RESULTS_STATE = """
   const anyCount = short(/Showing\\s+the\\s+\\d+\\s+lowest rates/)
     || short(/We found\\s+the\\s+\\d+\\s+(?:cheapest|lowest) rates/);
   const loading = short(/Loading the best result|Your results are loading/);
-  const noRates = short(/No rates? (?:were )?found/i) || short(/no results for your search/i);
+  // Live-observed empty-state wording (2026-09-13): a zero-rate search shows
+  // "No results found" / "No results found for your search criteria." and
+  // "There may be no results because:" — none of which the older patterns
+  // matched, so an empty search hung until timeout. Still gated by !anyCount
+  // below, so these never mark a rates-bearing page (which also shows the
+  // "No results found for your search criteria" section) as empty.
+  const noRates = short(/No rates? (?:were )?found/i) || short(/no results for your search/i)
+    || short(/No results found/i) || short(/There may be no results/i);
   return {
     onResults: location.hash.includes('dynamic-results'),
     settled: anyCount && !loading,
