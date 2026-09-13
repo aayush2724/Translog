@@ -6,12 +6,15 @@
 # variables or secret files in the Render dashboard, never here and never in
 # the repository.
 #
-# Two settings are not optional, and are the reason this file exists at all:
-#   HOST                   Render routes to the container's external interface,
-#                          not to loopback, so the server must bind 0.0.0.0.
-#   TRANSLOG_ALLOWED_HOSTS The cross-site guard refuses any state-changing POST
-#                          whose Host is not declared. Without the service's own
-#                          hostname here the page loads and every button 403s.
+# Three settings are not optional, and are the reason this file exists at all:
+#   HOST                    Render routes to the container's external interface,
+#                           not to loopback, so the server must bind 0.0.0.0.
+#   TRANSLOG_ALLOWED_HOSTS  The cross-site guard refuses any state-changing POST
+#                           whose Host is not declared. Without the service's own
+#                           hostname here the page loads and every button 403s.
+#   TRANSLOG_DASHBOARD_TOKEN The dashboard password. Because HOST is non-loopback,
+#                           --live refuses to start without it, rather than serve
+#                           real client data and the approval controls openly.
 services:
   - type: web
     name: translog-demo
@@ -40,6 +43,15 @@ services:
         value: 0.0.0.0
       # Must equal the service's public hostname, e.g. translog-demo.onrender.com
       - key: TRANSLOG_ALLOWED_HOSTS
+        sync: false
+      # The dashboard password. Required here because this service binds a
+      # non-loopback address (HOST above): --live refuses to start without it
+      # rather than serve real client data and a working "approve and send"
+      # button to anyone who knows the URL. Set a strong shared secret; operators
+      # sign in through the browser's Basic-auth prompt (any username, this value
+      # as the password). The Host allowlist stops a cross-origin browser; this
+      # stops anyone who simply knows the URL.
+      - key: TRANSLOG_DASHBOARD_TOKEN
         sync: false
       - key: TRANSLOG_OPENROUTER__API_KEY
         sync: false
