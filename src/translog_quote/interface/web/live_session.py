@@ -810,6 +810,7 @@ class LiveSession:
             filtered=result.filtered,
             selection=result.selection,
             is_simulated=result.is_simulated,
+            completeness=result.completeness,
         )
 
     def _ids_awaiting_clarification(self) -> dict[str, str]:

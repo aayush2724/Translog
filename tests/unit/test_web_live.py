@@ -394,6 +394,39 @@ def test_the_approval_card_carries_everything_a_decision_needs(
     assert approval["review_sent_to"] == APPROVER_MAILBOX
 
 
+def test_the_approval_card_states_the_candidate_scope(after_reply: LiveSession) -> None:
+    """H5: the card says how wide the search was and never claims global fastest.
+    The demonstration provider is simulated, so the scope says exactly that."""
+    snap = live_serialize.snapshot(after_reply, selected=only_request(after_reply).request_id)  # type: ignore[attr-defined]
+    approval = snap["selected"]["approval"]  # type: ignore[index]
+
+    assert approval["candidate_scope"], "every approval card states its scope"
+    assert "simulated" in approval["candidate_scope"]
+    assert approval["completeness"] is None  # simulated data states no provider total
+    assert "fastest available" not in approval["candidate_scope"].lower()
+
+
+def test_the_candidate_scope_wording_is_accurate_for_every_case() -> None:
+    """The three branches, pinned: real-with-note, real-without, and simulated."""
+    real_with_note = live_serialize._candidate_scope(
+        returned=18, simulated=False, completeness="Showing the 18 lowest rates."
+    )
+    assert "18 rates WebCargo returned" in real_with_note
+    assert "not necessarily the fastest that exists" in real_with_note
+    assert "unconfirmed" not in real_with_note  # a provider note was given
+
+    real_without = live_serialize._candidate_scope(returned=5, simulated=False, completeness=None)
+    assert "5 rates WebCargo returned" in real_without
+    assert "completeness is unconfirmed" in real_without
+
+    simulated = live_serialize._candidate_scope(returned=3, simulated=True, completeness=None)
+    assert "3 simulated rates" in simulated
+    assert "WebCargo returned" not in simulated  # never attributes demo data to the provider
+
+    for text in (real_with_note, real_without, simulated):
+        assert "fastest available" not in text.lower()  # never a global claim
+
+
 def test_the_rate_view_reports_counts_and_exclusion_reasons(
     after_reply: LiveSession,
 ) -> None:
