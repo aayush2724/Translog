@@ -453,18 +453,42 @@ function markFor(step) {
   return MARKS[step.state];
 }
 
+/* A timeline only moves forward. Each row's state is derived server-side from
+   the audit trail, but some stages prove themselves in the worker process —
+   rate search and rate selection — and those events never reach the trail this
+   view reads. That left their rows stuck on "pending" even after later rows,
+   human approval and quotation sent, had completed: a pipeline that appeared to
+   run backwards. So before rendering, every step ahead of which a later step is
+   already done is shown as done too. Purely a display correction — it changes
+   nothing the server decided, only refuses to show a completed run as unfinished
+   in the middle. A step with no proof of its own carries no timestamp, so it is
+   not given a plausible-looking one; it simply reads as completed. */
+function timelineWithProgress(timeline) {
+  let lastDone = -1;
+  timeline.forEach((step, index) => {
+    if (step.state === "done") lastDone = index;
+  });
+  return timeline.map((step, index) =>
+    index < lastDone && step.state !== "done" ? { ...step, state: "done" } : step
+  );
+}
+
 /* The timeline is the screen the presentation is narrated from. Every finished
    row shows the real moment it happened; a row with no timestamp is shown as
    not yet reached rather than given a plausible-looking one. */
 function renderTimeline(timeline) {
   document.getElementById("timeline").replaceChildren(
-    ...timeline.map((step) =>
+    ...timelineWithProgress(timeline).map((step) =>
       el("li", { class: `tl tl-${step.state}` },
         el("span", { class: "tl-mark", "aria-hidden": "true" }, markFor(step)),
         el("span", { class: "tl-body" },
           el("span", { class: "tl-label" }, step.label),
           el("span", { class: "tl-when" },
-            step.at ? fmtStamp(step.at) : step.note || "Pending"))))
+            step.at
+              ? fmtStamp(step.at)
+              : step.state === "done"
+                ? "Completed"
+                : step.note || "Pending"))))
   );
 }
 

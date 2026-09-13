@@ -455,6 +455,51 @@ check("a waiting-on-client step shows the hourglass, ours shows the dot", () => 
   );
 });
 
+check("intermediate stages read as done once a later stage is done", () => {
+  /* The bug: rate search and rate selection are proven in the worker process,
+     and those audit events never reach the dashboard's trail \u2014 so the server
+     leaves their rows "pending" even after human approval and quotation-sent
+     are done. Rendered verbatim that is a pipeline running backwards. A timeline
+     only moves forward: everything before the furthest step reached is done. */
+  const t = load();
+  t.renderTimeline([
+    { key: "enquiry_received", label: "Enquiry email received", state: "done", at: "2026-08-29T10:00:00+05:30", note: null, waiting_on: null },
+    { key: "validation", label: "Validation", state: "done", at: "2026-08-29T10:01:00+05:30", note: null, waiting_on: null },
+    { key: "rate_search", label: "Rate search", state: "current", at: null, note: "Pending", waiting_on: null },
+    { key: "rate_selected", label: "Rate selected", state: "pending", at: null, note: null, waiting_on: null },
+    { key: "approval_decided", label: "Human approval", state: "done", at: "2026-08-29T10:05:00+05:30", note: null, waiting_on: null },
+    { key: "quotation_sent", label: "Quotation sent", state: "done", at: "2026-08-29T10:06:00+05:30", note: null, waiting_on: null },
+  ]);
+
+  const marks = t.holderFor("timeline").findAll((n) => n.className === "tl-mark").map((n) => n.textContent);
+  eq(marks[2], "\u2713", "rate search now shows done");
+  eq(marks[3], "\u2713", "rate selected now shows done");
+  eq(marks[4], "\u2713", "human approval unchanged");
+  eq(marks[5], "\u2713", "quotation sent unchanged");
+
+  /* A backfilled row has no timestamp of its own \u2014 it must read as completed,
+     never as the "Pending" it would otherwise fall back to. */
+  const whens = t.holderFor("timeline").findAll((n) => n.className === "tl-when").map((n) => n.textContent);
+  eq(whens[2], "Completed", "rate search no longer reads Pending under a tick");
+  eq(whens[3], "Completed", "rate selected no longer reads Pending under a tick");
+});
+
+check("a stage still ahead of the pipeline stays pending", () => {
+  /* The correction must not run away: a step after the furthest one reached is
+     genuinely not done, and the current step keeps its own marker. */
+  const t = load();
+  t.renderTimeline([
+    { key: "enquiry_received", label: "Enquiry email received", state: "done", at: "2026-08-29T10:00:00+05:30", note: null, waiting_on: null },
+    { key: "validation", label: "Validation", state: "current", at: null, note: "Pending", waiting_on: "operator" },
+    { key: "rate_search", label: "Rate search", state: "pending", at: null, note: null, waiting_on: null },
+  ]);
+
+  const marks = t.holderFor("timeline").findAll((n) => n.className === "tl-mark").map((n) => n.textContent);
+  eq(marks[0], "\u2713", "enquiry done");
+  eq(marks[1], "\u25CF", "validation is the current step, unchanged");
+  eq(marks[2], "\u25CB", "rate search ahead of the pipeline stays pending");
+});
+
 /* --- the page keeps itself up to date, with nothing to press -------------- */
 
 /* A fetch stub that hands back a queue of state snapshots as text, the way the
