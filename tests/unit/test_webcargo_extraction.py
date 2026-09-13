@@ -223,6 +223,98 @@ def test_no_single_match_is_a_refusal_listing_the_options(stated: str, options: 
         pages._choose_option(stated, options)
 
 
+# --- querying WebCargo by the client-stated IATA code ------------------------------
+#
+# Live-observed WebCargo behaviour (2026-09-13): the airport autocomplete matches
+# on the IATA CODE, and its options are labelled "CODE - City". Typing the code
+# resolves; typing a bare city can return nothing ("Mumbai" -> [] because BOM is
+# labelled "Bombay") or several ("Dubai" -> DWC/DXB/ZJF). So when the client
+# themselves wrote the code in parentheses, that code is what we type.
+
+#: The exact enabled options WebCargo returned for "BOM" and "DXB", verbatim.
+_LIVE_BOM_OPTIONS = [
+    "BOM - Bombay",
+    "BMH - Bomai",
+    "BOA - Boma",
+    "LAZ - Bom Jesus da Lapa",
+    "NMI - Bombay",
+]
+_LIVE_DUBAI_OPTIONS = ["DWC - Dubai", "DXB - Dubai", "ZJF - Dubai"]
+
+
+@pytest.mark.parametrize(
+    ("stated", "expected"),
+    [
+        ("Mumbai (BOM)", "BOM"),  # (1) parenthesized code is used as the query
+        ("Dubai (DXB)", "DXB"),  # (2)
+        ("BOM", "BOM"),  # (3) a bare code is unchanged
+        ("DXB", "DXB"),  # (4)
+        ("Mumbai", "Mumbai"),  # (5) a bare city is unchanged (and fails closed downstream)
+        # No single unambiguous code -> unchanged, so it reaches WebCargo as-is
+        # and fails closed there rather than picking one:
+        ("Somewhere (BOM) (DXB)", "Somewhere (BOM) (DXB)"),
+    ],
+)
+def test_a_stated_parenthesized_code_becomes_the_query(stated: str, expected: str) -> None:
+    assert pages._location_query_token(stated) == expected
+
+
+def test_the_stated_code_selects_the_providers_own_option() -> None:
+    """(6) The unchanged exact-or-refuse matcher resolves the code to WebCargo's
+    own "CODE - City" option, even when near-matches are also offered."""
+    assert pages._choose_option("BOM", _LIVE_BOM_OPTIONS) == "BOM - Bombay"
+    assert pages._choose_option("DXB", ["DXB - Dubai"]) == "DXB - Dubai"
+
+
+def test_an_ambiguous_city_result_still_refuses() -> None:
+    """(7) A bare city that returns several airports is refused, never guessed —
+    the safety invariant is untouched by the code-query change."""
+    with pytest.raises(LookupError):
+        pages._choose_option("Dubai", _LIVE_DUBAI_OPTIONS)
+
+
+def test_a_parenthesized_origin_is_typed_and_matched_as_the_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(1) end-to-end: "Mumbai (BOM)" types "BOM" into the origin field and
+    selects WebCargo's "BOM - Bombay" — the verbatim city label is never typed."""
+    monkeypatch.setattr(pages, "_OPTION_POLL_SECONDS", 0.0)
+    driver = FakeDriver(options={"BOM": _LIVE_BOM_OPTIONS})
+
+    chosen = pages._fill_location(driver, pages.ORIGIN_INPUT, "Mumbai (BOM)", timeout_seconds=5)
+
+    assert chosen == "BOM - Bombay"
+    assert ("fill", f"{pages.ORIGIN_INPUT}=BOM") in driver.calls
+    assert ("fill", f"{pages.ORIGIN_INPUT}=Mumbai (BOM)") not in driver.calls
+
+
+def test_a_parenthesized_destination_is_typed_and_matched_as_the_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(2) identical behaviour on the destination field: "Dubai (DXB)" -> "DXB"."""
+    monkeypatch.setattr(pages, "_OPTION_POLL_SECONDS", 0.0)
+    driver = FakeDriver(options={"DXB": ["DXB - Dubai"]})
+
+    chosen = pages._fill_location(driver, pages.DESTINATION_INPUT, "Dubai (DXB)", timeout_seconds=5)
+
+    assert chosen == "DXB - Dubai"
+    assert ("fill", f"{pages.DESTINATION_INPUT}=DXB") in driver.calls
+
+
+def test_a_bare_city_is_typed_unchanged_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(5) "Mumbai" (no code) is typed verbatim; WebCargo offers nothing, so it
+    fails closed with UnresolvedLocation — no city->airport guess is made."""
+    monkeypatch.setattr(pages, "_OPTION_POLL_SECONDS", 0.0)
+    driver = FakeDriver(options={})  # WebCargo returns nothing for "Mumbai"
+
+    with pytest.raises(UnresolvedLocation):
+        pages._fill_location(driver, pages.ORIGIN_INPUT, "Mumbai", timeout_seconds=0.02)
+
+    assert ("fill", f"{pages.ORIGIN_INPUT}=Mumbai") in driver.calls
+
+
 # --- the debounced-autocomplete predicate wait -------------------------------------
 
 

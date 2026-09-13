@@ -18,6 +18,7 @@ selectors they use.
 
 from __future__ import annotations
 
+import re
 import time
 from typing import TYPE_CHECKING, Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -463,23 +464,52 @@ def _fill_departure_date(driver: BrowserDriver, requested: date, *, timeout_seco
         time.sleep(_OPTION_POLL_SECONDS)
 
 
+#: A parenthesized 3-letter IATA code the client stated explicitly — the "BOM"
+#: in "Mumbai (BOM)". Live-observed: WebCargo's airport autocomplete matches on
+#: the code, and its options are labelled "CODE - City" (BOM is "Bombay"), so a
+#: city name can return nothing while the code returns the airport.
+_PARENTHESIZED_IATA = re.compile(r"\(([A-Za-z]{3})\)")
+
+
+def _location_query_token(stated: str) -> str:
+    """The token to type into WebCargo's location autocomplete.
+
+    When the client explicitly wrote a single parenthesized 3-letter IATA code
+    — "Mumbai (BOM)" — that code ("BOM") is used as the query, because that is
+    what WebCargo autocompletes on. Nothing is inferred: only a code the client
+    themselves stated is used. Anything else — a bare code ("BOM"), a bare city
+    ("Mumbai"), or a string with no single unambiguous parenthesized code — is
+    returned unchanged, so it reaches WebCargo exactly as before and still fails
+    closed there when the provider offers no unique match. No city→airport
+    mapping and no fuzzy matching is introduced.
+    """
+    codes: list[str] = _PARENTHESIZED_IATA.findall(stated)
+    if len(codes) == 1:
+        return codes[0]
+    return stated
+
+
 def _fill_location(
     driver: BrowserDriver, selector: str, stated: str, *, timeout_seconds: float
 ) -> str:
     """Type the stated place, select WebCargo's own suggestion, close the list.
 
-    Returns the option text actually selected — the resolver evidence.
+    Returns the option text actually selected — the resolver evidence. When the
+    client stated a parenthesized IATA code, WebCargo is queried with that code
+    (see ``_location_query_token``); the deterministic ``_choose_option`` match
+    is then applied to the same token, unchanged.
     """
+    query = _location_query_token(stated)
     driver.click(selector)
-    driver.fill(selector, stated)
+    driver.fill(selector, query)
     try:
         chosen = _choose_available_option(
-            driver, DROPDOWN_OPTION, stated, timeout_seconds=timeout_seconds
+            driver, DROPDOWN_OPTION, query, timeout_seconds=timeout_seconds
         )
     except LookupError as exc:
         raise UnresolvedLocation(
-            f"WebCargo offered no matching location suggestion for {stated!r}; "
-            f"refusing rather than guessing an airport ({exc})"
+            f"WebCargo offered no matching location suggestion for {stated!r} "
+            f"(queried as {query!r}); refusing rather than guessing an airport ({exc})"
         ) from exc
     driver.click_option(DROPDOWN_OPTION, chosen)
     driver.press(selector, "Escape")  # the list lingers and swallows clicks
