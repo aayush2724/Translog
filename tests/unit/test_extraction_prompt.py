@@ -79,6 +79,23 @@ def test_the_prompt_forbids_inferring_one_field_from_another() -> None:
     assert "never establishes delivery type" in PROMPT
 
 
+def test_the_prompt_maps_delivery_shorthand_to_a_type() -> None:
+    """A2A/D2D and their long forms are the client's own words for the delivery
+    type; the contract must recognise them or a stated "A2A" is left unset."""
+    assert "a2a" in PROMPT
+    assert "airport-to-airport" in PROMPT
+    assert "d2d" in PROMPT
+    assert "door-to-door" in PROMPT
+
+
+def test_an_explicit_delivery_type_wins_over_a_delivery_address() -> None:
+    """A stated "A2A" must stay airport even when a delivery address is present;
+    an address alone must never be read as door delivery."""
+    assert "explicitly stated" in PROMPT
+    assert "address present alongside a stated type" in PROMPT
+    assert "never `door`" in PROMPT
+
+
 def test_the_prompt_forbids_unit_conversion() -> None:
     assert "do not convert units" in PROMPT
 

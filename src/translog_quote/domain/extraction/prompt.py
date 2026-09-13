@@ -137,9 +137,15 @@ Fields, with the exact representation required:
                      later. Note the promise in `note` when one is made.
   pcs                whole number of pieces, whatever noun the client uses -
                      bags, drums, cartons, crates, pallets
-  delivery_type      "door" or "airport", only when stated. Delivering to a
-                     named address is not by itself a statement of door
-                     delivery.
+  delivery_type      "door" or "airport", only when stated. Recognise the
+                     client's shorthand: "A2A", "airport-to-airport" and
+                     "airport to airport" are `airport`; "D2D", "door-to-door"
+                     and "door to door" are `door`. An explicitly stated
+                     delivery type always wins over any other clue — a delivery
+                     address present alongside a stated type does NOT change it.
+                     Delivering to a named address is not by itself a statement
+                     of door delivery, so a stated "A2A" with a delivery address
+                     is still `airport`, never `door`.
   delivery_address   text, the address the cargo is to be DELIVERED to, and
                      only when the client asks for delivery there. A pickup
                      or collection address, the shipper's own premises, or

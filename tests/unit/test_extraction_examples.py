@@ -41,6 +41,33 @@ def _record(result: ExtractionResult, request_id: str = "R-EX"):
     return build_initial_record(request_id, RequestSource.EMAIL, to_extracted_fields(result))
 
 
+def test_a2a_with_a_delivery_address_is_airport_not_door() -> None:
+    """Regression: a client who states 'Delivery: A2A' and also gives an address
+    must extract to airport — the address must not flip it to door. Airport
+    delivery requires no address (VR-11), so this validates cleanly."""
+    result = ExtractionResult(
+        origin=ExtractedValue[str].stated("Hyderabad"),
+        destination=ExtractedValue[str].stated("Bangkok"),
+        weight_kg=ExtractedValue[float].stated(700.0),
+        dimensions_in=ExtractedValue[CargoDimensions].stated(
+            CargoDimensions(length=40, width=30, height=25)
+        ),
+        commodity=ExtractedValue[str].stated("General Cargo"),
+        cargo_type=ExtractedValue[str].stated("General Cargo"),
+        is_chemical=ExtractedValue[bool].stated(False),
+        msds_attached=ExtractedValue[bool].stated(False),
+        pcs=ExtractedValue[int].stated(5),
+        delivery_type=ExtractedValue[DeliveryType].stated(DeliveryType.AIRPORT),
+        delivery_address=ExtractedValue[str].stated("Bangkok, Thailand"),
+        ship_date=ExtractedValue[date].stated(date(2026, 9, 24)),
+    )
+    record = _record(result)
+
+    assert record.delivery_type is DeliveryType.AIRPORT  # airport, never door
+    assert record.delivery_address == "Bangkok, Thailand"
+    assert validate_shipment(record).is_valid  # airport + address is valid
+
+
 # ===========================================================================
 # Example 1 — Complete shipment email (Phase 3 scenario A)
 #
