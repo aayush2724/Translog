@@ -216,6 +216,31 @@ def rates_json(outcome: RateSearchOutcome) -> Json:
     }
 
 
+def _candidate_scope(*, returned: int, simulated: bool, completeness: str | None) -> str:
+    """One accurate sentence about how wide the "fastest eligible" search was.
+
+    Never claims the selected rate is globally fastest: it is the fastest of the
+    candidates the provider returned, which for WebCargo is a price-truncated
+    "lowest rates" set. A simulated run says so plainly; a real run reports the
+    returned count and, when the provider stated no total, says completeness is
+    unconfirmed rather than implying it. Nothing here is invented — the count is
+    the count, and the absence of a provider total is reported as an absence.
+    """
+    plural = "" if returned == 1 else "s"
+    if simulated:
+        return (
+            f"Fastest eligible among {returned} simulated rate{plural} — "
+            "demonstration data, not a live WebCargo result."
+        )
+    scope = (
+        f"Fastest eligible among the {returned} rate{plural} WebCargo returned — "
+        "not necessarily the fastest that exists."
+    )
+    if not completeness:
+        scope += " WebCargo stated no total, so completeness is unconfirmed."
+    return scope
+
+
 def approval_json(packet: ReviewPacket, outcome: RateSearchOutcome, *, approver: str) -> Json:
     """Everything the approval card must show before anyone may click.
 
@@ -242,6 +267,16 @@ def approval_json(packet: ReviewPacket, outcome: RateSearchOutcome, *, approver:
         "departure_date": rate.departure_date_label or outcome.query.date.isoformat(),
         "searched_date": outcome.query.date.isoformat(),
         "reason": packet.selection.reason,
+        # The scope of the optimisation, so "fastest" is never read as global.
+        # `candidate_scope` is the plain-language sentence the card shows;
+        # `completeness` is the provider's own verbatim note, or null when none
+        # was given (which the sentence then states outright).
+        "candidate_scope": _candidate_scope(
+            returned=outcome.returned,
+            simulated=outcome.uses_mock_data,
+            completeness=outcome.completeness,
+        ),
+        "completeness": outcome.completeness,
         "excluded": [
             {
                 "carrier_name": excluded.rate.carrier_name,

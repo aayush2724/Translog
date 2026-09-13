@@ -50,6 +50,13 @@ class RateSearchOutcome:
     filtered: FilterOutcome
     selection: Selection | None
     is_simulated: bool = True
+    completeness: str | None = None
+    """The provider's own candidate-set statement, verbatim, when it gave one —
+    WebCargo's "Showing the N lowest rates". Carried so the approval view can say
+    the selection is the fastest of *these* candidates, not the fastest that
+    exists. `None` when no provider stated a total (a simulated run, or a real
+    run where the phrase was absent), and the interface says so rather than
+    implying completeness."""
 
     @property
     def has_selection(self) -> bool:
@@ -202,6 +209,7 @@ class RateSearchStage:
             filtered=filtered,
             selection=selection,
             is_simulated=result.is_simulated,
+            completeness=result.completeness,
         )
 
     def _emit(self, request_id: str, event: AuditEventType, detail: dict[str, object]) -> None:

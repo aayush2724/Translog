@@ -163,7 +163,9 @@ def _only(session: LiveSession) -> LiveRequest:
     return next(iter(session.requests.values()))
 
 
-def _completed_status(*, is_simulated: bool, departure_label: str) -> JobStatus:
+def _completed_status(
+    *, is_simulated: bool, departure_label: str, completeness: str | None = None
+) -> JobStatus:
     """A COMPLETED status carrying a real filtered/selected result.
 
     Built from the domain filter and selection exactly as the worker builds it,
@@ -206,6 +208,7 @@ def _completed_status(*, is_simulated: bool, departure_label: str) -> JobStatus:
         query=query,
         filtered=filtered,
         selection=selection,
+        completeness=completeness,
     )
     return JobStatus(job_id=JOB_ID, state=JobState.COMPLETED, result=result)
 
@@ -333,6 +336,63 @@ def test_a_completed_real_result_shows_departure_date_and_no_banner(
     assert rates["banner"] is None
     assert approval["banner"] is None
     assert approval["departure_date"] == "16/09/2026"
+
+
+def test_a_real_result_surfaces_the_provider_candidate_set_on_the_approval_card(
+    browser_settings: Settings, sink: CollectingEmailSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H5: the approver is told the selection is the fastest of the set WebCargo
+    returned — its verbatim note is shown and nothing implies a global fastest."""
+    note = "Showing the 18 lowest rates. Other surcharges may apply."
+    spy = QueueSpy(
+        fetch_returns=_completed_status(
+            is_simulated=False, departure_label="16/09/2026", completeness=note
+        )
+    )
+    _install_queue(monkeypatch, spy)
+    _forbid_demo_provider(monkeypatch)
+    session = _validated_session(browser_settings, sink)
+
+    session.poll()
+    session.approve_clarification(by=APPROVER)
+    session.poll()
+    session.poll()
+
+    approval = live_serialize.snapshot(session, selected=_only(session).request_id)[  # type: ignore[index]
+        "selected"
+    ]["approval"]
+
+    assert approval["completeness"] == note  # provider's own words, verbatim
+    scope = approval["candidate_scope"]
+    assert "WebCargo returned" in scope
+    assert "not necessarily the fastest that exists" in scope
+    assert "fastest available" not in scope.lower()  # never a global claim
+
+
+def test_a_real_result_without_a_provider_total_says_completeness_is_unconfirmed(
+    browser_settings: Settings, sink: CollectingEmailSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If WebCargo stated no total, the card says so rather than implying one."""
+    spy = QueueSpy(
+        fetch_returns=_completed_status(
+            is_simulated=False, departure_label="16/09/2026", completeness=None
+        )
+    )
+    _install_queue(monkeypatch, spy)
+    _forbid_demo_provider(monkeypatch)
+    session = _validated_session(browser_settings, sink)
+
+    session.poll()
+    session.approve_clarification(by=APPROVER)
+    session.poll()
+    session.poll()
+
+    approval = live_serialize.snapshot(session, selected=_only(session).request_id)[  # type: ignore[index]
+        "selected"
+    ]["approval"]
+
+    assert approval["completeness"] is None
+    assert "completeness is unconfirmed" in approval["candidate_scope"]
 
 
 # --- failure: reported, and never papered over with simulated data --------------

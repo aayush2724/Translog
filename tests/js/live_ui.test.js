@@ -315,6 +315,59 @@ check("the quotation gate offers approve and decline, both gated on the name", (
   eq(buttons.every((b) => !b.disabled), true, "both enabled once named");
 });
 
+check("the approval card states the candidate-set scope so 'fastest' is not read as global", () => {
+  /* H5: the selected rate is the fastest of the set WebCargo returned, which is
+     a price-truncated 'lowest rates' list. The card must say so and show the
+     provider's own note, never implying a global fastest. */
+  const t = load();
+  const detail = {
+    is_enquiry: true,
+    shipment: [{ label: "Origin", value: "Mumbai" }],
+    decision: null,
+    approval: {
+      reference: "R-1", simulated: false, banner: null, notice: null,
+      review_sent_to: "approvals@translog.example", carrier: "Qatar Airways (QR)",
+      service: "QR General", transit: "18h 30m", price: "185597.5 Rs",
+      departure_date: "25/09/2026", searched_date: "2026-09-25",
+      reason: "fastest eligible transit at 18h 30m",
+      candidate_scope:
+        "Fastest eligible among the 18 rates WebCargo returned — not necessarily the fastest that exists.",
+      completeness: "Showing the 18 lowest rates. Other surcharges may apply.",
+      excluded: [],
+    },
+  };
+
+  const text = t.sectionApproval(detail).textContent;
+
+  eq(/among the 18 rates WebCargo returned/.test(text), true, "the scope sentence is shown");
+  eq(/not necessarily the fastest that exists/.test(text), true, "it does not claim global fastest");
+  eq(/Showing the 18 lowest rates/.test(text), true, "WebCargo's own note is shown verbatim");
+});
+
+check("with no provider total the card states the scope but shows no verbatim note", () => {
+  const t = load();
+  const detail = {
+    is_enquiry: true,
+    shipment: [],
+    decision: null,
+    approval: {
+      reference: "R-1", simulated: false, banner: null, notice: null,
+      review_sent_to: "a@b", carrier: "QR", service: "GEN", transit: "1 day",
+      price: "1 INR", departure_date: "x", searched_date: "y", reason: "r",
+      candidate_scope:
+        "Fastest eligible among the 5 rates WebCargo returned — not necessarily the fastest " +
+        "that exists. WebCargo stated no total, so completeness is unconfirmed.",
+      completeness: null,
+      excluded: [],
+    },
+  };
+
+  const text = t.sectionApproval(detail).textContent;
+
+  eq(/completeness is unconfirmed/.test(text), true, "the scope states completeness is unknown");
+  eq(/WebCargo: /.test(text), false, "no verbatim provider note line when none was given");
+});
+
 /* --- the dashboard leads with the demonstration --------------------------- */
 
 function snapshotWith(requests, demonstration) {

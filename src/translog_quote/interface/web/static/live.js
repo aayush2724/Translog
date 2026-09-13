@@ -735,6 +735,12 @@ function sectionApproval(detail) {
             ["Price", approval.price],
             ["Why", approval.reason],
           ]),
+          approval.candidate_scope
+            ? el("p", { class: "scope-note" }, approval.candidate_scope)
+            : null,
+          approval.completeness
+            ? el("p", { class: "scope-note scope-note-detail" }, `WebCargo: ${approval.completeness}`)
+            : null,
           approval.excluded.length
             ? el("div", null,
                 el("h3", null, "Excluded"),
