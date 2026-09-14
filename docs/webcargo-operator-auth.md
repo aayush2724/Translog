@@ -88,3 +88,53 @@ filesystem (a rebuilt container, a redeploy without a mounted disk) the
 profile — and therefore the authenticated session — is wiped, and an operator
 must re-authenticate. Mount a disk for it, exactly as the demo already does
 for its state directory in `render.yaml`.
+
+## Deployment topology — Render dashboard → Upstash Redis → Fedora worker
+
+The production POC is a **hybrid**: a lightweight cloud dashboard that never
+touches WebCargo, joined over a shared managed Redis to the single Fedora
+browser worker that does.
+
+```
+Render web service ("translog-demo")            Fedora box
+  interface.web --live                            systemd --user:
+  MODE=browser  ──enqueue RateSearchJobRequest──▶   translog-webcargo-worker
+        ▲                                            xvfb-run → headed Chromium
+        └────────── poll fetch_job_status ───────    → WebCargo (authenticated)
+                            │
+                Upstash Redis (TLS, DB 0, queue "rate-search")
+                   also shared with DeskCart — namespaced keys only
+```
+
+**Who holds what.**
+- **Render** runs only the dashboard. In `browser` mode it *enqueues* a job and
+  *polls* the result — it builds no browser, runs no Playwright/Chromium/Xvfb,
+  and holds **no WebCargo credentials**. Its only queue setting is
+  `TRANSLOG_QUEUE__REDIS_URL` (a dashboard secret, `sync: false`). The build
+  installs the `[api]` extra so `redis`/`rq` are present to enqueue and poll.
+- **Fedora** runs the one browser worker (this document) — the only process with
+  the authenticated WebCargo session. It is the sole queue consumer; the Redis
+  lock `translog:rate-search:browser-worker` guarantees no second worker.
+- **Upstash Redis** is the join: both sides use the **same** endpoint, **DB 0**,
+  and the default `rate-search` queue name. Idempotency keys are deterministic,
+  so a job Render enqueues is exactly the job Fedora runs.
+
+**Both sides must agree** or jobs never meet: identical `TRANSLOG_QUEUE__REDIS_URL`
+(same host, `/0`), and neither side overriding the default queue name.
+
+**If the Fedora worker is offline:** the dashboard still enqueues; the job sits
+`QUEUED` and the request shows "Searching WebCargo…" until the worker returns and
+processes it. Browser mode never falls back to simulated data — a genuine failure
+is reported, not papered over. (A worker SIGKILLed *mid-job* leaves that job
+`processing` until its `job_timeout` elapses — a documented POC limitation; no
+automatic retry or resume.)
+
+**Staged rollout / rollback.** Bring the Fedora worker up first; deploy the
+`[api]` build and set `TRANSLOG_QUEUE__REDIS_URL` while still in `demo` mode;
+then flip `TRANSLOG_WEBCARGO__MODE` demo→browser **last**. Rollback is the
+reverse: set `MODE=demo` and redeploy — the dashboard resumes synchronous,
+disclosed, simulated rates with no worker involved.
+
+**Render plan.** Requires the Starter plan and the persistent disk already in
+`render.yaml`. The Free tier has no disks and spins down when idle, which would
+drop durable approval state and stop the dashboard polling for completed jobs.

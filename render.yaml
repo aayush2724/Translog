@@ -20,7 +20,7 @@ services:
     name: translog-demo
     runtime: python
     plan: starter
-    buildCommand: pip install .
+    buildCommand: "pip install '.[api]'"
     startCommand: python -m translog_quote.interface.web --live
     # The demonstration's durable state. Without a disk Render's filesystem is
     # wiped on every deploy and every restart, and a request waiting on a client
@@ -72,7 +72,18 @@ services:
         value: 'in:inbox -subject:"[TRANSLOG INTERNAL]"'
       - key: TRANSLOG_GMAIL__MAX_RESULTS
         value: "5"
+      # The shared managed Redis (Upstash, TLS, DB 0) that joins this dashboard
+      # to the single Fedora browser worker when MODE is browser. Unused in demo
+      # mode. The value is a secret set in the Render dashboard (a rediss://…/0
+      # URL) and never written here — it must be the SAME endpoint, DB 0, and
+      # rate-search queue the Fedora worker's .env.worker uses. This dashboard
+      # only enqueues and polls jobs; it never runs a browser and needs no
+      # WebCargo credentials.
+      - key: TRANSLOG_QUEUE__REDIS_URL
+        sync: false
       # Rates stay simulated and disclosed. The real adapter refuses anyway.
+      # Flip to `browser` ONLY after the Fedora worker is live and the Redis URL
+      # above is set; browser mode enqueues real WebCargo jobs to that worker.
       - key: TRANSLOG_WEBCARGO__MODE
         value: demo
       # On the persistent disk declared above, not in the ephemeral container
