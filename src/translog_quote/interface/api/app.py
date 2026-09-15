@@ -97,6 +97,66 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="no such rate-search job")
         return status
 
+    # --- global handling + health, for logging and monitoring ---------------
+    import time
+
+    from fastapi import Request
+    from fastapi.responses import JSONResponse
+
+    from translog_quote.observability import get_logger
+
+    log = get_logger("interface.api")
+
+    @app.middleware("http")
+    async def log_requests(request: Request, call_next):  # type: ignore[no-untyped-def]
+        """One structured access line per request. Errors are logged by the
+        exception handler below; this times and records the normal responses."""
+        started = time.monotonic()
+        response = await call_next(request)
+        log.info(
+            "%s %s -> %d (%.1fms)",
+            request.method,
+            request.url.path,
+            response.status_code,
+            (time.monotonic() - started) * 1000,
+        )
+        return response
+
+    @app.exception_handler(Exception)
+    async def handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
+        """Any unhandled error becomes a 500 whose body carries no internals.
+
+        The class and message are logged (kept free of payloads and credentials
+        by the same discipline the worker uses); the client is told only that
+        something failed, never what."""
+        log.exception("unhandled error on %s %s", request.method, request.url.path)
+        return JSONResponse(status_code=500, content={"detail": "internal server error"})
+
+    @app.get("/health")
+    def health() -> dict[str, str]:
+        """Liveness: the process is up and serving. No dependency calls."""
+        return {"status": "ok"}
+
+    @app.get("/health/ready")
+    def health_ready() -> JSONResponse:
+        """Readiness: the job queue (Redis) this API depends on is reachable.
+
+        A probe touches the shared Redis, so keep the polling interval sane. It
+        reports rather than raises — an unreachable queue is a 503 the load
+        balancer can act on, not a traceback."""
+        try:
+            from redis import Redis
+
+            Redis.from_url(
+                active.queue.redis_url, socket_connect_timeout=5, socket_timeout=5
+            ).ping()
+        except Exception as exc:  # noqa: BLE001 - readiness reports every failure as 503
+            log.warning("readiness: redis unreachable (%s)", type(exc).__name__)
+            return JSONResponse(
+                status_code=503, content={"status": "not ready", "redis": "unreachable"}
+            )
+        return JSONResponse(status_code=200, content={"status": "ready", "redis": "ok"})
+
     return app
 
 

@@ -319,14 +319,65 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             return True
         return _credential_matches(self.headers.get("Authorization"), token)
 
+    def _readiness(self) -> tuple[dict[str, object], int]:
+        """Readiness: the dependencies this process needs are reachable.
+
+        Demo/mock modes need nothing external, so ready is immediate. In browser
+        mode the dashboard enqueues to Redis, so readiness pings it — a probe
+        touches the shared queue, so keep the interval sane. Reports, never
+        raises: an unreachable queue is a 503, not a traceback."""
+        from translog_quote.config import WebCargoMode, load_settings
+
+        settings = load_settings()
+        mode = settings.webcargo.mode
+        if mode is not WebCargoMode.BROWSER:
+            return {"status": "ready", "mode": mode.value}, 200
+        try:
+            from redis import Redis
+
+            Redis.from_url(
+                settings.queue.redis_url, socket_connect_timeout=5, socket_timeout=5
+            ).ping()
+        except Exception as exc:  # noqa: BLE001 - readiness reports failure as 503
+            from translog_quote.observability import get_logger
+
+            get_logger("interface.web").warning(
+                "readiness: redis unreachable (%s)", type(exc).__name__
+            )
+            return {
+                "status": "not ready",
+                "mode": mode.value,
+                "redis": "unreachable",
+            }, 503
+        return {"status": "ready", "mode": mode.value, "redis": "ok"}, 200
+
+    def log_message(self, fmt: str, *args: object) -> None:  # noqa: N802 - http.server API
+        """Route http.server's access log through the structured logger rather
+        than stderr, so a deployed run's request lines land with everything
+        else the app logs."""
+        from translog_quote.observability import get_logger
+
+        get_logger("interface.web").info("%s %s", self.address_string(), fmt % args)
+
     # ------------------------------------------------------------- routing --
 
     def do_GET(self) -> None:  # noqa: N802 - fixed by http.server
+        raw_path, _, query = self.path.partition("?")
+        path = raw_path
+
+        # Health probes are unauthenticated on purpose: a monitor carries no
+        # dashboard password, and these expose no client data.
+        if path == "/health":
+            self._send_json({"status": "ok"})
+            return
+        if path == "/health/ready":
+            payload, status = self._readiness()
+            self._send_json(payload, status=status)
+            return
+
         if not self._authenticated():
             self._send_unauthorized()
             return
-        raw_path, _, query = self.path.partition("?")
-        path = raw_path
 
         if path == "/api/state":
             with self._demo.lock:
