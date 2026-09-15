@@ -88,7 +88,8 @@ SEARCH_BUTTON = "button.searchFlights"
 # hold until a genuine option appears (verified live), and never reads the
 # placeholder as an option. Harmless for the commodity dropdown too.
 DROPDOWN_OPTION = (
-    ".ant-select-dropdown li.ant-select-dropdown-menu-item"
+    ".ant-select-dropdown:not(.ant-select-dropdown-hidden) "
+    "li.ant-select-dropdown-menu-item"
     ":not(.ant-select-dropdown-menu-item-disabled)"
 )
 
