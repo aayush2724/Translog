@@ -1,0 +1,97 @@
+/* Translog Express — sign-in. The same ink/teal system as the dashboard
+   (variables come from app.css); one centred card and nothing else on the
+   page. Deliberately not a redesign — it borrows the brand block and tokens
+   the dashboard already uses so the two screens read as one product. */
+
+.login-body {
+  min-height: 100vh;
+  display: flex;
+  background:
+    radial-gradient(1100px 560px at 50% -12%, rgba(40, 124, 120, 0.12), transparent 60%),
+    var(--ivory);
+}
+
+.login-shell {
+  margin: auto;
+  width: 100%;
+  max-width: 26rem;
+  padding: 2rem 1.25rem;
+}
+
+.login-card {
+  background: var(--paper);
+  border: 1px solid var(--stone);
+  border-top: 3px solid var(--teal);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lift);
+  padding: 2rem 1.9rem 1.6rem;
+}
+
+.login-brand { display: flex; align-items: center; gap: 0.8rem; margin-bottom: 1.7rem; }
+.login-brand .brand-text { display: flex; flex-direction: column; line-height: 1.2; }
+.login-brand .brand-name { font-size: 1.05rem; font-weight: 650; color: var(--ink); }
+.login-brand .brand-sub {
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.login-title { margin: 0 0 0.25rem; font-size: 1.35rem; color: var(--ink); }
+.login-lead { margin: 0 0 1.4rem; color: var(--muted); font-size: 0.92rem; }
+
+.login-field { display: block; margin-bottom: 1rem; }
+.login-label {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+.login-field input {
+  width: 100%;
+  padding: 0.62rem 0.7rem;
+  font: inherit;
+  color: var(--text);
+  background: #fff;
+  border: 1px solid var(--stone-strong);
+  border-radius: 6px;
+}
+.login-field input:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 1px;
+  border-color: var(--teal);
+}
+
+.login-submit {
+  width: 100%;
+  margin-top: 0.4rem;
+  padding: 0.68rem 1rem;
+  font: inherit;
+  font-weight: 600;
+  color: #fff;
+  background: var(--teal);
+  border: 1px solid var(--teal-deep);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s var(--ease-out);
+}
+.login-submit:hover { background: var(--teal-deep); }
+.login-submit:disabled { opacity: 0.6; cursor: progress; }
+
+.login-error {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.85rem;
+  color: var(--danger-ink);
+  background: var(--danger-soft);
+  border: 1px solid #e6c6c0;
+  border-radius: 6px;
+}
+
+.login-foot {
+  margin: 1.5rem 0 0;
+  text-align: center;
+  font-size: 0.72rem;
+  color: var(--faint);
+}
