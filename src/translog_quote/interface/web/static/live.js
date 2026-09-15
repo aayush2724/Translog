@@ -243,6 +243,12 @@ async function readAndRender(force) {
   let text = null;
   try {
     const response = await fetch(`/api/live/state${query}`);
+    if (response.status === 401) {
+      /* The session has expired or is absent. There is no browser popup any
+         more — the desk sends the operator to its own sign-in page. */
+      window.location.assign("/login");
+      return;
+    }
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     text = await response.text();
   } catch (err) {
@@ -302,6 +308,10 @@ async function post(action, body, label) {
       body: JSON.stringify({ ...body, request_id: ui.selected }),
       signal: abort.signal,
     });
+    if (response.status === 401) {
+      window.location.assign("/login");
+      return;
+    }
     const payload = await response.json();
     if (!response.ok) {
       ui.error = payload.error || `Action failed (HTTP ${response.status})`;

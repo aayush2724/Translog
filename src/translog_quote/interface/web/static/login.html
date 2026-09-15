@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Translog Express — Sign in</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/login.css">
+  <script src="/login.js" defer></script>
+</head>
+<body class="login-body">
+  <main class="login-shell">
+    <section class="login-card" aria-labelledby="login-title">
+      <div class="login-brand">
+        <span class="brand-mark" aria-hidden="true">TE</span>
+        <span class="brand-text">
+          <span class="brand-name">Translog Express</span>
+          <span class="brand-sub">Quotation Desk</span>
+        </span>
+      </div>
+
+      <h1 id="login-title" class="login-title">Sign in</h1>
+      <p class="login-lead">Enter your operator credentials to reach the quotation desk.</p>
+
+      <p id="login-error" class="login-error" role="alert" aria-live="assertive" hidden></p>
+
+      <form id="login-form" novalidate>
+        <label class="login-field">
+          <span class="login-label">Email or username</span>
+          <input id="login-username" name="username" type="text" autocomplete="username"
+                 autocapitalize="none" spellcheck="false" required>
+        </label>
+        <label class="login-field">
+          <span class="login-label">Password</span>
+          <input id="login-password" name="password" type="password"
+                 autocomplete="current-password" required>
+        </label>
+        <button id="login-submit" class="login-submit" type="submit">Sign in</button>
+      </form>
+
+      <p class="login-foot">Translog Express · authorised operators only</p>
+    </section>
+  </main>
+</body>
+</html>

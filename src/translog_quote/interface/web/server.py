@@ -12,12 +12,12 @@ the static files are committed source with no templating step to leak into.
 
 from __future__ import annotations
 
-import base64
-import binascii
 import hmac
+import http.cookies
 import json
 import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -68,6 +68,28 @@ _LIVE_FILES: dict[str, tuple[str, str]] = {
     "/live.js": ("live.js", "text/javascript; charset=utf-8"),
     "/favicon.svg": ("favicon.svg", "image/svg+xml"),
 }
+
+#: The sign-in surface. Served WITHOUT authentication — it is how an operator
+#: obtains the session in the first place — so it is a third table checked
+#: before the auth gate, never merged into the gated ones. It carries no client
+#: data: a static form, its stylesheet and script, and the shared brand icon.
+#: Every asset here is committed source; the CSP forbids inline script/style, so
+#: the page's behaviour lives in `/login.js`, served from this same origin.
+_PUBLIC_FILES: dict[str, tuple[str, str]] = {
+    "/login": ("login.html", "text/html; charset=utf-8"),
+    "/login.html": ("login.html", "text/html; charset=utf-8"),
+    "/login.css": ("login.css", "text/css; charset=utf-8"),
+    "/login.js": ("login.js", "text/javascript; charset=utf-8"),
+    "/favicon.svg": ("favicon.svg", "image/svg+xml"),
+}
+
+#: The HTML pages a browser navigates to (as opposed to `fetch`es). An
+#: unauthenticated navigation is answered with a redirect to the sign-in page;
+#: an unauthenticated `fetch` (everything else) is answered with a 401 the
+#: dashboard script turns into the same redirect. Both are the SAME table the
+#: gated static views serve, named here so the two rejection styles stay in one
+#: place and never diverge.
+_PAGE_PATHS: frozenset[str] = frozenset({"/", "/index.html", "/live.html"})
 
 #: Every action a browser may take. Each advances the session through the same
 #: methods the tests drive; the approval boundary lives in the session and the
@@ -246,14 +268,22 @@ def _allowed_hosts() -> frozenset[str]:
     }
 
 
-#: A shared secret that, when set, gates every dashboard route behind HTTP Basic
-#: auth. Read from the environment like the host allowlist above rather than
-#: threaded through `Settings`, so the guard is decided in one place and the
-#: value is never copied into a serialised snapshot. Empty or unset means "no
-#: password" — which is refused for a non-loopback live bind (see `run`), so an
-#: exposed dashboard cannot be left open by omission. The Host allowlist stops a
-#: cross-origin browser; this stops anyone who simply knows the URL.
+#: A shared secret that, when set, gates every dashboard route behind the
+#: sign-in page. Read from the environment like the host allowlist above rather
+#: than threaded through `Settings`, so the guard is decided in one place and
+#: the value is never copied into a serialised snapshot. Empty or unset means
+#: "no password" — which is refused for a non-loopback live bind (see `run`), so
+#: an exposed dashboard cannot be left open by omission. The Host allowlist
+#: stops a cross-origin browser; this stops anyone who simply knows the URL. The
+#: token doubles as the HMAC key that signs session cookies (`_mint_session`),
+#: so rotating it silently invalidates every session issued under the old one.
 DASHBOARD_TOKEN_VAR = "TRANSLOG_DASHBOARD_TOKEN"  # noqa: S105 - env var name, not a secret
+
+#: The session cookie's name and lifetime. A finite expiry is signed *into* the
+#: cookie (see `_mint_session`), so an operator re-authenticates once a day
+#: rather than holding an indefinite credential.
+_SESSION_COOKIE = "translog_session"  # noqa: S105 - cookie name, not a secret
+_SESSION_TTL_SECONDS = 12 * 3600
 
 
 def _dashboard_token() -> str | None:
@@ -261,28 +291,84 @@ def _dashboard_token() -> str | None:
     return os.environ.get(DASHBOARD_TOKEN_VAR, "").strip() or None
 
 
-def _credential_matches(header: str | None, token: str) -> bool:
-    """Whether an `Authorization` header carries the configured token.
+def _password_matches(submitted: str, token: str) -> bool:
+    """Whether a submitted sign-in password equals the token, in constant time.
 
-    HTTP Basic: the browser prompts once and resends the header on every
-    request, so a single shared password protects the whole dashboard with no
-    login page, no session store and no cookie. The username is ignored — the
-    token is the secret — and the comparison is constant-time so a wrong password
-    leaks no timing signal. The credential is never logged.
+    The username is cosmetic (the token is the whole secret), so only the
+    password is checked, and `compare_digest` keeps a wrong one from leaking a
+    timing signal. The credential is never logged.
     """
-    if not header:
+    return hmac.compare_digest(submitted.encode("utf-8"), token.encode("utf-8"))
+
+
+def _sign(payload: str, token: str) -> str:
+    """The HMAC-SHA256 of `payload` under the dashboard token, hex-encoded."""
+    return hmac.new(token.encode("utf-8"), payload.encode("utf-8"), "sha256").hexdigest()
+
+
+def _mint_session(token: str, *, now: float | None = None) -> str:
+    """A signed, stateless session value: `"<expiry-epoch>.<hmac>"`.
+
+    No server-side store: the cookie carries its own expiry and a signature the
+    server can verify but a client cannot forge without the token. Tampering
+    with the expiry breaks the signature; the secret never leaves the process.
+    """
+    issued = int(now if now is not None else time.time())
+    payload = str(issued + _SESSION_TTL_SECONDS)
+    return f"{payload}.{_sign(payload, token)}"
+
+
+def _session_is_valid(value: str | None, token: str, *, now: float | None = None) -> bool:
+    """Whether a session cookie value is authentic and unexpired.
+
+    Authentic: its signature recomputes under the current token (a rotated
+    token, a tampered payload, or a forged signature all fail `compare_digest`).
+    Unexpired: the signed expiry is still in the future. Nothing is trusted from
+    the cookie until the signature has been verified.
+    """
+    if not value:
         return False
-    scheme, _, encoded = header.partition(" ")
-    if scheme.lower() != "basic" or not encoded:
+    payload, separator, signature = value.rpartition(".")
+    if not separator or not hmac.compare_digest(signature, _sign(payload, token)):
         return False
     try:
-        decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
-    except (binascii.Error, UnicodeDecodeError):
+        expiry = int(payload)
+    except ValueError:
         return False
-    _username, separator, password = decoded.partition(":")
-    if not separator:
-        return False
-    return hmac.compare_digest(password, token)
+    return (now if now is not None else time.time()) < expiry
+
+
+def _cookie_value(header: str | None, name: str) -> str | None:
+    """The value of one cookie from a request `Cookie` header, or None.
+
+    Parsed with the stdlib cookie jar rather than split by hand, and a
+    malformed header yields None rather than raising into the request loop.
+    """
+    if not header:
+        return None
+    jar = http.cookies.SimpleCookie()
+    try:
+        jar.load(header)
+    except http.cookies.CookieError:
+        return None
+    morsel = jar.get(name)
+    return morsel.value if morsel is not None else None
+
+
+def _set_session_header(value: str) -> str:
+    """A `Set-Cookie` line establishing the session: HttpOnly, Secure,
+    SameSite=Strict, Path=/, and the same finite Max-Age the value is signed
+    with. `Secure` is kept even for local use — modern browsers treat
+    http://localhost as a secure context, and local dev runs tokenless anyway."""
+    return (
+        f"{_SESSION_COOKIE}={value}; HttpOnly; Secure; SameSite=Strict; "
+        f"Path=/; Max-Age={_SESSION_TTL_SECONDS}"
+    )
+
+
+def _clear_session_header() -> str:
+    """A `Set-Cookie` line that expires the session immediately (logout)."""
+    return f"{_SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0"
 
 
 def _binds_publicly(host: str) -> bool:
@@ -307,17 +393,19 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         return self.server
 
     def _authenticated(self) -> bool:
-        """Whether this request may proceed.
+        """Whether this request carries a valid session.
 
         No password configured means auth is off — the local-development case,
         which a non-loopback live bind is separately refused (see `run`), so this
         can only be reached open on loopback. When a password is set, every route
-        — data reads and state-changing actions alike — requires it.
+        — data reads and state-changing actions alike — requires a signed,
+        unexpired session cookie; there is no Basic-auth header path, so the
+        browser's native username/password popup can no longer be provoked.
         """
         token = _dashboard_token()
         if token is None:
             return True
-        return _credential_matches(self.headers.get("Authorization"), token)
+        return _session_is_valid(_cookie_value(self.headers.get("Cookie"), _SESSION_COOKIE), token)
 
     def _readiness(self) -> tuple[dict[str, object], int]:
         """Readiness: the dependencies this process needs are reachable.
@@ -375,8 +463,17 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             self._send_json(payload, status=status)
             return
 
+        # The sign-in surface is served WITHOUT auth — it is how a session is
+        # obtained. A closed table, exactly like the gated ones, so this opens
+        # no path beyond the login page, its assets and the brand icon.
+        public = _PUBLIC_FILES.get(path)
+        if public is not None:
+            filename, content_type = public
+            self._send_bytes((_STATIC_DIR / filename).read_bytes(), content_type)
+            return
+
         if not self._authenticated():
-            self._send_unauthorized()
+            self._reject_unauthenticated(path)
             return
 
         if path == "/api/state":
@@ -427,13 +524,27 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         return content_type != "application/json"
 
     def do_POST(self) -> None:  # noqa: N802 - fixed by http.server
+        path = self.path.split("?", 1)[0]
+
+        # Sign-in and sign-out come before the auth gate — one grants a session,
+        # the other clears it — but still pass the same cross-site guard every
+        # other POST does, so neither can be driven from a foreign origin.
+        if path == "/login":
+            self._do_login()
+            return
+        if path == "/logout":
+            self._do_logout()
+            return
+
         if not self._authenticated():
-            self._send_unauthorized()
+            # A 401 with NO `WWW-Authenticate` header: the dashboard's own
+            # fetch layer redirects to /login on this, and the browser never
+            # shows a native credential popup.
+            self._send_json({"error": "unauthorized"}, status=401)
             return
         if self._rejects_cross_site():
             self._send_json({"error": "forbidden"}, status=403)
             return
-        path = self.path.split("?", 1)[0]
         if path.startswith("/api/live/"):
             self._do_live_post(path.removeprefix("/api/live/"))
             return
@@ -467,6 +578,48 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             # needed it.
             _log.warning("Live action %s failed: %s", name, exc)
             self._send_json({"error": type(exc).__name__}, status=500)
+
+    # --------------------------------------------------------------- sign-in --
+
+    def _do_login(self) -> None:
+        """Establish a session from a submitted password, or refuse it.
+
+        Same-origin only (the cross-site guard), JSON body only. When no token
+        is configured auth is off (loopback dev), so any sign-in succeeds
+        without a cookie — there is nothing to protect. When a token is set, the
+        password is compared in constant time and a match mints a signed
+        session cookie; a mismatch is a plain 401 carrying NO `WWW-Authenticate`
+        header, so the browser never shows its native popup. The username is
+        read but cosmetic — the token is the whole secret — and neither field is
+        ever logged.
+        """
+        if self._rejects_cross_site():
+            self._send_json({"error": "forbidden"}, status=403)
+            return
+        try:
+            body = self._read_json()
+        except ValueError:
+            self._send_json({"error": "request body must be a JSON object"}, status=400)
+            return
+
+        token = _dashboard_token()
+        if token is None:
+            self._send_json({"ok": True})
+            return
+
+        password = body.get("password")
+        if not isinstance(password, str) or not _password_matches(password, token):
+            self._send_json({"error": "invalid credentials"}, status=401)
+            return
+        self._send_json({"ok": True}, set_cookie=_set_session_header(_mint_session(token)))
+
+    def _do_logout(self) -> None:
+        """Clear the session cookie. Same-origin only; always succeeds, so a
+        page can sign out without first proving it was signed in."""
+        if self._rejects_cross_site():
+            self._send_json({"error": "forbidden"}, status=403)
+            return
+        self._send_json({"ok": True}, set_cookie=_clear_session_header())
 
     # ---------------------------------------------------------------- live --
 
@@ -527,35 +680,48 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
 
     # ----------------------------------------------------------- responses --
 
-    def _send_json(self, payload: dict[str, object], *, status: int = 200) -> None:
+    def _send_json(
+        self, payload: dict[str, object], *, status: int = 200, set_cookie: str | None = None
+    ) -> None:
         self._send_bytes(
             json.dumps(payload).encode("utf-8"),
             "application/json; charset=utf-8",
             status=status,
+            set_cookie=set_cookie,
         )
 
-    def _send_unauthorized(self) -> None:
-        """A 401 that makes a browser prompt for the dashboard password.
+    def _reject_unauthenticated(self, path: str) -> None:
+        """Refuse an unauthenticated GET in the shape the caller understands.
 
-        Carries `WWW-Authenticate: Basic` so the browser shows its native login
-        dialog and resends the credential on every subsequent request. The body
-        names only that authorization is required — never why a given attempt
-        failed, and never any part of the supplied or expected credential.
+        A browser navigating to a page is redirected to the sign-in page. Any
+        other request — a `fetch` for JSON or a sub-resource — gets a 401 with
+        NO `WWW-Authenticate` header, which the dashboard script turns into the
+        same redirect. Neither response can raise the browser's native
+        credential popup, because nothing here advertises Basic auth.
         """
-        body = json.dumps({"error": "unauthorized"}).encode("utf-8")
-        self.send_response(401)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("WWW-Authenticate", 'Basic realm="Translog"')
+        if path in _PAGE_PATHS:
+            self._redirect("/login")
+            return
+        self._send_json({"error": "unauthorized"}, status=401)
+
+    def _redirect(self, location: str) -> None:
+        """A 302 to a same-origin path, carrying the standard security headers
+        and no body."""
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
         for header, value in _SECURITY_HEADERS:
             self.send_header(header, value)
         self.end_headers()
-        self.wfile.write(body)
 
-    def _send_bytes(self, body: bytes, content_type: str, *, status: int = 200) -> None:
+    def _send_bytes(
+        self, body: bytes, content_type: str, *, status: int = 200, set_cookie: str | None = None
+    ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        if set_cookie is not None:
+            self.send_header("Set-Cookie", set_cookie)
         for header, value in _SECURITY_HEADERS:
             self.send_header(header, value)
         self.end_headers()
@@ -626,7 +792,7 @@ def run(
             print("  Rates:    SIMULATED WEBCARGO DATA — DEMO ONLY")
             print(f"  Approver: {live_session.approver_address}")
             print(
-                "  Access:   password required (HTTP Basic)"
+                "  Access:   sign-in required (session cookie)"
                 if _dashboard_token() is not None
                 else "  Access:   no password set — loopback only"
             )

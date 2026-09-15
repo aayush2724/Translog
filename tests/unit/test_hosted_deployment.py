@@ -16,11 +16,11 @@ an allowlist: loopback always, declared names as well, everything else refused.
 
 from __future__ import annotations
 
-import base64
 import http.client
 import json
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -32,11 +32,14 @@ from translog_quote.config import Settings
 from translog_quote.interface.web import __main__ as web_main
 from translog_quote.interface.web.live_session import LiveSession
 from translog_quote.interface.web.server import (
+    _SESSION_COOKIE,
+    _SESSION_TTL_SECONDS,
     ALLOWED_HOSTS_VAR,
     DASHBOARD_TOKEN_VAR,
     DEFAULT_PORT,
     DemoServer,
     _binds_publicly,
+    _mint_session,
     run,
 )
 
@@ -222,27 +225,37 @@ def test_a_wildcard_is_not_a_supported_value(
     assert post(live_server, "attacker.example.com") == 403
 
 
-# --- the dashboard password (B1) -------------------------------------------------
+# --- the dashboard sign-in (signed session cookie) -------------------------------
 #
 # The Host allowlist above stops a cross-origin browser; it does not stop anyone
 # who simply knows the URL. On a deployed --live instance that is real client
-# data and a working "approve and send" button reachable by that person. A shared
-# password closes that gap; a non-loopback live bind without one is refused to
-# start; loopback development stays open.
+# data and a working "approve and send" button reachable by that person. A
+# sign-in page closes that gap: an operator posts the shared password once, the
+# server sets a signed, HttpOnly session cookie, and every route requires it.
+# There is no HTTP Basic anywhere, so the browser's native credential popup can
+# no longer appear; a non-loopback live bind without a token still refuses to
+# start, and loopback development stays open.
 
 
-def _basic(username: str, password: str) -> str:
-    return "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode()
+def _cookie_from(headers: dict[str, str]) -> str | None:
+    """The session cookie value out of a `Set-Cookie` response header, if any."""
+    raw = headers.get("set-cookie")
+    if not raw:
+        return None
+    name, _, value = raw.split(";", 1)[0].partition("=")
+    return value if name == _SESSION_COOKIE else None
 
 
-def get(server: DemoServer, *, auth: str | None = None) -> tuple[int, dict[str, str]]:
-    """A data read of the live snapshot, optionally carrying credentials."""
+def get(
+    server: DemoServer, *, path: str = "/api/live/state", cookie: str | None = None
+) -> tuple[int, dict[str, str]]:
+    """A GET, optionally carrying a session cookie. Returns (status, headers)."""
     connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
     headers = {"Host": "127.0.0.1"}
-    if auth is not None:
-        headers["Authorization"] = auth
+    if cookie is not None:
+        headers["Cookie"] = f"{_SESSION_COOKIE}={cookie}"
     try:
-        connection.request("GET", "/api/live/state", headers=headers)
+        connection.request("GET", path, headers=headers)
         response = connection.getresponse()
         response.read()
         return response.status, {k.lower(): v for k, v in response.getheaders()}
@@ -250,15 +263,52 @@ def get(server: DemoServer, *, auth: str | None = None) -> tuple[int, dict[str, 
         connection.close()
 
 
-def post_authed(server: DemoServer, *, auth: str | None = None) -> int:
-    """A state-changing POST from loopback, optionally carrying credentials."""
+def post_authed(server: DemoServer, *, cookie: str | None = None) -> tuple[int, dict[str, str]]:
+    """A state-changing POST from loopback, optionally carrying a session cookie."""
     connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
     headers = {"Content-Type": "application/json", "Host": "127.0.0.1"}
-    if auth is not None:
-        headers["Authorization"] = auth
+    if cookie is not None:
+        headers["Cookie"] = f"{_SESSION_COOKIE}={cookie}"
     try:
         connection.request("POST", "/api/live/poll", body=b"{}", headers=headers)
-        return connection.getresponse().status
+        response = connection.getresponse()
+        response.read()
+        return response.status, {k.lower(): v for k, v in response.getheaders()}
+    finally:
+        connection.close()
+
+
+def login(
+    server: DemoServer, *, password: str, username: str = "operator"
+) -> tuple[int, dict[str, str]]:
+    """POST the sign-in form. Returns (status, headers) so a test can read the
+    Set-Cookie the server issues."""
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+    body = json.dumps({"username": username, "password": password}).encode("utf-8")
+    try:
+        connection.request(
+            "POST", "/login", body=body,
+            headers={"Content-Type": "application/json", "Host": "127.0.0.1"},
+        )
+        response = connection.getresponse()
+        response.read()
+        return response.status, {k.lower(): v for k, v in response.getheaders()}
+    finally:
+        connection.close()
+
+
+def logout(server: DemoServer) -> tuple[int, dict[str, str]]:
+    """POST sign-out. Returns (status, headers) so a test can read the clearing
+    Set-Cookie."""
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+    try:
+        connection.request(
+            "POST", "/logout", body=b"{}",
+            headers={"Content-Type": "application/json", "Host": "127.0.0.1"},
+        )
+        response = connection.getresponse()
+        response.read()
+        return response.status, {k.lower(): v for k, v in response.getheaders()}
     finally:
         connection.close()
 
@@ -270,84 +320,182 @@ def test_without_a_token_the_dashboard_is_open_on_loopback(
     monkeypatch.delenv(DASHBOARD_TOKEN_VAR, raising=False)
 
     assert get(live_server)[0] == 200
-    assert post_authed(live_server) == 200
+    assert post_authed(live_server)[0] == 200
 
 
-def test_a_token_makes_data_reads_require_a_password(
+def test_the_login_page_is_reachable_without_a_session(
+    live_server: DemoServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /login is how a session is obtained, so it is never gated — and it
+    never advertises Basic auth."""
+    monkeypatch.setenv(DASHBOARD_TOKEN_VAR, "s3cret")
+
+    status, headers = get(live_server, path="/login")
+
+    assert status == 200
+    assert "text/html" in headers.get("content-type", "")
+    assert "www-authenticate" not in headers
+
+
+def test_an_unauthenticated_page_navigation_redirects_to_login(
+    live_server: DemoServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A browser opening the dashboard with no session is sent to the sign-in
+    page — not challenged with a popup."""
+    monkeypatch.setenv(DASHBOARD_TOKEN_VAR, "s3cret")
+
+    status, headers = get(live_server, path="/")
+
+    assert status == 302
+    assert headers.get("location") == "/login"
+    assert "www-authenticate" not in headers
+
+
+def test_an_unauthenticated_api_fetch_is_401_json_without_www_authenticate(
     live_server: DemoServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv(DASHBOARD_TOKEN_VAR, "s3cret")
 
-    status, headers = get(live_server)  # no credentials
+    status, headers = get(live_server, path="/api/live/state")
 
     assert status == 401
-    assert headers.get("www-authenticate", "").lower().startswith("basic")
+    assert "www-authenticate" not in headers
+    assert "application/json" in headers.get("content-type", "")
 
 
-def test_a_token_makes_state_changing_actions_require_a_password(
+def test_state_changing_actions_require_a_session(
     live_server: DemoServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The approve/decide/poll endpoints — the ones that send real email."""
     monkeypatch.setenv(DASHBOARD_TOKEN_VAR, "s3cret")
 
-    assert post_authed(live_server) == 401
+    status, headers = post_authed(live_server)  # no cookie
+
+    assert status == 401
+    assert "www-authenticate" not in headers
 
 
-def test_the_correct_password_is_accepted(
+def test_valid_login_sets_a_signed_session_cookie(
     live_server: DemoServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv(DASHBOARD_TOKEN_VAR, "s3cret")
 
-    assert get(live_server, auth=_basic("operator", "s3cret"))[0] == 200
-    assert post_authed(live_server, auth=_basic("operator", "s3cret")) == 200
+    status, headers = login(live_server, password="s3cret")
+
+    assert status == 200
+    set_cookie = headers.get("set-cookie", "")
+    assert set_cookie.startswith(f"{_SESSION_COOKIE}=")
+    assert "HttpOnly" in set_cookie
+    assert "Secure" in set_cookie
+    assert "SameSite=Strict" in set_cookie
+    assert "Path=/" in set_cookie
+    assert "Max-Age=" in set_cookie  # a finite expiry
+    assert "www-authenticate" not in headers
 
 
-def test_the_username_is_ignored_only_the_token_matters(
+def test_a_valid_cookie_authenticates_subsequent_requests(
     live_server: DemoServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv(DASHBOARD_TOKEN_VAR, "s3cret")
 
-    assert get(live_server, auth=_basic("anyone-at-all", "s3cret"))[0] == 200
+    cookie = _cookie_from(login(live_server, password="s3cret")[1])
+    assert cookie is not None
+
+    assert get(live_server, cookie=cookie)[0] == 200
+    assert post_authed(live_server, cookie=cookie)[0] == 200
 
 
-def test_a_wrong_password_is_refused(
+def test_the_username_is_cosmetic_only_the_password_matters(
     live_server: DemoServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv(DASHBOARD_TOKEN_VAR, "s3cret")
 
-    assert get(live_server, auth=_basic("operator", "wrong"))[0] == 401
-    assert post_authed(live_server, auth=_basic("operator", "wrong")) == 401
+    cookie = _cookie_from(login(live_server, password="s3cret", username="anyone-at-all")[1])
+    assert cookie is not None
+    assert get(live_server, cookie=cookie)[0] == 200
 
 
-@pytest.mark.parametrize(
-    "header",
-    [
-        "Bearer s3cret",  # wrong scheme
-        "Basic !!!not-base64!!!",  # undecodable
-        "Basic " + base64.b64encode(b"no-colon-here").decode(),  # not user:pass
-        "Basic ",  # empty credential
-        "s3cret",  # no scheme at all
-    ],
-)
-def test_a_malformed_authorization_header_is_refused(
-    live_server: DemoServer, monkeypatch: pytest.MonkeyPatch, header: str
-) -> None:
-    monkeypatch.setenv(DASHBOARD_TOKEN_VAR, "s3cret")
-
-    assert get(live_server, auth=header)[0] == 401
-
-
-def test_static_assets_are_also_gated(
+def test_a_wrong_password_is_refused_without_www_authenticate(
     live_server: DemoServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The dashboard page itself is behind the password, not just the JSON API."""
     monkeypatch.setenv(DASHBOARD_TOKEN_VAR, "s3cret")
-    connection = http.client.HTTPConnection("127.0.0.1", live_server.server_address[1], timeout=5)
-    try:
-        connection.request("GET", "/", headers={"Host": "127.0.0.1"})
-        assert connection.getresponse().status == 401
-    finally:
-        connection.close()
+
+    status, headers = login(live_server, password="wrong")
+
+    assert status == 401
+    assert "www-authenticate" not in headers  # no popup, ever
+    assert _cookie_from(headers) is None  # and no session handed out
+
+
+def test_a_tampered_cookie_is_rejected(
+    live_server: DemoServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(DASHBOARD_TOKEN_VAR, "s3cret")
+
+    cookie = _cookie_from(login(live_server, password="s3cret")[1])
+    assert cookie is not None
+    payload, _, signature = cookie.rpartition(".")
+
+    # A blanked signature and a forged (later) expiry keeping the old signature
+    # both fail: nothing is trusted from the cookie until the HMAC recomputes.
+    assert get(live_server, cookie=f"{payload}.{'0' * len(signature)}")[0] == 401
+    assert get(live_server, cookie=f"{int(payload) + 999999}.{signature}")[0] == 401
+
+
+def test_an_expired_cookie_is_rejected(
+    live_server: DemoServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A correctly-signed cookie whose signed expiry is already in the past."""
+    monkeypatch.setenv(DASHBOARD_TOKEN_VAR, "s3cret")
+
+    expired = _mint_session("s3cret", now=time.time() - _SESSION_TTL_SECONDS - 10)
+
+    assert get(live_server, cookie=expired)[0] == 401
+
+
+def test_logout_clears_the_session(
+    live_server: DemoServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(DASHBOARD_TOKEN_VAR, "s3cret")
+
+    cookie = _cookie_from(login(live_server, password="s3cret")[1])
+    assert get(live_server, cookie=cookie)[0] == 200
+
+    status, headers = logout(live_server)
+
+    assert status == 200
+    cleared = headers.get("set-cookie", "")
+    assert cleared.startswith(f"{_SESSION_COOKIE}=")
+    assert "Max-Age=0" in cleared  # the browser drops it at once
+    # The cleared (empty) cookie no longer authenticates a page navigation.
+    assert get(live_server, path="/", cookie="")[0] == 302
+
+
+def test_no_route_in_the_auth_flow_advertises_basic_auth(
+    live_server: DemoServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The popup guarantee, stated directly: the page, the API and a failed
+    sign-in all answer without `WWW-Authenticate`, so no browser can raise its
+    native username/password dialog from the dashboard auth flow."""
+    monkeypatch.setenv(DASHBOARD_TOKEN_VAR, "s3cret")
+
+    assert "www-authenticate" not in get(live_server, path="/")[1]
+    assert "www-authenticate" not in get(live_server, path="/api/live/state")[1]
+    assert "www-authenticate" not in get(live_server, path="/login")[1]
+    assert "www-authenticate" not in login(live_server, password="wrong")[1]
+
+
+def test_health_stays_reachable_without_a_session(
+    live_server: DemoServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A monitor carries no session; /health must answer it, and without a
+    popup challenge."""
+    monkeypatch.setenv(DASHBOARD_TOKEN_VAR, "s3cret")
+
+    status, headers = get(live_server, path="/health")
+
+    assert status == 200
+    assert "www-authenticate" not in headers
 
 
 # --- fail closed: a public live bind must carry a password -----------------------
