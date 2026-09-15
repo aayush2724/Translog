@@ -36,13 +36,14 @@ from tests.unit.test_web_live import call
 
 from translog_quote.adapters.email import CollectingEmailSink
 from translog_quote.config import Settings
+from translog_quote.domain.clarification import UnresolvedReason
 from translog_quote.domain.email import RawEmail
 from translog_quote.domain.extraction import ExtractedValue, ExtractionResult
 from translog_quote.domain.rates import LocationRef
-from translog_quote.domain.shipment import CargoDimensions, DeliveryType
+from translog_quote.domain.shipment import CargoDimensions, DeliveryType, FieldName
 from translog_quote.domain.workflow import RequestState
 from translog_quote.errors import UnresolvedLocation
-from translog_quote.interface.web.live_session import LiveSequenceError, LiveSession
+from translog_quote.interface.web.live_session import LiveRequest, LiveSequenceError, LiveSession
 from translog_quote.interface.web.server import DemoServer
 
 FAKE_KEY = "test-not-a-real-credential"
@@ -148,22 +149,36 @@ def _session(
     )
 
 
-# --- the regression -------------------------------------------------------------
+# --- the regression: an unresolvable place is isolated as a clarification -------
 
 
-def test_one_unroutable_request_does_not_stop_a_second_from_reaching_rate_selection(
+def _clarifying(session: LiveSession) -> LiveRequest:
+    """The one request the session is holding for a client clarification.
+
+    Identified by the held draft rather than by origin, because drafting clears
+    the unresolved place (Change 4) so `_only(session, UNROUTABLE)` would no
+    longer find it."""
+    held = [r for r in session.requests.values() if r.clarification is not None]
+    assert len(held) == 1, f"expected exactly one held clarification, got {len(held)}"
+    return held[0]
+
+
+def test_one_unresolvable_place_does_not_stop_a_second_from_reaching_selection(
     settings: Settings, sink: CollectingEmailSink
 ) -> None:
-    """The whole point. Before the isolation this raised out of the poll."""
+    """The whole point. Before the isolation this raised out of the poll; now
+    the unpriceable request is turned into a held client clarification, and the
+    good request still reaches selection."""
     session = _session(settings, sink, emails=(BAD, GOOD))
 
     session.poll()
 
-    bad = session.requests[_only(session, UNROUTABLE)]
+    bad = _clarifying(session)
     good = session.requests[_only(session, "Ahmedabad")]
 
     assert bad.rates is None
-    assert bad.rate_failure is not None
+    assert bad.rate_failure is None  # not a dead end any more
+    assert bad.state is RequestState.NEEDS_INFO
     assert good.rates is not None
     assert good.rates.selection is not None
     assert good.packet is not None
@@ -178,16 +193,25 @@ def test_the_poll_does_not_raise(settings: Settings, sink: CollectingEmailSink) 
     assert session.requests
 
 
-def test_the_bad_request_reports_why_it_has_no_rates(
+def test_the_held_request_asks_the_client_for_the_airport(
     settings: Settings, sink: CollectingEmailSink
 ) -> None:
+    """The unresolved place becomes a clarification that names it, in plain
+    words, with no internal vocabulary."""
     session = _session(settings, sink, emails=(BAD,))
 
     session.poll()
 
-    failure = session.requests[_only(session, UNROUTABLE)].rate_failure
-    assert failure is not None
-    assert UNROUTABLE in failure
+    draft = _clarifying(session).clarification
+    assert draft is not None
+    (asked,) = draft.unresolved
+    assert asked.field is FieldName.ORIGIN
+    assert asked.reason is UnresolvedReason.AMBIGUOUS
+    assert UNROUTABLE in asked.detail  # the client's own wording, preserved
+    assert UNROUTABLE in draft.body_text
+    lowered = draft.body_text.lower()
+    for internal in ("unresolvedlocation", "resolver", "canonical", "traceback"):
+        assert internal not in lowered
 
 
 def test_the_order_of_the_two_does_not_matter(
@@ -206,10 +230,12 @@ def test_the_order_of_the_two_does_not_matter(
     assert session.requests[_only(session, "Ahmedabad")].packet is not None
 
 
-# --- what must NOT happen because of the failure --------------------------------
+# --- what must NOT happen because of the clarification --------------------------
 
 
-def test_the_failure_sends_no_email(settings: Settings, sink: CollectingEmailSink) -> None:
+def test_the_clarification_sends_no_email_before_approval(
+    settings: Settings, sink: CollectingEmailSink
+) -> None:
     session = _session(settings, sink, emails=(BAD,))
 
     session.poll()
@@ -217,58 +243,55 @@ def test_the_failure_sends_no_email(settings: Settings, sink: CollectingEmailSin
     assert sink.sent == []
 
 
-def test_the_failed_request_is_not_approvable(
+def test_the_held_request_has_no_quotation_to_decide(
     settings: Settings, sink: CollectingEmailSink
 ) -> None:
-    """No packet, so no gate — the request cannot be approved by anyone."""
+    """It awaits a clarification approval, not a quotation decision: there is no
+    packet, so the quotation gate refuses it."""
     session = _session(settings, sink, emails=(BAD,))
     session.poll()
-    request_id = _only(session, UNROUTABLE)
+    request = _clarifying(session)
 
-    request = session.requests[request_id]
     assert request.packet is None
     assert request.awaiting_quotation_decision is False
+    assert request.awaiting_clarification_approval is True
 
     with pytest.raises(LiveSequenceError):
-        session.decide(request_id, choice="approve", by="A. Operator")
+        session.decide(request.request_id, choice="approve", by="A. Operator")
 
     assert sink.sent == []
 
 
-def test_the_failure_does_not_move_the_request(
+def test_the_unresolved_place_moves_the_request_to_needs_info(
     settings: Settings, sink: CollectingEmailSink
 ) -> None:
-    """State-machine semantics are untouched: it stays where it was."""
+    """The change this task introduced: instead of dead-ending at VALIDATED with
+    a rate failure, the request moves to NEEDS_INFO to ask the client."""
     session = _session(settings, sink, emails=(BAD,))
 
     session.poll()
 
-    assert session.requests[_only(session, UNROUTABLE)].state is RequestState.VALIDATED
+    assert _clarifying(session).state is RequestState.NEEDS_INFO
 
 
-# --- retry ----------------------------------------------------------------------
+# --- idempotency ----------------------------------------------------------------
 
 
-def test_the_request_is_retried_on_the_next_poll(
+def test_polling_twice_does_not_draft_a_second_clarification(
     settings: Settings, sink: CollectingEmailSink
 ) -> None:
-    """No queue to drain and nothing to reset.
-
-    The request is still VALIDATED with no rates, which is precisely what the
-    search loop selects on — so once the cause is gone the next poll prices it.
-    Simulated here by correcting the record the way a resolved lane would.
-    """
+    """A held request is NEEDS_INFO, which the search loop no longer selects, so
+    a second poll neither re-drafts nor sends."""
     session = _session(settings, sink, emails=(BAD,))
     session.poll()
-    request = session.requests[_only(session, UNROUTABLE)]
-    assert request.rate_failure is not None
+    first = _clarifying(session).clarification
 
-    request.record = request.record.model_copy(update={"origin": "Ahmedabad"})
     session.poll()
 
-    assert request.rate_failure is None
-    assert request.rates is not None
-    assert request.packet is not None
+    held = _clarifying(session)
+    assert held.clarification is first  # the same draft, not a new one
+    assert held.state is RequestState.NEEDS_INFO
+    assert sink.sent == []
 
 
 # --- the HTTP surface -----------------------------------------------------------
@@ -277,7 +300,9 @@ def test_the_request_is_retried_on_the_next_poll(
 def test_the_poll_endpoint_answers_200_not_500(
     settings: Settings, sink: CollectingEmailSink
 ) -> None:
-    """What the browser actually saw: a 500 whose body the dashboard dropped."""
+    """What the browser saw before isolation was a 500 whose body the dashboard
+    dropped. Now the unresolved request is a held clarification, the good one
+    awaits a decision, and the endpoint answers 200 either way."""
     server = DemoServer(
         ("127.0.0.1", 0), settings, live_session=_session(settings, sink, emails=(BAD, GOOD))
     )
@@ -292,9 +317,8 @@ def test_the_poll_endpoint_answers_200_not_500(
     assert status == 200, payload
     requests = payload["requests"]
     assert isinstance(requests, list)
-    failures = [r for r in requests if r.get("rate_failure")]
-    assert len(failures) == 1
-    assert UNROUTABLE in str(failures[0]["rate_failure"])
+    assert [r for r in requests if r.get("rate_failure")] == []
+    assert any(r.get("awaiting_clarification") for r in requests)
     assert any(r.get("awaiting_decision") for r in requests)
 
 

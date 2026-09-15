@@ -18,15 +18,19 @@ from translog_quote.domain.clarification.compose import (
 from translog_quote.domain.clarification.model import (
     ClarificationMessage,
     UnresolvedField,
+    UnresolvedPlace,
     UnresolvedReason,
 )
+from translog_quote.domain.clarification.questions import location_question
 
 __all__ = [
     "DEFAULT_SUBJECT",
     "ClarificationMessage",
     "UnresolvedAnalysis",
     "UnresolvedField",
+    "UnresolvedPlace",
     "UnresolvedReason",
     "compose_clarification",
     "identify_unresolved",
+    "location_question",
 ]

@@ -37,13 +37,14 @@ from typing import TYPE_CHECKING
 
 from translog_quote import bootstrap
 from translog_quote.config import WebCargoMode
+from translog_quote.domain.clarification import UnresolvedPlace
 from translog_quote.domain.quotation import (
     INTERNAL_SUBJECT_PREFIX,
     ReviewPacket,
     decision_from_choice,
 )
 from translog_quote.domain.rates import FASTEST_ELIGIBLE
-from translog_quote.domain.shipment import DeliveryType
+from translog_quote.domain.shipment import DeliveryType, FieldName
 from translog_quote.domain.validation import validate_shipment
 from translog_quote.domain.workflow import RequestState
 from translog_quote.errors import (
@@ -51,6 +52,7 @@ from translog_quote.errors import (
     IllegalTransition,
     PermanentFailure,
     TranslogError,
+    UnresolvedLocation,
 )
 from translog_quote.interface.demo.gmail_thread import _request_id_for
 from translog_quote.interface.jobs import (
@@ -66,7 +68,7 @@ from translog_quote.pipeline import RateSearchOutcome, RateSearchStage
 
 if TYPE_CHECKING:
     import datetime
-    from collections.abc import Collection
+    from collections.abc import Collection, Sequence
 
     from translog_quote.config import Settings
     from translog_quote.domain.clarification import ClarificationMessage
@@ -656,6 +658,17 @@ class LiveSession:
                     "cannot run without the client's stated shipment date."
                 )
                 continue
+            # Resolve the stated places before any enqueue. Pure, deterministic,
+            # no I/O — safe in the web process. A place that cannot be resolved
+            # to an airport without guessing becomes a client clarification, not
+            # a search that would only fail worker-side. Only for requests not
+            # yet enqueued; an in-flight job is polled by the browser path below,
+            # and a job that FAILED on an unresolved place is recovered there
+            # (Change 5).
+            if request.rate_job_id is None and self._draft_location_clarification_if_unresolved(
+                request
+            ):
+                continue
             if browser_mode:
                 self._advance_browser_rate_search(request)
             else:
@@ -729,10 +742,23 @@ class LiveSession:
                 request, self._outcome_from_job_result(request.request_id, status.result)
             )
         elif status.state is JobState.FAILED:
-            # Fail loudly and stay failed: the failed job is retained under its
-            # own TTL and is not auto re-enqueued, so a broken search does not
-            # hammer the single browser worker on every poll.
-            request.rate_failure = status.error or "the rate search failed"
+            # A place that cannot be resolved to an airport without guessing is a
+            # client clarification, not a seven-day dead end. Re-run the resolver
+            # (pure, no I/O) on the record: if a stated place still cannot
+            # resolve, draft the clarification and drop the failed job. Matching
+            # is by re-resolving, not by the error text/type, because the worker
+            # also raises UnresolvedLocation for a WebCargo autocomplete miss on
+            # a place that DID resolve to a code — that is a genuine search
+            # failure and must stay visible to the operator, never emailed.
+            unresolved = self._unresolved_places(request.record)
+            if unresolved:
+                request.rate_job_id = None
+                self._draft_location_clarification(request, unresolved)
+            else:
+                # Fail loudly and stay failed: the failed job is retained under
+                # its own TTL and is not auto re-enqueued, so a broken search
+                # does not hammer the single browser worker on every poll.
+                request.rate_failure = status.error or "the rate search failed"
         # QUEUED / PROCESSING: still in flight — reported as pending, nothing to do.
 
     def _apply_rate_outcome(self, request: LiveRequest, outcome: RateSearchOutcome) -> None:
@@ -749,6 +775,67 @@ class LiveSession:
                 rates=outcome.filtered,
                 selection=outcome.selection,
             )
+
+    def _unresolved_places(self, record: ShipmentRecord) -> tuple[UnresolvedPlace, ...]:
+        """The stated origin/destination the resolver cannot turn into an airport
+        code without guessing. Pure and deterministic — ``resolve`` does no I/O,
+        so this is safe in the web process."""
+        places: list[UnresolvedPlace] = []
+        for field_name, stated in (
+            (FieldName.ORIGIN, record.origin),
+            (FieldName.DESTINATION, record.destination),
+        ):
+            if not stated:
+                continue
+            try:
+                self._resolver.resolve(stated)
+            except UnresolvedLocation:
+                places.append(UnresolvedPlace(field=field_name, stated=stated))
+        return tuple(places)
+
+    def _draft_location_clarification_if_unresolved(self, request: LiveRequest) -> bool:
+        """Draft a location clarification when a stated place cannot be resolved.
+
+        Returns ``True`` when a draft was created, so the caller does not
+        enqueue. In simulated modes ``StatedLocationResolver`` does not raise for
+        a nameable place, so nothing is found and this returns ``False`` —
+        behaviour there is unchanged.
+        """
+        unresolved = self._unresolved_places(request.record)
+        if not unresolved:
+            return False
+        self._draft_location_clarification(request, unresolved)
+        return True
+
+    def _draft_location_clarification(
+        self, request: LiveRequest, unresolved: Sequence[UnresolvedPlace]
+    ) -> None:
+        """Register a held draft asking the client for the airport(s) and mirror
+        the cleared record into the interface's own view, so the UI shows the
+        request as awaiting clarification approval rather than as a rate failure.
+
+        The draft is registered in the workflow's pending set (via the router),
+        so the existing ``approve_clarification`` releases it unchanged.
+        """
+        draft = self._router.request_location_clarification(
+            request.request_id,
+            unresolved,
+            to_address=request.client_address,
+            subject=request.subject,
+            in_reply_to=request.last_message_id or "",
+        )
+        if draft is None:  # pragma: no cover - unresolved is non-empty here
+            return
+        # The working store now holds the cleared record + NEEDS_INFO; mirror it
+        # so `request.record`/`validation` match what a reply will merge against.
+        stored = self._working.get_request(request.request_id)
+        if stored is not None:
+            request.record = stored.record
+            request.validation = validate_shipment(stored.record)
+            request.state = stored.state
+        request.clarification = draft
+        request.rate_failure = None
+        request.rate_job_id = None
 
     @staticmethod
     def _job_request_from_record(request: LiveRequest) -> RateSearchJobRequest:

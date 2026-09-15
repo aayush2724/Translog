@@ -23,8 +23,11 @@ from typing import TYPE_CHECKING
 
 from translog_quote.domain.clarification import (
     UnresolvedAnalysis,
+    UnresolvedField,
+    UnresolvedReason,
     compose_clarification,
     identify_unresolved,
+    location_question,
 )
 from translog_quote.domain.email import OutboundMessage
 from translog_quote.domain.extraction import FieldStatus, to_extracted_fields
@@ -37,7 +40,9 @@ from translog_quote.pipeline.audit import AuditEvent, AuditEventType
 from translog_quote.pipeline.state_machine import StateMachine
 
 if TYPE_CHECKING:
-    from translog_quote.domain.clarification import ClarificationMessage
+    from collections.abc import Sequence
+
+    from translog_quote.domain.clarification import ClarificationMessage, UnresolvedPlace
     from translog_quote.domain.email import RawEmail
     from translog_quote.domain.extraction import ExtractionResult
     from translog_quote.domain.shipment import MergeResult
@@ -332,6 +337,96 @@ class ClarificationWorkflow:
             },
         )
         return state, clarification
+
+    # ---------------------------------------------------------- location ask --
+
+    def request_location_clarification(
+        self,
+        request_id: str,
+        unresolved: Sequence[UnresolvedPlace],
+        *,
+        to_address: str,
+        subject: str,
+        in_reply_to: str,
+    ) -> ClarificationMessage | None:
+        """Draft one clarification for stated places that cannot be resolved to
+        an airport without guessing.
+
+        Discovered after validation, in the rate-search step — not during
+        extraction — so it has its own entry point rather than riding
+        ``identify_unresolved``. It registers into the same ``_pending`` the
+        ordinary loop uses, so ``pending_draft`` and ``approve_clarification``
+        release it unchanged, and it counts as a clarification round (sharing
+        ``_max_rounds``): a place answered with the same unusable wording
+        escalates to manual review through the existing round cap.
+
+        It clears the unresolved field(s) on the stored record, so the client's
+        reply fills an empty field (merge rule 1 → change) instead of clashing
+        with the wording we could not use (rule 3 → conflict). The client's
+        original wording is kept in each question's ``detail`` and in the audit
+        event, never lost, and never turned into a code. The cleared record is
+        written to the working store only; it reaches the durable store at
+        approval, so a restart before approval re-derives the draft rather than
+        stranding a cleared field.
+
+        Idempotent: a second call while a draft is pending returns it without a
+        second draft, transition, round or audit event.
+        """
+        pending = self.pending_draft(request_id)
+        if pending is not None:
+            return pending
+        if not unresolved:
+            return None
+
+        stored = self._store.get_request(request_id)
+        if stored is None:  # pragma: no cover - a validated request is always stored
+            raise IllegalTransition(f"no request {request_id} to clarify against")
+
+        fields = tuple(
+            UnresolvedField(
+                field=place.field,
+                reason=UnresolvedReason.AMBIGUOUS,
+                question=location_question(place.field, place.stated),
+                detail=place.stated,
+            )
+            for place in unresolved
+        )
+        clarification = compose_clarification(request_id, UnresolvedAnalysis(unresolved=fields))
+        assert clarification is not None  # unresolved is non-empty
+
+        cleared = stored.record.model_copy(
+            update={place.field.value: None for place in unresolved}
+        )
+        state = self._advance(request_id, stored.state, RequestState.NEEDS_INFO)
+        self._store.save_request(stored.model_copy(update={"state": state, "record": cleared}))
+
+        self._pending[request_id] = _PendingDraft(
+            message=clarification,
+            to_address=to_address,
+            subject=_reply_subject(subject, clarification.subject),
+            in_reply_to=in_reply_to,
+        )
+        self._rounds[request_id] = self._rounds.get(request_id, 0) + 1
+        self._emit(
+            request_id,
+            AuditEventType.LOCATION_UNRESOLVED,
+            {
+                "fields": [p.field.value for p in unresolved],
+                "stated": [p.stated for p in unresolved],
+            },
+        )
+        self._emit(
+            request_id,
+            AuditEventType.CLARIFICATION_DRAFTED,
+            {
+                "round": self._rounds[request_id],
+                "fields": [u.field.value for u in clarification.unresolved],
+                "reasons": sorted(r.value for r in clarification.reasons),
+                "sent": False,
+                "awaiting": "human approval",
+            },
+        )
+        return clarification
 
     # ------------------------------------------------------------- approval --
 

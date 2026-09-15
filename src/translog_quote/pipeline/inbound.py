@@ -24,9 +24,9 @@ from typing import TYPE_CHECKING
 from translog_quote.domain.conversation import AmbiguousCorrelation, NewRequest, Thread
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
-    from translog_quote.domain.clarification import ClarificationMessage
+    from translog_quote.domain.clarification import ClarificationMessage, UnresolvedPlace
     from translog_quote.domain.conversation import CorrelationPolicy
     from translog_quote.domain.email import RawEmail
     from translog_quote.domain.quotation import Approved
@@ -127,6 +127,26 @@ class InboundRouter:
     def pending_draft(self, request_id: str) -> ClarificationMessage | None:
         """The draft holding this request at NEEDS_INFO, if there is one."""
         return self._workflow.pending_draft(request_id)
+
+    def request_location_clarification(
+        self,
+        request_id: str,
+        unresolved: Sequence[UnresolvedPlace],
+        *,
+        to_address: str,
+        subject: str,
+        in_reply_to: str,
+    ) -> ClarificationMessage | None:
+        """Draft a location clarification for a request the rate-search step
+        could not resolve. A pass-through, like `approve`: the router owns no
+        decision here, it only saves the caller reaching into the workflow."""
+        return self._workflow.request_location_clarification(
+            request_id,
+            unresolved,
+            to_address=to_address,
+            subject=subject,
+            in_reply_to=in_reply_to,
+        )
 
     def approve(self, request_id: str, *, by: str) -> Approved:
         """Release a held draft on a named person's authority.

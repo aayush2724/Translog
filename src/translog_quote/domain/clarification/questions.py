@@ -69,6 +69,30 @@ def ambiguous_question(field: FieldName) -> str:
     return AMBIGUOUS_QUESTIONS.get(field, MISSING_QUESTIONS[field])
 
 
+#: What to ask when a stated place cannot be resolved to a single airport without
+#: guessing — discovered at rate-search time, not extraction. It names the place
+#: exactly as the client wrote it. The example code is a fixed, neutral
+#: illustration of the *format* (never the place being asked about), so a
+#: question about Nairobi does not suggest Delhi any more than one about Delhi
+#: does — and it must never be read back as, or written into the record as, the
+#: answer.
+_LOCATION_UNRESOLVED = (
+    '{label} airport — we could not identify a single airport for "{stated}". '
+    "Please confirm the airport, ideally with its three-letter code "
+    '(for example, "Delhi (DEL)").'
+)
+
+
+def location_question(field: FieldName, stated: str) -> str:
+    """Ask for the airport behind a place we could not resolve without guessing.
+
+    ``field`` is ORIGIN or DESTINATION; ``stated`` is the client's own wording,
+    quoted back verbatim. Unlike the static ``AMBIGUOUS_QUESTIONS`` entries this
+    interpolates the stated place, so it is a function, not a table row.
+    """
+    return _LOCATION_UNRESOLVED.format(label=FIELD_LABELS[field], stated=stated)
+
+
 def conflict_question(field: FieldName, existing: object, incoming: object) -> str:
     return _CONFLICT.format(
         label=FIELD_LABELS[field],

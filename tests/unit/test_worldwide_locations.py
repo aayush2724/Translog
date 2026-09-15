@@ -34,6 +34,7 @@ from translog_quote.domain.rates import LocationRef
 from translog_quote.domain.shipment import (
     CargoDimensions,
     DeliveryType,
+    FieldName,
     RequestSource,
     ShipmentRecord,
 )
@@ -230,7 +231,12 @@ class OneBadLane:
 def test_an_unresolvable_request_does_not_block_a_valid_one(
     settings: Settings,
 ) -> None:
-    """G. One refusal, one affected request, the rest of the poll unharmed."""
+    """G. One refusal, one affected request, the rest of the poll unharmed.
+
+    The refusal is now turned into a held client clarification (its stated place
+    is cleared to be re-asked), not a rate failure — so the affected request is
+    identified by its held draft, and the valid one still reaches selection.
+    """
     bad = _email("<bad@x>", "Rate required - Atlantis to Tokyo", 0)
     good = _email("<good@x>", "Rate required - Hyderabad to Amsterdam", 5)
     sink = CollectingEmailSink()
@@ -246,11 +252,21 @@ def test_an_unresolvable_request_does_not_block_a_valid_one(
 
     session.poll()
 
-    by_origin = {r.record.origin: r for r in session.requests.values()}
-    assert by_origin["Atlantis"].rate_failure is not None
-    assert by_origin["Atlantis"].packet is None
-    assert by_origin["Hyderabad"].state is RequestState.RATE_SELECTED
-    assert by_origin["Hyderabad"].packet is not None
+    held = [r for r in session.requests.values() if r.clarification is not None]
+    assert len(held) == 1
+    affected = held[0]
+    assert affected.rate_failure is None
+    assert affected.state is RequestState.NEEDS_INFO
+    assert affected.packet is None
+    # No code is invented: the unresolvable place is cleared to be re-asked, not
+    # replaced by a guessed airport. Its clarification names it as AMBIGUOUS.
+    assert affected.record.origin is None
+    assert affected.clarification is not None
+    assert affected.clarification.asked_for == (FieldName.ORIGIN,)
+
+    good_request = next(r for r in session.requests.values() if r.record.origin == "Hyderabad")
+    assert good_request.state is RequestState.RATE_SELECTED
+    assert good_request.packet is not None
     assert sink.sent == []
 
 

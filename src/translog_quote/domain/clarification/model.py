@@ -47,6 +47,22 @@ class UnresolvedField(BaseModel):
     """Context the question needs — for a conflict, the values that disagree."""
 
 
+class UnresolvedPlace(BaseModel):
+    """A stated place that could not be resolved to an airport without guessing.
+
+    The input to a *location* clarification, discovered at rate-search time
+    rather than during extraction. It carries the field it concerns (ORIGIN or
+    DESTINATION) and the client's original wording, which becomes the question's
+    ``detail`` and the audit record — never a code, because none could be
+    produced without guessing.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    field: FieldName
+    stated: str
+
+
 class ClarificationMessage(BaseModel):
     """One message asking for everything outstanding, at once.
 

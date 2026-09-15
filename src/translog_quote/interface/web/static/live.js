@@ -623,12 +623,19 @@ function sectionRates(detail) {
     /* No rates and a reason why. Without this the detail view simply omits the
        section and the request reads as though nothing had been attempted. */
     if (!detail.rate_failure) return null;
+    /* Only a transient queue error clears itself on the next poll. A place that
+       could not be resolved is now turned into a client clarification and never
+       reaches this view; anything else that lands here needs a look, so we no
+       longer promise an automatic retry for it. */
+    const transient =
+      detail.rate_failure === "the rate-search queue is unavailable; retry shortly";
     return card(
       [el("h2", null, "Rate search & selection"), pill("NOT RUN", "amber")],
       el("p", null, `Rate search could not run: ${detail.rate_failure}`),
       el("p", { class: "muted small" },
-        "Nothing was sent and nothing was approved. The next mailbox check " +
-        "retries this request automatically."));
+        transient
+          ? "Nothing was sent and nothing was approved. The next mailbox check retries this automatically."
+          : "Nothing was sent and nothing was approved. This needs a look — it will not clear itself on the next check."));
   }
   const selection = rates.selection;
   return card(

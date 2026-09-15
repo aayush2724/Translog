@@ -63,6 +63,10 @@ TRANSITIONS: dict[RequestState, frozenset[RequestState]] = {
             RequestState.RATE_SELECTED,
             RequestState.NO_ELIGIBLE_RATE,
             RequestState.FAILED,
+            # A stated place that cannot be resolved to an airport without
+            # guessing is only discovered after validation, in the rate-search
+            # step — so a validated request can still need a client clarification.
+            RequestState.NEEDS_INFO,
         }
     ),
     RequestState.RATE_SELECTED: frozenset({RequestState.PENDING_APPROVAL}),

@@ -39,6 +39,7 @@ from tests.unit.test_web_live import APPROVER, GrowingSource
 
 from translog_quote.adapters.email import CollectingEmailSink
 from translog_quote.config import Settings, WebCargoMode
+from translog_quote.domain.extraction import ExtractedValue
 from translog_quote.domain.rates import (
     FASTEST_ELIGIBLE,
     Rate,
@@ -144,18 +145,33 @@ def _forbid_demo_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(live_session_module.bootstrap, "build_demo_rate_provider", explode)
 
 
+#: The enquiry, but stating places the browser-mode resolver can resolve without
+#: guessing, so the real `CanonicalLocationResolver` stays under test here and
+#: the bridge reaches the enqueue rather than a location clarification. The
+#: reply (`REPLY_EXTRACTION`) fills the remaining fields and never touches the
+#: places. Parenthesised codes are what the resolver accepts as explicit.
+_RESOLVABLE_ENQUIRY = ENQUIRY_EXTRACTION.model_copy(
+    update={
+        "origin": ExtractedValue[str].stated("Delhi (DEL)"),
+        "destination": ExtractedValue[str].stated("Singapore (SIN)"),
+    }
+)
+
+
 def _validated_session(settings: Settings, sink: CollectingEmailSink) -> LiveSession:
     """A session whose one request has reached VALIDATED after a merged reply.
 
     The enquiry validates to NEEDS_INFO; approving the clarification and polling
     the reply merges it to a complete, validated record — the point at which the
-    rate-search bridge takes over.
+    rate-search bridge takes over. The places resolve, so the real browser-mode
+    resolver runs and the bridge enqueues (an unresolvable place is a location
+    clarification, exercised in its own tests, not here).
     """
     return LiveSession(
         settings,
         source=GrowingSource((ENQUIRY,), (ENQUIRY, REPLY)),  # type: ignore[arg-type]
         sink=sink,
-        extractor=ScriptedExtractor(ENQUIRY_EXTRACTION, REPLY_EXTRACTION),
+        extractor=ScriptedExtractor(_RESOLVABLE_ENQUIRY, REPLY_EXTRACTION),
     )
 
 
