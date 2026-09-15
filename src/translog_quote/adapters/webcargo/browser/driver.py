@@ -38,7 +38,7 @@ class PlaywrightWebCargoDriver:
         self._page = page
 
     def goto(self, url: str) -> None:
-        self._page.goto(url)
+        self._page.goto(url, wait_until="domcontentloaded")
 
     def click(self, selector: str) -> None:
         self._page.click(selector)
