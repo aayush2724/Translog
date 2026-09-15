@@ -522,6 +522,16 @@ def build_location_resolver(settings: Settings) -> LocationResolverPort:
     adapter resolves places through WebCargo's own location lookup and records
     itself as the resolver — never a table, never a code inferred from a name.
     """
+    from translog_quote.config import WebCargoMode
+
+    if settings.webcargo.mode is WebCargoMode.BROWSER:
+        # The real WebCargo autocomplete recognises codes and "City (CODE)" but
+        # not free client wording like "Delhi, India"; resolve deterministically
+        # to a code first, and refuse (clarify) rather than guess an unknown one.
+        from translog_quote.adapters.routing import CanonicalLocationResolver
+
+        return CanonicalLocationResolver()
+
     from translog_quote.adapters.routing import StatedLocationResolver
 
     return StatedLocationResolver()
@@ -569,6 +579,7 @@ def build_browser_rate_provider(settings: Settings) -> RateSearchPort:
         wrap_page=PlaywrightWebCargoDriver,
         search_timeout_seconds=settings.webcargo.search_timeout_seconds,
         navigation_timeout_seconds=settings.webcargo.navigation_timeout_seconds,
+        resolver=build_location_resolver(settings),
     )
 
 

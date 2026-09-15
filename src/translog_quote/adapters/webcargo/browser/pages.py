@@ -642,12 +642,12 @@ def run_rate_search(
     verify_authenticated(driver, base_url=base_url, timeout_seconds=navigation_timeout_seconds)
 
     _fill_location(
-        driver, ORIGIN_INPUT, query.origin.stated, timeout_seconds=navigation_timeout_seconds
+        driver, ORIGIN_INPUT, query.origin.display, timeout_seconds=navigation_timeout_seconds
     )
     _fill_location(
         driver,
         DESTINATION_INPUT,
-        query.destination.stated,
+        query.destination.display,
         timeout_seconds=navigation_timeout_seconds,
     )
 

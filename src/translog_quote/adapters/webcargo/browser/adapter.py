@@ -29,6 +29,7 @@ from translog_quote.adapters.webcargo.browser.pages import (
     run_rate_search,
 )
 from translog_quote.adapters.webcargo.browser.reauth import run_operator_login
+from translog_quote.adapters.routing import StatedLocationResolver
 from translog_quote.domain.rates import RateSearchResult
 
 if TYPE_CHECKING:
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
     from translog_quote.adapters.webcargo.browser.manager import ManagedBrowser
     from translog_quote.adapters.webcargo.browser.pages import BrowserDriver
     from translog_quote.domain.rates import RateQuery
+    from translog_quote.ports import LocationResolverPort
 
 
 class WebCargoBrowserAdapter:
@@ -52,6 +54,7 @@ class WebCargoBrowserAdapter:
         wrap_page: Callable[[Any], BrowserDriver],
         search_timeout_seconds: float,
         navigation_timeout_seconds: float,
+        resolver: LocationResolverPort | None = None,
         capture_legs: bool = False,
     ) -> None:
         self._manager = manager
@@ -59,11 +62,27 @@ class WebCargoBrowserAdapter:
         self._wrap_page = wrap_page
         self._search_timeout = search_timeout_seconds
         self._navigation_timeout = navigation_timeout_seconds
+        # Default keeps the client's wording (no code) — the production browser
+        # provider injects CanonicalLocationResolver via the composition root.
+        self._resolver = resolver if resolver is not None else StatedLocationResolver()
         self._capture_legs = capture_legs
+
+    def _resolved(self, query: RateQuery) -> RateQuery:
+        """Resolve the stated places to what WebCargo's autocomplete recognises.
+
+        Runs immediately before any browser work, so an unresolved or ambiguous
+        place raises `UnresolvedLocation` and no search is attempted. The
+        client's original wording stays on each `LocationRef.stated`; only a
+        provider `code` is added — never guessed. The queued job payload is
+        untouched: this resolves the transient query, at worker execution time."""
+        origin = self._resolver.resolve(query.origin.stated)
+        destination = self._resolver.resolve(query.destination.stated)
+        return query.model_copy(update={"origin": origin, "destination": destination})
 
     def search(self, query: RateQuery) -> RateSearchResult:
         """One search on one fresh page. The session outlives it; the page
         does not (`job_page` closes it unconditionally)."""
+        query = self._resolved(query)
         with self._manager.job_page() as page:
             driver = self._wrap_page(page)
             try:

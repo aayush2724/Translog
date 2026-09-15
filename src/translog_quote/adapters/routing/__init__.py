@@ -8,6 +8,7 @@ a place means on its network, and records itself as the resolver.
 Nothing here infers a code from a place name.
 """
 
+from translog_quote.adapters.routing.canonical import CanonicalLocationResolver
 from translog_quote.adapters.routing.stated import StatedLocationResolver
 
-__all__ = ["StatedLocationResolver"]
+__all__ = ["CanonicalLocationResolver", "StatedLocationResolver"]
