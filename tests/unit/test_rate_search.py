@@ -58,6 +58,7 @@ def record(**overrides: object) -> ShipmentRecord:
         "destination": "Bahrain",
         "weight_kg": 500.0,
         "dimensions_in": DIMS,
+        "pcs": 3,
     }
     base.update(overrides)
     return ShipmentRecord(**base)  # type: ignore[arg-type]
@@ -73,6 +74,7 @@ def test_a_query_is_built_from_the_shipment() -> None:
     assert query.destination.stated == "Bahrain"
     assert query.origin.code is None
     assert query.weight_kg == 500.0
+    assert query.pieces == 3  # the client's stated piece count, carried through
     assert query.date == WHEN
 
 
@@ -119,6 +121,15 @@ def test_a_query_needs_weight_and_dimensions() -> None:
         build_query(record(weight_kg=None), on_date=WHEN, resolver=RESOLVER)
     with pytest.raises(ContractViolation, match="dimensions"):
         build_query(record(dimensions_in=None), on_date=WHEN, resolver=RESOLVER)
+
+
+def test_a_query_needs_a_positive_piece_count() -> None:
+    """The piece count drives WebCargo's volumetric weight, so a query cannot be
+    built without one — and never falls back to a silent single box."""
+    with pytest.raises(ContractViolation, match="piece"):
+        build_query(record(pcs=None), on_date=WHEN, resolver=RESOLVER)
+    with pytest.raises(ContractViolation, match="piece"):
+        build_query(record(pcs=0), on_date=WHEN, resolver=RESOLVER)
 
 
 def test_the_query_date_has_no_default() -> None:

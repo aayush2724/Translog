@@ -36,6 +36,7 @@ def _query(origin: str, destination: str) -> RateQuery:
         destination=LocationRef(stated=destination),
         weight_kg=500.0,
         dimensions_in=CargoDimensions(length=40, width=30, height=25),
+        pieces=1,
         date=date(2026, 9, 25),
         commodity="General Cargo",
     )
@@ -87,6 +88,7 @@ def test_queued_job_payload_keeps_the_clients_stated_locations() -> None:
         destination="Singapore",
         weight_kg=500.0,
         dimensions_in=CargoDimensions(length=40, width=30, height=25),
+        pieces=1,
         search_date=date(2026, 9, 25),
         commodity="General Cargo",
     )

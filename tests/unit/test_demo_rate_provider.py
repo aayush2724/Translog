@@ -45,6 +45,7 @@ REFERENCE = RateQuery(
     destination=LocationRef(stated="Bahrain"),
     weight_kg=500.0,
     dimensions_in=CargoDimensions(length=34, width=24, height=6),
+    pieces=1,
     date=WHEN,
 )
 
@@ -54,6 +55,7 @@ BULKY = RateQuery(
     destination=LocationRef(stated="Bahrain"),
     weight_kg=30.0,
     dimensions_in=CargoDimensions(length=48, width=40, height=40),
+    pieces=1,
     date=WHEN,
 )
 
@@ -95,6 +97,7 @@ def test_the_pipeline_reports_it_as_simulated_not_as_provider_data() -> None:
         destination="Bahrain",
         weight_kg=500.0,
         dimensions_in=CargoDimensions(length=34, width=24, height=6),
+        pcs=1,
     )
     outcome = RateSearchStage(provider=DemoRateProvider(), resolver=StatedLocationResolver()).run(
         "R-DEMO", record, on_date=WHEN, cargo_is_liquid=False

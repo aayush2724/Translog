@@ -36,6 +36,7 @@ def request(**overrides: object) -> RateSearchJobRequest:
         "destination": "Manila",
         "weight_kg": 500.0,
         "dimensions_in": DIMS,
+        "pieces": 8,
         "search_date": date(2026, 9, 15),
         "commodity": "General Cargo",
     }
@@ -58,6 +59,7 @@ def test_identical_requests_share_one_job_identity() -> None:
         {"destination": "Cebu"},
         {"weight_kg": 501.0},
         {"dimensions_in": CargoDimensions(length=35, width=24, height=6)},
+        {"pieces": 9},
         {"search_date": date(2026, 9, 16)},
         {"commodity": "Pharmaceuticals"},
         {"cargo_is_liquid": True},
@@ -81,6 +83,19 @@ def test_the_request_rejects_a_nonpositive_weight() -> None:
         request(weight_kg=0)
 
 
+def test_the_request_rejects_a_missing_or_nonpositive_piece_count() -> None:
+    """Pieces is a required, positive business fact (VR: PCS_REQUIRED) — the
+    queue never carries a shipment without a real count."""
+    fields = request().model_dump()
+    del fields["pieces"]
+    with pytest.raises(ValidationError):
+        RateSearchJobRequest(**fields)
+    with pytest.raises(ValidationError):
+        request(pieces=0)
+    with pytest.raises(ValidationError):
+        request(pieces=-2)
+
+
 def test_commodity_is_required_and_never_defaulted() -> None:
     """VR-5's mirror: commodity is stated by the caller, or the request does
     not exist. No 'General Cargo' appears on anyone's behalf."""
@@ -101,6 +116,12 @@ def test_the_query_carries_stated_places_and_no_invented_code() -> None:
     assert query.destination.stated == "Manila"
     assert query.date == date(2026, 9, 15)
     assert query.commodity == "General Cargo"  # stated, never substituted
+
+
+def test_to_query_carries_the_piece_count() -> None:
+    """The client's stated piece count reaches the provider query verbatim, so
+    the WebCargo Pieces field reflects the real shipment."""
+    assert request(pieces=8).to_query().pieces == 8
 
 
 # --- RQ statuses become exactly four client-visible states ------------------------

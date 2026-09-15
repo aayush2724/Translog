@@ -764,6 +764,7 @@ class LiveSession:
         destination = record.destination
         weight = record.weight_kg
         dimensions = record.dimensions_in
+        pieces = record.pcs
         commodity = record.commodity
         ship_date = record.ship_date
         if (
@@ -771,6 +772,7 @@ class LiveSession:
             or not destination
             or weight is None
             or dimensions is None
+            or pieces is None
             or not commodity
             or ship_date is None
         ):
@@ -782,6 +784,7 @@ class LiveSession:
             destination=destination,
             weight_kg=weight,
             dimensions_in=dimensions,
+            pieces=pieces,
             search_date=ship_date,
             commodity=commodity,
             cargo_is_liquid=None,  # AMB-3: stated, never derived

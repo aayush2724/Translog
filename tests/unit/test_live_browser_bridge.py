@@ -198,6 +198,7 @@ def _completed_status(
         destination=RateLocationRef(stated="Bahrain"),
         weight_kg=500.0,
         dimensions_in=CargoDimensions(length=34, width=24, height=6),
+        pieces=1,
         date=date(2026, 9, 15),
         commodity="Engineering components",
     )
@@ -548,3 +549,36 @@ def test_the_synchronous_search_runs_on_the_clients_own_ship_date(
     request = _only(session)
     assert request.rates is not None
     assert request.rates.query.date == request.record.ship_date == date(2026, 9, 15)
+
+
+def test_the_job_request_carries_the_records_piece_count() -> None:
+    """`_job_request_from_record` threads `ShipmentRecord.pcs` into the queued
+    request (and thus the WebCargo Pieces field), so the search reflects the
+    client's real shipment rather than a single box."""
+    from translog_quote.domain.shipment import RequestSource, ShipmentRecord
+    from translog_quote.interface.web.live_session import LiveRequest
+
+    record = ShipmentRecord(
+        request_id="R-PCS",
+        source=RequestSource.EMAIL,
+        origin="Delhi, India",
+        destination="Singapore",
+        weight_kg=400.0,
+        dimensions_in=CargoDimensions(length=35, width=28, height=22),
+        pcs=8,
+        commodity="General Cargo",
+        ship_date=date(2026, 9, 30),
+    )
+    live_request = LiveRequest(
+        request_id="R-PCS",
+        client_address="client@example.com",
+        state=RequestState.VALIDATED,
+        record=record,
+        validation=None,  # type: ignore[arg-type]  # unread by _job_request_from_record
+    )
+
+    job = LiveSession._job_request_from_record(live_request)
+
+    assert job.pieces == 8
+    assert job.origin == "Delhi, India"  # stated wording preserved, unresolved here
+    assert job.to_query().pieces == 8

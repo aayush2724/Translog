@@ -179,6 +179,14 @@ class RateQuery(BaseModel):
     destination: LocationRef
     weight_kg: float = Field(gt=0)
     dimensions_in: CargoDimensions
+    pieces: int = Field(gt=0)
+    """How many pieces the shipment is, as the client stated (VR: PCS_REQUIRED).
+
+    A provider search parameter: WebCargo's Pieces field multiplies the
+    per-piece ``dimensions_in`` into the shipment volume it charges against, so
+    the count is what makes volumetric (and therefore chargeable) weight
+    correct. Required and ``> 0``, mirroring ``weight_kg`` — a validated
+    shipment always has a positive piece count, and nothing here invents one."""
     date: date  # AMB-8: source unconfirmed
 
     commodity: str | None = None

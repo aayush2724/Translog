@@ -655,7 +655,7 @@ def run_rate_search(
 
     _fill_commodity(driver, query.commodity, timeout_seconds=navigation_timeout_seconds)
 
-    driver.fill(UNITS_INPUT, "1")
+    driver.fill(UNITS_INPUT, _figure(query.pieces))
     driver.fill(LENGTH_INPUT, _figure(query.dimensions_in.length))
     driver.fill(WIDTH_INPUT, _figure(query.dimensions_in.width))
     driver.fill(HEIGHT_INPUT, _figure(query.dimensions_in.height))

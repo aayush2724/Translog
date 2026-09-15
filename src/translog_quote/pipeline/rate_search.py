@@ -98,12 +98,15 @@ def build_query(
         raise ContractViolation("cannot search rates without a positive weight")
     if record.dimensions_in is None:
         raise ContractViolation("cannot search rates without dimensions")
+    if record.pcs is None or record.pcs <= 0:
+        raise ContractViolation("cannot search rates without a positive piece count")
 
     return RateQuery(
         origin=resolver.resolve(record.origin or ""),
         destination=resolver.resolve(record.destination or ""),
         weight_kg=record.weight_kg,
         dimensions_in=record.dimensions_in,
+        pieces=record.pcs,
         date=on_date,
     )
 

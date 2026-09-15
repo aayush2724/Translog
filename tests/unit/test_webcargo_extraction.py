@@ -45,6 +45,7 @@ QUERY = RateQuery(
     destination=LocationRef(stated="Manila"),
     weight_kg=500.0,
     dimensions_in=CargoDimensions(length=34, width=24, height=6),
+    pieces=8,
     date=date(2026, 9, 15),
     commodity="General Cargo",
 )
@@ -691,7 +692,9 @@ def test_the_flow_sets_units_dates_and_escapes_the_dropdown() -> None:
 
     assert ("fill", f"{pages.CALENDAR_INPUT}=15/09/2026") in driver.calls  # via the picker
     assert ("press", f"{pages.ORIGIN_INPUT}:Escape") in driver.calls
-    assert ("fill", f"{pages.UNITS_INPUT}=1") in driver.calls
+    # The WebCargo Pieces field carries the client's actual count (QUERY.pieces == 8),
+    # never a hardcoded "1" — the volumetric-weight basis depends on it.
+    assert ("fill", f"{pages.UNITS_INPUT}=8") in driver.calls
     assert ("fill", f"{pages.WEIGHT_INPUT}=500") in driver.calls
     assert ("option", "BLR - Bangalore") in driver.calls
     assert ("option", "MNL - Manila") in driver.calls

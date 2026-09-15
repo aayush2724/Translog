@@ -83,6 +83,11 @@ class RateSearchJobRequest(BaseModel):
     destination: str = Field(min_length=1)
     weight_kg: float = Field(gt=0)
     dimensions_in: CargoDimensions
+    pieces: int = Field(gt=0)
+    """The client's stated piece count (VR: PCS_REQUIRED), carried through so the
+    WebCargo Pieces field reflects the real shipment rather than a single box.
+    Required and ``> 0`` like ``weight_kg``: a validated record always has one,
+    and the queue never carries an invented default."""
     search_date: date
 
     commodity: str = Field(min_length=1)
@@ -116,6 +121,7 @@ class RateSearchJobRequest(BaseModel):
             destination=LocationRef(stated=self.destination),
             weight_kg=self.weight_kg,
             dimensions_in=self.dimensions_in,
+            pieces=self.pieces,
             date=self.search_date,
             commodity=self.commodity,
         )
