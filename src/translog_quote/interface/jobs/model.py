@@ -91,12 +91,19 @@ class RateSearchJobRequest(BaseModel):
     search_date: date
 
     commodity: str = Field(min_length=1)
-    """Required, with no default, mirroring VR-5: commodity is a business
-    fact the caller states. WebCargo's search form refuses to run without
-    one, and injecting "General Cargo" on the caller's behalf would be
-    business data nobody stated. The browser adapter selects the WebCargo
-    commodity option that matches this wording exactly — or fails the job
-    naming the mismatch, never guessing."""
+    """Required, with no default, mirroring VR-5: commodity is a business fact
+    the caller states. It is the search's *description* and travels to the
+    quotation as such — it is NO LONGER typed into WebCargo's controlled Goods
+    Type select (free text returned no options for every realistic enquiry).
+    The Goods Type is ``goods_type`` below, decided before enqueue."""
+
+    goods_type: str = Field(min_length=1)
+    """The exact WebCargo Goods Type label to select (e.g. "0000 - General
+    Cargo"). Decided in the web process before enqueue — by the reviewed General
+    Cargo rule or an operator pick — never derived from the free-text commodity
+    inside the adapter. Required and part of the idempotency key, so a different
+    goods type is a different job. The adapter selects this label exactly, or
+    fails the job naming the mismatch."""
 
     cargo_is_liquid: bool | None = None
     requires_door_delivery: bool = False
@@ -124,6 +131,7 @@ class RateSearchJobRequest(BaseModel):
             pieces=self.pieces,
             date=self.search_date,
             commodity=self.commodity,
+            goods_type=self.goods_type,
         )
 
 

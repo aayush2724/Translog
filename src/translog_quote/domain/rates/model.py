@@ -192,13 +192,18 @@ class RateQuery(BaseModel):
     commodity: str | None = None
     """The commodity the search runs under, as the caller stated it.
 
-    A provider search parameter, not an eligibility rule: WebCargo's search
-    form refuses to run without a commodity, so a query that will reach it
-    must carry one. The simulated providers ignore it. ``None`` means the
-    caller did not state one — and a provider that requires it then refuses
-    that request with the reason, never substitutes a default. VR-5 already
-    makes commodity a required business fact, so a validated shipment always
-    has one to state."""
+    The search's *description*, carried to the quotation — no longer typed into
+    WebCargo's controlled Goods Type select. The simulated providers ignore it.
+    ``None`` means the caller did not state one. VR-5 makes commodity a required
+    business fact, so a validated shipment always has one."""
+
+    goods_type: str | None = None
+    """The exact WebCargo Goods Type label to select, decided before enqueue.
+
+    A provider search parameter: the browser adapter selects this label exactly
+    and fails loudly if WebCargo does not offer it, never deriving it from the
+    free-text ``commodity``. ``None`` in the simulated/in-process flows, which
+    do not drive a Goods Type select."""
 
 
 class RateSearchResult(BaseModel):

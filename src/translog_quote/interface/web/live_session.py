@@ -32,6 +32,7 @@ demonstration exactly where it was.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -173,6 +174,24 @@ class LiveRequest:
     request stays where the state machine put it, so the next poll retries it
     for free once the cause is fixed.
     """
+
+    awaiting_goods_type: bool = False
+    """The goods-type rule could not decide General Cargo and no operator pick
+    applies: the request is held (state stays VALIDATED) for an operator to pick
+    an exact WebCargo Goods Type. A presentation hold, not a domain state —
+    re-derived from the record on every poll, like a location clarification."""
+
+    operator_goods_type: str | None = None
+    """An operator's chosen WebCargo Goods Type label, persisted so a restart
+    does not discard it. Applied only while ``operator_goods_type_fingerprint``
+    still matches the record's cargo facts."""
+    operator_goods_type_fingerprint: str | None = None
+    """The fingerprint of (commodity, cargo_type, is_chemical) the pick was made
+    against. If the record changes (e.g. a client reply) the fingerprint changes
+    and the pick is discarded — never applied to a different shipment."""
+    operator_goods_type_by: str | None = None
+    """The operator who picked ``operator_goods_type``, recorded on the audit
+    event when the search enqueues under their choice."""
 
     packet: ReviewPacket | None = None
     decision: ApprovalDecision | None = None
@@ -517,6 +536,90 @@ class LiveSession:
         bootstrap.commit_request(self._working, self._durable, request_id)
         return request
 
+    def decide_goods_type(self, request_id: str, *, goods_type: str, by: str) -> None:
+        """Record an operator's Goods Type pick for a held request.
+
+        Takes the operator identity exactly the way ``decide`` does — a named
+        person, no default. The label must be one the catalog offers (the
+        configured general-cargo label is always a member); anything else is
+        refused. The pick is persisted with a fingerprint of the record's cargo
+        facts, so a later poll enqueues under it (auditing source=operator, by)
+        and a restart applies it without asking again — unless the record has
+        since changed, when it is discarded.
+        """
+        from translog_quote.domain.goods_type import effective_catalog, record_fingerprint
+
+        who = by.strip()
+        if not who:
+            raise LiveSequenceError("A goods-type decision must be made by a named person.")
+        request = self.requests.get(request_id)
+        if request is None:
+            raise LiveSequenceError(f"There is no request {request_id}.")
+        goods = self._settings.goods_type
+        if goods_type not in effective_catalog(goods.catalog, goods.general_cargo_label):
+            raise LiveSequenceError(
+                f"{goods_type!r} is not a Goods Type an operator may pick for this desk."
+            )
+        record = request.record
+        fingerprint = record_fingerprint(
+            record.commodity or "", record.cargo_type, record.is_chemical
+        )
+        request.operator_goods_type = goods_type
+        request.operator_goods_type_fingerprint = fingerprint
+        request.operator_goods_type_by = who
+        request.awaiting_goods_type = False
+        self._persist_goods_type_pick(request_id, goods_type, fingerprint, who)
+
+    def _persist_goods_type_pick(
+        self, request_id: str, label: str, fingerprint: str, by: str
+    ) -> None:
+        """Write an operator's pick onto the stored request and commit it, so a
+        restart applies it. Best-effort on a request the store never had."""
+        stored = self._working.get_request(request_id)
+        if stored is None:
+            return
+        self._working.save_request(
+            stored.model_copy(
+                update={
+                    "operator_goods_type": label,
+                    "operator_goods_type_fingerprint": fingerprint,
+                    "operator_goods_type_by": by,
+                }
+            )
+        )
+        bootstrap.commit_request(self._working, self._durable, request_id)
+
+    def goods_type_hold_options(self) -> tuple[list[str], bool]:
+        """The catalog labels an operator may pick on a hold, and whether the
+        business has configured any beyond the always-present general-cargo
+        label. When not configured the UI shows 'goods-type catalog not
+        configured' rather than a one-option picker."""
+        from translog_quote.domain.goods_type import catalog_configured, effective_catalog
+
+        goods = self._settings.goods_type
+        configured = catalog_configured(goods.catalog, goods.general_cargo_label)
+        options = (
+            list(effective_catalog(goods.catalog, goods.general_cargo_label)) if configured else []
+        )
+        return options, configured
+
+    def _clear_goods_type_pick(self, request_id: str) -> None:
+        """Drop a persisted pick (a record change invalidated it), so it does not
+        re-appear — and re-discard — after a restart."""
+        stored = self._working.get_request(request_id)
+        if stored is None or stored.operator_goods_type is None:
+            return
+        self._working.save_request(
+            stored.model_copy(
+                update={
+                    "operator_goods_type": None,
+                    "operator_goods_type_fingerprint": None,
+                    "operator_goods_type_by": None,
+                }
+            )
+        )
+        bootstrap.commit_request(self._working, self._durable, request_id)
+
     def close(self) -> None:
         """Release the HTTP connections this session's collaborators hold.
 
@@ -718,8 +821,17 @@ class LiveSession:
         from redis.exceptions import RedisError
 
         if request.rate_job_id is None:
+            # Decide the WebCargo Goods Type BEFORE enqueue: the reviewed General
+            # Cargo rule, or an operator's persisted pick. If neither decides,
+            # hold for an operator — never a silent default, and never the
+            # client's free-text commodity typed into the controlled select.
+            goods_type, source = self._resolve_goods_type(request)
+            if goods_type is None:
+                request.awaiting_goods_type = True  # held; the operator picks
+                return
+            request.awaiting_goods_type = False
             try:
-                job = self._job_request_from_record(request)
+                job = self._job_request_from_record(request, goods_type=goods_type)
             except (ContractViolation, ValueError) as exc:
                 request.rate_failure = f"Could not build the rate-search request: {exc}"
                 _log.warning("Rate-search request invalid for %s: %s", request.request_id, exc)
@@ -732,6 +844,9 @@ class LiveSession:
                 request.rate_failure = "the rate-search queue is unavailable; retry shortly"
                 _log.warning("Could not enqueue rate search for %s: %s", request.request_id, exc)
                 return
+            self._emit_goods_type(
+                request.request_id, goods_type, source, by=request.operator_goods_type_by
+            )
             request.rate_job_id = job_id
             request.rate_failure = None
             return  # the first result arrives on a later poll
@@ -768,8 +883,9 @@ class LiveSession:
             else:
                 # Fail loudly and stay failed: the failed job is retained under
                 # its own TTL and is not auto re-enqueued, so a broken search
-                # does not hammer the single browser worker on every poll.
-                request.rate_failure = status.error or "the rate search failed"
+                # does not hammer the single browser worker on every poll. The
+                # operator sees a plain message, not the raw exception class.
+                request.rate_failure = _plain_failure(status.error)
         else:
             # QUEUED / STARTED: in flight. Clear any stale failure so a job the
             # worker REQUEUED after a session loss (it briefly showed FAILED, and
@@ -853,14 +969,66 @@ class LiveSession:
         request.rate_failure = None
         request.rate_job_id = None
 
+    def _resolve_goods_type(self, request: LiveRequest) -> tuple[str | None, str | None]:
+        """The Goods Type to search under, and its source, or ``(None, None)`` to
+        hold for an operator.
+
+        A persisted operator pick wins while its fingerprint still matches the
+        record's cargo facts; if the record has since changed the pick is
+        discarded (audited) and the rule re-decides. Otherwise the reviewed
+        General Cargo rule decides, or holds. Pure/deterministic — no I/O.
+        """
+        from translog_quote.domain.goods_type import decide_goods_type, record_fingerprint
+
+        record = request.record
+        commodity = record.commodity or ""
+        fingerprint = record_fingerprint(commodity, record.cargo_type, record.is_chemical)
+        if request.operator_goods_type is not None:
+            if request.operator_goods_type_fingerprint == fingerprint:
+                return request.operator_goods_type, "operator"
+            # The record changed since the operator picked: discard, re-hold.
+            self._emit_goods_type(request.request_id, request.operator_goods_type, "discarded")
+            request.operator_goods_type = None
+            request.operator_goods_type_fingerprint = None
+            request.operator_goods_type_by = None
+            self._clear_goods_type_pick(request.request_id)  # so it does not re-fire on restart
+        goods = self._settings.goods_type
+        decision = decide_goods_type(
+            commodity=commodity,
+            cargo_type=record.cargo_type,
+            is_chemical=record.is_chemical,
+            general_cargo_label=goods.general_cargo_label,
+            special_handling=goods.special_handling,
+        )
+        return decision.goods_type, decision.source
+
+    def _emit_goods_type(
+        self, request_id: str, goods_type: str, source: str | None, *, by: str | None = None
+    ) -> None:
+        """Record which Goods Type was chosen, by rule or operator, and by whom."""
+        from translog_quote.pipeline.audit import AuditEvent, AuditEventType
+
+        detail: dict[str, object] = {"goods_type": goods_type, "source": source}
+        if by:
+            detail["by"] = by
+        self.audit.record(
+            AuditEvent(
+                request_id=request_id,
+                event=AuditEventType.GOODS_TYPE_DECIDED,
+                at=self._clock.now(),
+                detail=detail,
+            )
+        )
+
     @staticmethod
-    def _job_request_from_record(request: LiveRequest) -> RateSearchJobRequest:
+    def _job_request_from_record(request: LiveRequest, *, goods_type: str) -> RateSearchJobRequest:
         """Build the queue request from a validated record's own fields.
 
         Every field is read from the canonical record — no invented value, and
-        the shipment date is the client's own (AMB-8). Missing any required
-        field raises, which the caller turns into a reported failure rather
-        than a queued job that the worker would only reject.
+        the shipment date is the client's own (AMB-8). The ``goods_type`` is the
+        already-decided exact WebCargo label (never derived here). Missing any
+        required field raises, which the caller turns into a reported failure
+        rather than a queued job that the worker would only reject.
         """
         record = request.record
         origin = record.origin
@@ -890,6 +1058,7 @@ class LiveSession:
             pieces=pieces,
             search_date=ship_date,
             commodity=commodity,
+            goods_type=goods_type,
             cargo_is_liquid=None,  # AMB-3: stated, never derived
             requires_door_delivery=record.delivery_type is DeliveryType.DOOR,
         )
@@ -1006,7 +1175,26 @@ class LiveSession:
                 and stored.state is not RequestState.RECEIVED
                 else None,
                 quotation_sent=stored.state is RequestState.QUOTATION_SENT,
+                # An operator's goods-type pick survives the restart; the next
+                # poll re-derives the decision (applying it while the fingerprint
+                # still matches) or re-holds. The hold itself is never persisted.
+                operator_goods_type=stored.operator_goods_type,
+                operator_goods_type_fingerprint=stored.operator_goods_type_fingerprint,
+                operator_goods_type_by=stored.operator_goods_type_by,
             )
+
+
+_CLASS_PREFIX = re.compile(r"^[A-Za-z][A-Za-z0-9_]*: ")
+
+
+def _plain_failure(error: str | None) -> str:
+    """A rate failure as an operator should read it: the message without the
+    leading exception-class name (e.g. 'PermanentFailure: WebCargo …' -> 'WebCargo
+    …'). The raw class stays in the worker logs; the dashboard shows plain text.
+    """
+    if not error:
+        return "the rate search failed"
+    return _CLASS_PREFIX.sub("", error, count=1)
 
 
 _RECORD_FIELDS: tuple[str, ...] = (

@@ -93,6 +93,26 @@ def test_a_malformed_payload_is_rejected_before_any_search() -> None:
     assert calls == []  # validation is the edge; nothing leaked past it
 
 
+def test_an_old_format_job_missing_only_goods_type_fails_with_a_plain_message() -> None:
+    """A job enqueued before the goods-type update (otherwise valid, only
+    goods_type absent) fails with a plain message the operator can read, not a
+    raw 'field required'. It is superseded by the dashboard's re-enqueue."""
+
+    class CountingProvider:
+        adapter_id = "counting"
+
+        def search(self, query: object) -> object:
+            raise AssertionError("an old-format job must not reach the provider")
+
+    worker_jobs.set_provider(CountingProvider())  # type: ignore[arg-type]
+
+    old = payload()  # a complete, current payload...
+    del old["goods_type"]  # ...made old-format by dropping only goods_type
+
+    with pytest.raises(PermanentFailure, match="queued before the goods-type update"):
+        worker_jobs.run_rate_search(old)
+
+
 def test_browser_mode_without_a_configured_url_refuses_loudly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

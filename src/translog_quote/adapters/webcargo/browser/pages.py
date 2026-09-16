@@ -526,34 +526,101 @@ def _fill_location(
     return chosen
 
 
-def _fill_commodity(driver: BrowserDriver, stated: str, *, timeout_seconds: float) -> str:
-    """Select the WebCargo commodity matching the caller's wording, exactly.
+def _await_exact_option(
+    driver: BrowserDriver, container: str, label: str, *, timeout_seconds: float
+) -> str | None:
+    """Poll the (debounced) option list until one equals ``label`` exactly.
 
-    The commodity select is the Goods Type AntD select; suggestions look
-    like "0000 - General Cargo". No match, no search — and never a default.
-
-    The AntD select keeps its inner search field hidden until the select is
-    opened, so the visible control is engaged first and the (now revealed)
-    scoped search field is waited for before anything is typed into it —
-    typing into a hidden field is what timed out the click before.
+    Exact equality on the trimmed text — NOT the substring match locations use.
+    The Goods Type is an exact WebCargo label decided before enqueue; anything
+    less than an exact match would be selecting a goods type nobody decided.
+    Returns the matched option, or ``None`` if none appears by the deadline.
     """
+    target = label.strip()
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        matches = [option for option in driver.option_texts(container) if option.strip() == target]
+        if len(matches) > 1:
+            # Defensive: an exact label offered twice must not be resolved by
+            # picking the first — refuse rather than guess which entry it is.
+            raise PermanentFailure(
+                f"WebCargo offered the Goods Type {label!r} more than once; refusing "
+                "as ambiguous rather than guessing which entry to select"
+            )
+        if matches:
+            return matches[0]
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(_OPTION_POLL_SECONDS)
+
+
+#: Reads the Goods Type select's *selected item* — the committed value — NOT the
+#: grey placeholder (WebCargo's placeholder text happens to be "General Cargo",
+#: which must never be mistaken for a selection). AntD renders a chosen value as
+#: `.ant-select-selection-item` and an empty select as
+#: `.ant-select-selection-placeholder`; this reads only the former, so nothing
+#: selected reads as "".
+_JS_GOODS_TYPE_SELECTED = """
+() => {
+  const sel = document.querySelector('[id^="goodsType"]');
+  if (!sel) return '';
+  const item = sel.querySelector('.ant-select-selection-item');
+  return item ? (item.getAttribute('title') || item.textContent || '').trim() : '';
+}
+"""
+
+
+def _selected_goods_type(driver: BrowserDriver) -> str:
+    """The Goods Type currently *selected* (committed), or "" if none — read from
+    the AntD selected item, never the grey placeholder."""
+    value = driver.evaluate(_JS_GOODS_TYPE_SELECTED)
+    return str(value).strip() if value else ""
+
+
+def _select_goods_type(
+    driver: BrowserDriver, label: str | None, *, timeout_seconds: float
+) -> str:
+    """Select the exact WebCargo Goods Type ``label`` decided before enqueue.
+
+    The Goods Type is the AntD select whose entries look like "0000 - General
+    Cargo". The client's free-text commodity is NEVER typed here — that returned
+    no options for every realistic enquiry. This types the decided label, waits
+    for an option equal to it, and selects it — or fails loudly naming the label,
+    so a config/catalog entry that WebCargo does not offer is caught, not guessed
+    around.
+
+    The AntD select keeps its inner search field hidden until opened, so the
+    visible control is engaged first and the revealed search field waited for
+    before anything is typed — typing into a hidden field timed the click out.
+    """
+    if not label or not label.strip():  # defensive; run_rate_search already guards
+        raise PermanentFailure("no Goods Type label to select")
     driver.click(COMMODITY_CONTROL)
     if not driver.wait_visible(COMMODITY_INPUT, timeout_seconds=timeout_seconds):
         raise PermanentFailure(
             "the WebCargo Goods Type search field never became visible after "
-            "opening the commodity select; the search cannot choose a commodity blind"
+            "opening the Goods Type select; the search cannot choose a Goods Type blind"
         )
-    driver.fill(COMMODITY_INPUT, stated)
-    try:
-        chosen = _choose_available_option(
-            driver, DROPDOWN_OPTION, stated, timeout_seconds=timeout_seconds
-        )
-    except LookupError as exc:
+    driver.fill(COMMODITY_INPUT, label)
+    chosen = _await_exact_option(driver, DROPDOWN_OPTION, label, timeout_seconds=timeout_seconds)
+    if chosen is None:
         raise PermanentFailure(
-            f"WebCargo offered no matching commodity option for {stated!r}; the "
-            f"search cannot run under a commodity nobody stated ({exc})"
-        ) from exc
+            f"WebCargo did not offer the Goods Type {label!r}; the configured label "
+            "must match a real WebCargo entry exactly "
+            "(check TRANSLOG_GOODS_TYPE__GENERAL_CARGO_LABEL and the catalog)"
+        )
     driver.click_option(DROPDOWN_OPTION, chosen)
+    # Verify the click registered: the SELECTED ITEM must now be the chosen
+    # label. A click that did not take leaves the grey placeholder showing
+    # (WebCargo's placeholder is literally "General Cargo"), which must never
+    # read as a successful selection.
+    selected = _selected_goods_type(driver)
+    if selected != chosen:
+        raise PermanentFailure(
+            f"the Goods Type {chosen!r} did not register as selected "
+            f"(the select still shows {selected or 'the placeholder'!r}); "
+            "the search will not run under an unconfirmed Goods Type"
+        )
     return chosen
 
 
@@ -640,6 +707,12 @@ def run_rate_search(
             "WebCargo requires a commodity and this request states none; "
             "commodity is business data the caller must supply (VR-5)"
         )
+    if not query.goods_type or not query.goods_type.strip():
+        raise PermanentFailure(
+            "the rate search reached the browser without a Goods Type; it is "
+            "decided before enqueue (the General Cargo rule or an operator pick) "
+            "and must never arrive blank"
+        )
 
     verify_authenticated(driver, base_url=base_url, timeout_seconds=navigation_timeout_seconds)
 
@@ -655,7 +728,7 @@ def run_rate_search(
 
     _fill_departure_date(driver, query.date, timeout_seconds=navigation_timeout_seconds)
 
-    _fill_commodity(driver, query.commodity, timeout_seconds=navigation_timeout_seconds)
+    _select_goods_type(driver, query.goods_type, timeout_seconds=navigation_timeout_seconds)
 
     driver.fill(UNITS_INPUT, _figure(query.pieces))
     driver.fill(LENGTH_INPUT, _figure(query.dimensions_in.length))

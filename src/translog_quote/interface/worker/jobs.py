@@ -57,7 +57,31 @@ def run_rate_search(payload: dict[str, Any]) -> dict[str, Any]:
     `GET /api/rate-search/{job_id}` hands back — the full accountability
     trail, not just a winner.
     """
-    request = RateSearchJobRequest.model_validate(payload)
+    from pydantic import ValidationError
+
+    try:
+        request = RateSearchJobRequest.model_validate(payload)
+    except ValidationError as exc:
+        # Mixed-version guard: a job enqueued before the goods-type update, now
+        # read by the new worker. If the ONLY problem is the missing goods_type
+        # (an otherwise-valid old-format payload), fail with a plain message —
+        # not a raw "field required". It is superseded automatically: after
+        # deploy the dashboard re-enqueues each request under a new idempotency
+        # key (goods_type changes the digest), so this orphaned job expires. A
+        # genuinely malformed payload still raises ValidationError. See the
+        # deploy-order runbook.
+        errors = exc.errors()
+        only_goods_type_missing = len(errors) == 1 and (
+            errors[0].get("loc") == ("goods_type",) and errors[0].get("type") == "missing"
+        )
+        if only_goods_type_missing:
+            from translog_quote.errors import PermanentFailure
+
+            raise PermanentFailure(
+                "This rate search was queued before the goods-type update and cannot "
+                "run; it will be re-submitted automatically."
+            ) from exc
+        raise
     provider = _resolve_provider()
 
     query = request.to_query()

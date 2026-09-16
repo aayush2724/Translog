@@ -39,6 +39,7 @@ def request(**overrides: object) -> RateSearchJobRequest:
         "pieces": 8,
         "search_date": date(2026, 9, 15),
         "commodity": "General Cargo",
+        "goods_type": "0000 - General Cargo",
     }
     base.update(overrides)
     return RateSearchJobRequest(**base)  # type: ignore[arg-type]
@@ -62,6 +63,7 @@ def test_identical_requests_share_one_job_identity() -> None:
         {"pieces": 9},
         {"search_date": date(2026, 9, 16)},
         {"commodity": "Pharmaceuticals"},
+        {"goods_type": "1234 - Machinery"},
         {"cargo_is_liquid": True},
         {"requires_door_delivery": True},
     ],
@@ -107,6 +109,17 @@ def test_commodity_is_required_and_never_defaulted() -> None:
         request(commodity="")
 
 
+def test_goods_type_is_required_and_never_defaulted() -> None:
+    """The Goods Type is decided before enqueue (rule or operator); the queue
+    never carries a blank one, and none is invented here."""
+    fields = request().model_dump()
+    del fields["goods_type"]
+    with pytest.raises(ValidationError):
+        RateSearchJobRequest(**fields)
+    with pytest.raises(ValidationError):
+        request(goods_type="")
+
+
 def test_the_query_carries_stated_places_and_no_invented_code() -> None:
     query = request().to_query()
 
@@ -116,6 +129,7 @@ def test_the_query_carries_stated_places_and_no_invented_code() -> None:
     assert query.destination.stated == "Manila"
     assert query.date == date(2026, 9, 15)
     assert query.commodity == "General Cargo"  # stated, never substituted
+    assert query.goods_type == "0000 - General Cargo"  # decided before enqueue
 
 
 def test_to_query_carries_the_piece_count() -> None:

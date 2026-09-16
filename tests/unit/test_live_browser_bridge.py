@@ -90,6 +90,13 @@ def _settings(mode: WebCargoMode) -> Settings:
                 }
             ),
             "webcargo": base.webcargo.model_copy(update={"mode": mode}),
+            # Enable the General Cargo rule (empty special-handling would hold
+            # every request for an operator). The fixture's cargo_type "Non-Haz"
+            # + is_chemical False + a benign commodity then resolves to General
+            # Cargo, so the bridge reaches the enqueue under test.
+            "goods_type": base.goods_type.model_copy(
+                update={"special_handling": ("battery", "lithium", "perishable")}
+            ),
         }
     )
 
@@ -593,8 +600,9 @@ def test_the_job_request_carries_the_records_piece_count() -> None:
         validation=None,  # type: ignore[arg-type]  # unread by _job_request_from_record
     )
 
-    job = LiveSession._job_request_from_record(live_request)
+    job = LiveSession._job_request_from_record(live_request, goods_type="0000 - General Cargo")
 
     assert job.pieces == 8
     assert job.origin == "Delhi, India"  # stated wording preserved, unresolved here
+    assert job.goods_type == "0000 - General Cargo"  # the decided label, carried verbatim
     assert job.to_query().pieces == 8

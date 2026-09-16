@@ -172,11 +172,29 @@ def _live_decide(session: LiveSession, body: dict[str, object]) -> None:
     )
 
 
+def _live_decide_goods_type(session: LiveSession, body: dict[str, object]) -> None:
+    """Record an operator's Goods Type pick for a held request.
+
+    Names the request, the chosen catalog label, and — exactly like
+    `quotation/decide` — the operator (`by`). The session refuses a label the
+    catalog does not offer and an unnamed operator; nothing here defaults either.
+    """
+    request_id = _str_or_none(body.get("request_id"))
+    if request_id is None:
+        raise LiveSequenceError("A goods-type decision must name the request it applies to.")
+    session.decide_goods_type(
+        request_id,
+        goods_type=str(body.get("goods_type", "")),
+        by=str(body.get("by", "")),
+    )
+
+
 #: Every live action a browser may take. A literal table, like the static one.
 _LIVE_ACTIONS: dict[str, Callable[[LiveSession, dict[str, object]], None]] = {
     "poll": _live_poll,
     "clarification/approve": _live_approve_clarification,
     "quotation/decide": _live_decide,
+    "goods-type/decide": _live_decide_goods_type,
 }
 
 

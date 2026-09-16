@@ -527,6 +527,7 @@ def test_the_live_surfaces_are_closed_whitelists() -> None:
         "poll",
         "clarification/approve",
         "quotation/decide",
+        "goods-type/decide",
     }
 
 

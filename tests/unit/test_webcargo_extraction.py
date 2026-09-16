@@ -47,7 +47,8 @@ QUERY = RateQuery(
     dimensions_in=CargoDimensions(length=34, width=24, height=6),
     pieces=8,
     date=date(2026, 9, 15),
-    commodity="General Cargo",
+    commodity="General Cargo",  # the description, no longer typed into Goods Type
+    goods_type="0000 - General Cargo",  # decided before enqueue; selected exactly
 )
 
 
@@ -388,21 +389,21 @@ def test_commodity_targets_the_goods_type_select_not_a_generic_field() -> None:
     assert ".ant-select" in pages.COMMODITY_CONTROL
 
     driver = FakeDriver(rows=rows_payload(1))
-    chosen = pages._fill_commodity(driver, "General Cargo", timeout_seconds=5)
+    chosen = pages._select_goods_type(driver, "0000 - General Cargo", timeout_seconds=5)
 
     assert chosen == "0000 - General Cargo"
     assert ("click", pages.COMMODITY_CONTROL) in driver.calls  # opened the select first
-    assert ("fill", f"{pages.COMMODITY_INPUT}=General Cargo") in driver.calls
+    assert ("fill", f"{pages.COMMODITY_INPUT}=0000 - General Cargo") in driver.calls
     # never touches origin/destination fields:
     assert all(pages.ORIGIN_INPUT not in detail for _, detail in driver.calls)
 
 
-def test_commodity_opens_the_control_before_using_the_hidden_search_field() -> None:
+def test_goods_type_opens_the_control_before_using_the_hidden_search_field() -> None:
     """The Goods Type search field is hidden until the select is opened, so the
     visible control must be engaged BEFORE any use of the search input."""
     driver = FakeDriver(rows=rows_payload(1))
 
-    pages._fill_commodity(driver, "General Cargo", timeout_seconds=5)
+    pages._select_goods_type(driver, "0000 - General Cargo", timeout_seconds=5)
 
     commodity_calls = [
         (kind, detail)
@@ -416,9 +417,9 @@ def test_commodity_opens_the_control_before_using_the_hidden_search_field() -> N
     )  # then the now-visible search field is typed into
 
 
-def test_commodity_refuses_when_the_search_field_never_becomes_visible() -> None:
+def test_goods_type_refuses_when_the_search_field_never_becomes_visible() -> None:
     """If opening the select does not reveal the search field, refuse — the
-    commodity is never guessed, skipped, or typed into a hidden field."""
+    Goods Type is never guessed, skipped, or typed into a hidden field."""
 
     class _NeverOpens(FakeDriver):
         def click(self, selector: str) -> None:  # opening has no effect here
@@ -427,31 +428,77 @@ def test_commodity_refuses_when_the_search_field_never_becomes_visible() -> None
     driver = _NeverOpens(rows=rows_payload(1))
 
     with pytest.raises(PermanentFailure, match="Goods Type"):
-        pages._fill_commodity(driver, "General Cargo", timeout_seconds=0.01)
+        pages._select_goods_type(driver, "0000 - General Cargo", timeout_seconds=0.01)
 
     # it never typed into the hidden field:
     assert all(not detail.startswith(f"{pages.COMMODITY_INPUT}=") for _, detail in driver.calls)
 
 
-def test_commodity_selects_the_matching_general_cargo_option() -> None:
+def test_goods_type_selects_the_exact_label() -> None:
     driver = FakeDriver(rows=rows_payload(1))
 
-    chosen = pages._fill_commodity(driver, "General Cargo", timeout_seconds=5)
+    chosen = pages._select_goods_type(driver, "0000 - General Cargo", timeout_seconds=5)
 
     assert chosen == "0000 - General Cargo"
-    assert ("option", "0000 - General Cargo") in driver.calls  # via the existing matcher
+    assert ("option", "0000 - General Cargo") in driver.calls
 
 
-def test_commodity_ambiguous_match_is_still_a_loud_refusal() -> None:
-    """Deterministic matching is unchanged: two "General Cargo" options refuse
-    rather than guess."""
+def test_goods_type_fails_loudly_when_the_label_is_not_offered() -> None:
+    """The adapter never derives or guesses: a label WebCargo does not offer is
+    a loud refusal naming it, not a fallback."""
     driver = FakeDriver(
         rows=rows_payload(1),
-        options={"General Cargo": ["0000 - General Cargo", "9999 - General Cargo (other)"]},
+        # WebCargo offers a different code; the exact configured label is absent.
+        options={"9999 - General Cargo (other)": ["9999 - General Cargo (other)"]},
     )
 
-    with pytest.raises(PermanentFailure, match="did not match exactly one"):
-        pages._fill_commodity(driver, "General Cargo", timeout_seconds=1)
+    with pytest.raises(PermanentFailure, match="did not offer the Goods Type"):
+        pages._select_goods_type(driver, "0000 - General Cargo", timeout_seconds=0.2)
+
+
+def test_goods_type_selects_only_the_exact_label_not_a_similar_one() -> None:
+    """Live case: the dropdown shows '0000 - General Cargo' and
+    '0000-90 - Vulnerable cargo'. Exact equality selects the former; the
+    Vulnerable entry is never matched or clicked."""
+    driver = FakeDriver(
+        rows=rows_payload(1),
+        options={
+            "0000 - General Cargo": ["0000 - General Cargo", "0000-90 - Vulnerable cargo"],
+        },
+    )
+
+    chosen = pages._select_goods_type(driver, "0000 - General Cargo", timeout_seconds=5)
+
+    assert chosen == "0000 - General Cargo"
+    assert ("option", "0000 - General Cargo") in driver.calls
+    assert ("option", "0000-90 - Vulnerable cargo") not in driver.calls  # never matched
+
+
+def test_the_grey_placeholder_is_not_treated_as_a_selection() -> None:
+    """WebCargo's placeholder text is literally 'General Cargo'. If the click
+    does not register (only the placeholder shows), the post-selection check
+    reads the AntD *selected item* — empty — not the placeholder, and refuses."""
+
+    class _ClickNeverCommits(FakeDriver):
+        def click_option(self, selector: str, text: str) -> None:
+            self.calls.append(("option", text))  # click issued; the item never commits
+
+    driver = _ClickNeverCommits(rows=rows_payload(1))
+
+    with pytest.raises(PermanentFailure, match="did not register as selected"):
+        pages._select_goods_type(driver, "0000 - General Cargo", timeout_seconds=5)
+
+
+def test_a_goods_type_offered_twice_is_a_loud_ambiguous_refusal() -> None:
+    """Defensive: the same exact label appearing twice is refused as ambiguous,
+    never resolved by picking the first."""
+    driver = FakeDriver(
+        rows=rows_payload(1),
+        options={"0000 - General Cargo": ["0000 - General Cargo", "0000 - General Cargo"]},
+    )
+
+    with pytest.raises(PermanentFailure, match="more than once"):
+        pages._select_goods_type(driver, "0000 - General Cargo", timeout_seconds=1)
 
 
 # --- the readonly AntD DatePicker interaction --------------------------------------
@@ -543,7 +590,8 @@ class FakeDriver:
         self.options = options or {
             "Bangalore": ["BLR - Bangalore"],
             "Manila": ["MNL - Manila"],
-            "General Cargo": ["0000 - General Cargo"],
+            # Goods Type is now typed and matched by the exact label:
+            "0000 - General Cargo": ["0000 - General Cargo"],
         }
         self.dimension_unit = dimension_unit
         self.weight_unit = weight_unit
@@ -556,6 +604,9 @@ class FakeDriver:
         self._date_pending: str | None = None
         # The Goods Type AntD select hides its inner search field until opened.
         self._commodity_open = False
+        # The AntD *selected item* (committed value); "" while only the grey
+        # placeholder shows. Clicking an option commits it (see click_option).
+        self._goods_type_selected = ""
 
     # -- protocol --------------------------------------------------------
 
@@ -593,6 +644,7 @@ class FakeDriver:
 
     def click_option(self, selector: str, text: str) -> None:
         self.calls.append(("option", text))
+        self._goods_type_selected = text  # the AntD selected item commits
 
     def evaluate(self, script: str, argument: object = None) -> object:
         if "departureDate" in script:  # _date_input_value read
@@ -611,6 +663,8 @@ class FakeDriver:
             return {"onResults": True, "settled": True, "loading": False, "empty": False}
         if "view_selector_radio_buttons" in script:  # _JS_ENSURE_FULL_LIST
             return {"ok": True, "how": "radio"}
+        if "selection-item" in script:  # _JS_GOODS_TYPE_SELECTED
+            return self._goods_type_selected
         if "lowest rates" in script:  # _JS_LOWEST_PHRASE
             return self.phrase
         if "captureLegs" in script:  # _JS_EXTRACT_ALL
@@ -732,17 +786,19 @@ def test_an_unknown_place_is_an_unresolved_location() -> None:
         search_with(driver)
 
 
-def test_an_ambiguous_commodity_is_a_refusal_naming_the_options() -> None:
+def test_a_goods_type_webcargo_does_not_offer_is_a_loud_refusal() -> None:
+    """End to end: the decided Goods Type label must exist in WebCargo's list.
+    An absent label is a loud refusal naming it — never a substitute or guess."""
     driver = FakeDriver(
         rows=rows_payload(1),
         options={
             "Bangalore": ["BLR - Bangalore"],
             "Manila": ["MNL - Manila"],
-            "General Cargo": ["0000 - General Cargo", "9999 - General Cargo (other)"],
+            "0000 - General Cargo": [],  # WebCargo does not offer the configured label
         },
     )
 
-    with pytest.raises(PermanentFailure, match="did not match exactly one"):
+    with pytest.raises(PermanentFailure, match="did not offer the Goods Type"):
         search_with(driver)
 
 

@@ -170,3 +170,49 @@ disclosed, simulated rates with no worker involved.
 **Render plan.** Requires the Starter plan and the persistent disk already in
 `render.yaml`. The Free tier has no disks and spins down when idle, which would
 drop durable approval state and stop the dashboard polling for completed jobs.
+
+## Deploying the goods-type update (required deploy order)
+
+The WebCargo Goods Type is now a controlled field decided **before enqueue**
+(the reviewed General Cargo rule or an operator pick), never the client's
+free-text commodity. `goods_type` became a **required** field on the queued job,
+so old and new formats must not cross. Deploy in this order:
+
+```
+1. systemctl --user stop translog-webcargo-worker     # no OLD worker reads NEW jobs
+2. merge/deploy                                        # Render redeploys the dashboard
+3. git pull && pip install -e '.[api,worker]'          # on the Fedora box
+4. systemctl --user start translog-webcargo-worker      # the NEW worker consumes NEW jobs
+```
+
+Stopping the worker first closes the only failure window (a *new-format* job read
+by an *old* worker rejects on the unknown field). **An old-format job still
+queued at deploy** (no `goods_type`) is read by the new worker and fails with a
+plain message — *"This rate search was queued before the goods-type update…"* —
+not a raw validation error, and never reaches WebCargo. It has **no effect**:
+after the dashboard restarts, each `VALIDATED` request **re-derives** its
+goods-type decision under the new rule (General Cargo, or an operator hold) and
+re-enqueues under a **new idempotency key** (goods_type changes the digest), so
+the orphaned old job is simply superseded and expires under its `failure_ttl`.
+
+### Goods-type configuration (JSON lists, empty by default)
+
+```
+TRANSLOG_GOODS_TYPE__GENERAL_CARGO_LABEL='0000 - General Cargo'   # confirm against the live dropdown
+TRANSLOG_GOODS_TYPE__CATALOG='["0000 - General Cargo", "1234 - Machinery"]'
+TRANSLOG_GOODS_TYPE__SPECIAL_HANDLING='["battery", "lithium", "perishable"]'
+```
+
+- `SPECIAL_HANDLING` **empty ⇒ the General Cargo rule is OFF**: every request
+  holds for an operator. The business enables the rule by populating it (a
+  reviewed starter set: battery, lithium, airbag, perfume, fresh, frozen,
+  chilled, perishable, pharma, medicine, vaccine, live, animal, gold, jewel,
+  valuable, dry ice, magnet, aerosol). Matching is whole-word/phrase on the
+  commodity — a false positive only routes to an operator (the safe direction).
+- `CATALOG` is the operator's pick list; the `GENERAL_CARGO_LABEL` is always a
+  member. An empty/unconfigured catalog shows "goods-type catalog not configured"
+  on the hold rather than an empty picker.
+- General Cargo is chosen automatically only when `cargo_type` normalises to a
+  reviewed accepted phrase (`general cargo`, `non hazardous`, `non haz`, and the
+  two combined phrasings), `is_chemical` is explicitly `False`, and no
+  special-handling word is on the commodity. Anything else holds.

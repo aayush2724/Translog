@@ -610,9 +610,50 @@ function sectionClarification(detail) {
   );
 }
 
+function goodsTypeHoldCard(detail) {
+  /* Held for an operator to pick a WebCargo Goods Type. The client's own cargo
+     facts are shown beside the catalog picker so the operator judges by what
+     the client said — the free-text commodity is the description, not a Goods
+     Type. */
+  const hold = detail.goods_type_hold;
+  const chemical = hold.is_chemical === null ? "not stated" : (hold.is_chemical ? "yes" : "no");
+  const facts = el("dl", { class: "kv" },
+    el("dt", null, "Commodity"), el("dd", null, hold.commodity || "—"),
+    el("dt", null, "Cargo type"), el("dd", null, hold.cargo_type || "—"),
+    el("dt", null, "Chemical"), el("dd", null, chemical));
+  if (!hold.catalog_configured) {
+    return card(
+      [el("h2", null, "Goods type — operator decision"), pill("HELD", "amber")],
+      el("p", null, "This shipment needs a WebCargo Goods Type chosen by an operator."),
+      facts,
+      el("p", { class: "muted small" },
+        "Goods-type catalog not configured — set TRANSLOG_GOODS_TYPE__CATALOG to a " +
+        "list of real WebCargo labels so an operator can pick one."));
+  }
+  const select = el("select", { class: "gt-select", "aria-label": "WebCargo Goods Type" },
+    ...hold.catalog.map((label) => el("option", { value: label }, label)));
+  const use = button("Use this goods type", "approve",
+    () => post("goods-type/decide", { goods_type: select.value, by: ui.approver }, "Recording goods type…"),
+    !canDecide());
+  return card(
+    [el("h2", null, "Goods type — operator decision"), pill("HELD", "amber")],
+    el("p", null,
+      "WebCargo needs a Goods Type from its controlled list. Pick the entry that " +
+      "matches this cargo — the client's free-text commodity is the description, " +
+      "not the Goods Type."),
+    facts,
+    el("div", { class: "decision-actions" }, approverField(use), select, use),
+    el("p", { class: "action-note" }, "Nothing is searched until you pick. A name is required."));
+}
+
 function sectionRates(detail) {
   const rates = detail.rates;
   if (!rates) {
+    /* Held for an operator Goods Type pick — shown before the "searching"
+       states, because until a Goods Type is chosen nothing is queued. */
+    if (detail.goods_type_hold) {
+      return goodsTypeHoldCard(detail);
+    }
     /* A queued WebCargo search is in flight (browser mode). Shown so the panel
        reads as working rather than stalled while the worker runs the search. */
     if (detail.rate_search_pending) {

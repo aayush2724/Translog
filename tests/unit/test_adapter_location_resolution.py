@@ -91,6 +91,7 @@ def test_queued_job_payload_keeps_the_clients_stated_locations() -> None:
         pieces=1,
         search_date=date(2026, 9, 25),
         commodity="General Cargo",
+        goods_type="0000 - General Cargo",
     )
     assert request.origin == "Delhi, India"
     assert request.destination == "Singapore"

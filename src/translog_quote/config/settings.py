@@ -11,7 +11,7 @@ import os
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_ENV_FILE = ".env"
@@ -299,6 +299,51 @@ class DemoSettings(BaseModel):
     """
 
 
+class GoodsTypeSettings(BaseModel):
+    """How a validated shipment's cargo becomes a WebCargo Goods Type.
+
+    WebCargo's Goods Type is a controlled dropdown; the client's free-text
+    commodity is never typed into it. Instead the web process decides an exact
+    WebCargo label before enqueue — the reviewed "General Cargo" label when the
+    cargo is unambiguously general/non-hazardous, otherwise an operator picks
+    one from the reviewed ``catalog``.
+
+    Both lists are JSON arrays of *exact WebCargo labels*, empty by default so
+    the business enables them deliberately:
+
+        TRANSLOG_GOODS_TYPE__CATALOG='["0000 - General Cargo", "1234 - Machinery"]'
+        TRANSLOG_GOODS_TYPE__SPECIAL_HANDLING='["battery", "lithium", "perishable"]'
+
+    ``special_handling`` is matched by normalised whole-word/phrase hits against
+    the commodity (a false positive only routes to an operator — the safe
+    direction). While it is EMPTY the General Cargo rule is OFF: every shipment
+    goes to an operator decision, never a silent default.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    general_cargo_label: str = "0000 - General Cargo"
+    """The exact WebCargo Goods Type label selected for general cargo. A config
+    value, not a hard-coded string, so the business can correct it against the
+    live dropdown without a code change; the adapter fails loudly if WebCargo
+    does not offer it. Confirm against the real Goods Type list before relying
+    on it."""
+
+    catalog: tuple[str, ...] = ()
+    """The exact WebCargo labels an operator may pick on a goods-type hold. The
+    configured ``general_cargo_label`` is always treated as a member. Empty (or
+    only the general-cargo label) means the hold reports 'goods-type catalog not
+    configured' rather than an empty picker."""
+
+    special_handling: tuple[str, ...] = ()
+    """Normalised words/phrases that force an operator decision (e.g. battery,
+    perishable). Empty disables the automatic General Cargo rule entirely. A
+    reviewed starter set for the business to consider (NOT enabled here):
+    battery, lithium, airbag, perfume, fresh, frozen, chilled, perishable,
+    pharma, medicine, vaccine, live, animal, gold, jewel, valuable, dry ice,
+    magnet, aerosol."""
+
+
 class Settings(BaseSettings):
     """Root settings. Nested sections use a double-underscore delimiter:
 
@@ -322,6 +367,7 @@ class Settings(BaseSettings):
     queue: QueueSettings = QueueSettings()
     gmail: GmailSettings = GmailSettings()
     demo: DemoSettings = DemoSettings()
+    goods_type: GoodsTypeSettings = GoodsTypeSettings()
 
 
 def load_settings(env_file: str | Path | None = None) -> Settings:

@@ -517,6 +517,22 @@ def _worker_notice(session: LiveSession, request: LiveRequest) -> str | None:
     return None
 
 
+def _goods_type_hold(session: LiveSession, request: LiveRequest) -> Json | None:
+    """When a request is held for an operator Goods Type pick: the client's own
+    cargo facts to judge by (commodity, cargo type, chemical status) and the
+    catalog to pick from — or a note that the catalog is not configured."""
+    if not request.awaiting_goods_type:
+        return None
+    options, configured = session.goods_type_hold_options()
+    return {
+        "commodity": request.record.commodity,
+        "cargo_type": request.record.cargo_type,
+        "is_chemical": request.record.is_chemical,
+        "catalog": options,
+        "catalog_configured": configured,
+    }
+
+
 def request_summary(session: LiveSession, request: LiveRequest) -> Json:
     """One dashboard row.
 
@@ -568,6 +584,8 @@ def request_summary(session: LiveSession, request: LiveRequest) -> Json:
         # When that search is queued but no worker is draining it, say so instead
         # of leaving the request "pending" forever. None unless it applies.
         "worker_notice": _worker_notice(session, request),
+        # Held for an operator to pick a WebCargo Goods Type. None unless it applies.
+        "goods_type_hold": _goods_type_hold(session, request),
         "manual_review_notes": list(request.manual_review_notes),
         "waiting_replies": len(request.waiting_replies),
         "awaiting_decision": request.awaiting_quotation_decision,
@@ -597,6 +615,7 @@ def request_detail(session: LiveSession, request: LiveRequest) -> Json:
         "rate_failure": request.rate_failure,
         "rate_search_pending": request.rate_search_pending,
         "worker_notice": _worker_notice(session, request),
+        "goods_type_hold": _goods_type_hold(session, request),
         "manual_review_notes": list(request.manual_review_notes),
         "validation": validation_json(request.validation),
         "clarification": None

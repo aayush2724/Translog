@@ -99,3 +99,15 @@ class QuotationRequest(BaseModel):
     state: RequestState
     record: ShipmentRecord
     client_address: str
+
+    operator_goods_type: str | None = None
+    """An operator's chosen WebCargo Goods Type label, persisted so a restart
+    applies it without asking again. Optional with a ``None`` default so a
+    request written before this field existed loads unchanged."""
+    operator_goods_type_fingerprint: str | None = None
+    """The fingerprint of (commodity, cargo_type, is_chemical) the pick was made
+    against; the pick is discarded if the record later changes. Optional/``None``
+    for the same backward-load reason."""
+    operator_goods_type_by: str | None = None
+    """The operator who picked, persisted so the enqueue audit still names them
+    after a restart. Optional/``None`` for the same backward-load reason."""

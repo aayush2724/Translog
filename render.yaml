@@ -96,6 +96,24 @@ services:
       # mode never falls back to simulated data.
       - key: TRANSLOG_WEBCARGO__MODE
         value: browser
+      # WebCargo's Goods Type is a controlled field decided BEFORE enqueue (the
+      # reviewed General Cargo rule or an operator pick) — never the client's
+      # free-text commodity. Set GENERAL_CARGO_LABEL to the EXACT label from
+      # WebCargo's live Goods Type dropdown; the adapter fails loudly if it does
+      # not match, so a wrong value never silently mis-selects.
+      - key: TRANSLOG_GOODS_TYPE__GENERAL_CARGO_LABEL
+        value: "0000 - General Cargo"
+      # JSON arrays, EMPTY by default and filled in by the business. EMPTY
+      # SPECIAL_HANDLING means the automatic General Cargo rule is OFF: every
+      # request is held for an operator to pick a Goods Type. Populate CATALOG
+      # (exact WebCargo labels the operator may pick — General Cargo is always
+      # offered) and SPECIAL_HANDLING (reviewed words that force an operator
+      # decision, e.g. ["battery","lithium","perishable"]) to enable the rule and
+      # the picker. See docs/webcargo-operator-auth.md.
+      - key: TRANSLOG_GOODS_TYPE__CATALOG
+        value: "[]"
+      - key: TRANSLOG_GOODS_TYPE__SPECIAL_HANDLING
+        value: "[]"
       # On the persistent disk declared above, not in the ephemeral container
       # filesystem. A subdirectory of the mount rather than the mount itself,
       # so the disk's own lost+found sits beside the state rather than inside
