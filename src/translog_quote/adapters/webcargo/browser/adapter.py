@@ -22,15 +22,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from translog_quote.adapters.routing import StatedLocationResolver
 from translog_quote.adapters.webcargo.browser.mapper import ADAPTER_ID, map_records
 from translog_quote.adapters.webcargo.browser.pages import (
-    WebCargoSessionLost,
     is_authenticated,
     run_rate_search,
 )
 from translog_quote.adapters.webcargo.browser.reauth import run_operator_login
-from translog_quote.adapters.routing import StatedLocationResolver
 from translog_quote.domain.rates import RateSearchResult
+from translog_quote.errors import WebCargoSessionLost
 
 if TYPE_CHECKING:
     from collections.abc import Callable

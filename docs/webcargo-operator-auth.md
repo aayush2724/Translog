@@ -8,10 +8,10 @@ is the only way the profile becomes authenticated.
 
 ## Why it is manual
 
-The worker never logs in. On any job it either finds a live authenticated
-session in the profile or fails the job with `WebCargoSessionLost` and refuses
-every later job until an operator re-authenticates. Sign-in — including any
-MFA or CAPTCHA — is a person's action, performed here.
+The worker never logs in. It either finds a live authenticated session in the
+profile or, on a `WebCargoSessionLost`, stops for an operator to re-authenticate
+(requeuing any in-flight job first — see "When the session expires"). Sign-in —
+including any MFA or CAPTCHA — is a person's action, performed here.
 
 ## Prerequisites (one time per machine)
 
@@ -77,9 +77,41 @@ every job, and creates a fresh page per job.
 
 ## When the session expires
 
-A job will fail with a clear `WebCargoSessionLost` reason and every later job
-will fail fast (no repeated hammering of the login page). Recovery is exactly
-the step above: stop the worker, run `--login`, sign in, restart the worker.
+The worker never crash-loops on a lost session. What happens depends on when
+the loss is discovered:
+
+- **At startup** the auth probe is retried a few times first (a freshly
+  launched profile can miss the first navigation-timeout window — a cold-start
+  race, not a real loss). If it still finds no session, the worker records
+  `needs_login` in Redis (`translog:rate-search:worker-status`, TTL), releases
+  the browser and the single-worker lock, and **exits cleanly with code 78
+  (`EX_CONFIG`)**. The systemd unit sets `RestartPreventExitStatus=78`, so it is
+  **left stopped, not restarted** — no thrash.
+- **Mid-job** the failing job is **requeued at the front of the queue** (it does
+  *not* end permanently `FAILED`), and the worker then exits the same way
+  (status key + code 78). Because queued jobs carry no TTL, the search simply
+  waits.
+
+Either way the dashboard shows the waiting request as *"Rate-search worker
+needs sign-in — searches are queued until an operator re-authenticates"* rather
+than an indefinite pending state.
+
+**Recovery — the worker will NOT restart itself after code 78:**
+
+```bash
+# 1. Sign in again (opens the headed browser; a person completes WebCargo login):
+systemctl --user stop translog-webcargo-worker            # if it is somehow still up
+xvfb-run -a python -m translog_quote.interface.worker --login --env-file .env.worker
+#    …complete sign-in until the Search & Book form is visible, then Ctrl-C.
+# 2. Start the service again — required, because RestartPreventExitStatus=78
+#    means systemd did not restart it for you:
+systemctl --user start translog-webcargo-worker
+```
+
+A worker that starts with a valid session deletes the `needs_login` key, so the
+dashboard indicator returns to *online* on its next poll. (After editing the
+unit, `systemctl --user daemon-reload` once so `RestartPreventExitStatus` takes
+effect.)
 
 ## Deployment note — persistence is required
 

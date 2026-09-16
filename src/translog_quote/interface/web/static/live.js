@@ -441,6 +441,9 @@ function requestCard(request) {
       request.rate_failure
         ? el("p", { class: "waiting-note" }, `Rate search could not run: ${request.rate_failure}`)
         : null,
+      request.worker_notice
+        ? el("p", { class: "waiting-note" }, request.worker_notice)
+        : null,
       request.manual_review_notes && request.manual_review_notes.length
         ? el("p", { class: "waiting-note" },
             "Handed to manual review — the client's answer could not be used automatically.")
@@ -613,6 +616,16 @@ function sectionRates(detail) {
     /* A queued WebCargo search is in flight (browser mode). Shown so the panel
        reads as working rather than stalled while the worker runs the search. */
     if (detail.rate_search_pending) {
+      /* If no worker is draining the queue, say so instead of implying the
+         search is running — the server sends worker_notice only then. */
+      if (detail.worker_notice) {
+        return card(
+          [el("h2", null, "Rate search & selection"), pill("QUEUED", "amber")],
+          el("p", null, detail.worker_notice),
+          el("p", { class: "muted small" },
+            "The search is queued and will run once the worker is back. This " +
+            "panel updates on the next mailbox check."));
+      }
       return card(
         [el("h2", null, "Rate search & selection"), pill("SEARCHING", "blue")],
         el("p", null, "Searching WebCargo for live rates…"),

@@ -22,20 +22,17 @@
       </div>
 
       <h1 id="login-title" class="login-title">Sign in</h1>
-      <p class="login-lead">Enter your operator credentials to reach the quotation desk.</p>
+      <p class="login-lead">Enter the dashboard access key to reach the quotation desk.</p>
 
       <p id="login-error" class="login-error" role="alert" aria-live="assertive" hidden></p>
 
       <form id="login-form" novalidate>
         <label class="login-field">
-          <span class="login-label">Email or username</span>
-          <input id="login-username" name="username" type="text" autocomplete="username"
-                 autocapitalize="none" spellcheck="false" required>
-        </label>
-        <label class="login-field">
-          <span class="login-label">Password</span>
+          <span class="login-label">Dashboard access key</span>
           <input id="login-password" name="password" type="password"
-                 autocomplete="current-password" required>
+                 autocomplete="current-password" autocapitalize="none" spellcheck="false"
+                 autofocus required>
+          <span class="login-hint">The shared key for this desk — ask your administrator if you don’t have it.</span>
         </label>
         <button id="login-submit" class="login-submit" type="submit">Sign in</button>
       </form>

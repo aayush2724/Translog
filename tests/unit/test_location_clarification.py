@@ -354,6 +354,33 @@ def test_a_failed_job_that_still_resolves_keeps_the_rate_failure(
     assert request.state is RequestState.VALIDATED
 
 
+def test_a_requeued_job_clears_a_stale_rate_failure(
+    browser: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FAILED -> (worker requeues after a session loss) -> QUEUED: the dashboard
+    must not keep a stale failure once the job is back on the queue."""
+    spy = QueueSpy(
+        fetch_returns=JobStatus(
+            job_id="job-1", state=JobState.FAILED, result=None, error="the rate search failed"
+        )
+    )
+    _install_queue(monkeypatch, spy)
+    session = _session(
+        browser, source=_Source(()), extractor=_ScriptedExtractor(), sink=CollectingEmailSink()
+    )
+    request = _seed_validated(session, origin="Delhi (DEL)", destination="Dubai (DXB)")
+
+    session.poll()
+    assert request.rate_failure is not None  # genuine failure, shown to the operator
+
+    # The worker requeued the job; the next poll sees it QUEUED again.
+    spy._fetch_returns = JobStatus(job_id="job-1", state=JobState.QUEUED, result=None)  # noqa: SLF001
+    session.poll()
+
+    assert request.rate_failure is None  # cleared — no stale failure for a requeued job
+    assert request.rate_search_pending is True
+
+
 # --- Change 4 + adjustments: reply, hold, restart -------------------------------
 
 

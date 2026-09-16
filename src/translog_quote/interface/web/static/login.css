@@ -62,6 +62,13 @@
   outline-offset: 1px;
   border-color: var(--teal);
 }
+.login-hint {
+  display: block;
+  margin-top: 0.4rem;
+  font-size: 0.76rem;
+  line-height: 1.4;
+  color: var(--muted);
+}
 
 .login-submit {
   width: 100%;

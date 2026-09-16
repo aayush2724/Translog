@@ -58,7 +58,10 @@ def test_login_flag_runs_the_worker_with_interactive_auth_in_one_process(
     monkeypatch.setattr(
         worker_main,
         "run_worker",
-        lambda settings, *, interactive_login=False: seen.update(interactive=interactive_login),
+        lambda settings, *, interactive_login=False: (
+            seen.update(interactive=interactive_login),
+            0,
+        )[1],
     )
 
     assert entry.main(["--login"]) == 0
@@ -78,7 +81,10 @@ def test_without_login_the_worker_expects_an_already_authenticated_session(
     monkeypatch.setattr(
         worker_main,
         "run_worker",
-        lambda settings, *, interactive_login=False: seen.update(interactive=interactive_login),
+        lambda settings, *, interactive_login=False: (
+            seen.update(interactive=interactive_login),
+            0,
+        )[1],
     )
 
     assert entry.main([]) == 0

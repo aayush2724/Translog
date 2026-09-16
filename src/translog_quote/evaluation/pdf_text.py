@@ -11,8 +11,6 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-import pypdf
-
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -26,7 +24,15 @@ _BARE_MAIL_URL = re.compile(r"^https?://mail\.google\.com/\S*$", re.IGNORECASE)
 
 
 def read_pdf_text(path: Path) -> str:
-    """Extract a PDF's text, page order preserved."""
+    """Extract a PDF's text, page order preserved.
+
+    ``pypdf`` is imported here rather than at module load, so this module's pure
+    text-cleaning helpers stay importable on a checkout without the optional
+    ``eval`` extra installed — the convention every optional dependency in this
+    project follows. Only the harness that actually reads a PDF needs it.
+    """
+    import pypdf
+
     reader = pypdf.PdfReader(str(path))
     return "\n".join(page.extract_text() or "" for page in reader.pages)
 

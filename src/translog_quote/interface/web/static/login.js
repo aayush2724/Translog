@@ -1,10 +1,11 @@
 "use strict";
 
 /* Sign-in behaviour. The CSP forbids inline script, so this lives in its own
-   file served from the same origin. It POSTs the credentials as JSON (the
-   server's cross-site guard requires application/json), lets the server set the
-   HttpOnly session cookie, and on success navigates to the dashboard. It never
-   stores the password and never reads the cookie — that is the server's. */
+   file served from the same origin. It POSTs the dashboard access key as JSON
+   (the server's cross-site guard requires application/json), lets the server
+   set the HttpOnly session cookie, and on success navigates to the dashboard.
+   The key is the whole secret — there is no username — and this never stores it
+   nor reads the cookie; that is the server's. */
 
 (function () {
   const form = document.getElementById("login-form");
@@ -21,14 +22,13 @@
     errorEl.hidden = true;
     button.disabled = true;
 
-    const username = document.getElementById("login-username").value.trim();
     const password = document.getElementById("login-password").value;
 
     try {
       const response = await fetch("/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ password }),
       });
       if (response.ok) {
         /* The server has set the session cookie; go to the desk. */
@@ -38,7 +38,7 @@
       const payload = await response.json().catch(() => ({}));
       showError(
         payload.error === "invalid credentials"
-          ? "That password was not recognised. Check it and try again."
+          ? "That access key was not recognised. Check it and try again."
           : payload.error || "Sign-in failed. Please try again.",
       );
     } catch (err) {

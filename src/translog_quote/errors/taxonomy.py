@@ -20,6 +20,17 @@ class PermanentFailure(TranslogError):
     """
 
 
+class WebCargoSessionLost(PermanentFailure):
+    """The persistent WebCargo session no longer reaches the authenticated app.
+
+    Raised instead of any automatic login attempt: the operator
+    re-authentication command is the only path back, never the worker process.
+    Lives in the taxonomy (not the adapter) so the worker's application layer can
+    recognise it without importing the adapter — the layering rule that keeps
+    adapters reachable only through the composition root.
+    """
+
+
 class UnresolvedLocation(PermanentFailure):
     """A place the client named could not be resolved to a provider identifier.
 

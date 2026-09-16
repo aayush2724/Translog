@@ -22,6 +22,11 @@ services:
     plan: starter
     buildCommand: "pip install '.[api]'"
     startCommand: python -m translog_quote.interface.web --live
+    # Liveness only — never /health/ready. /health returns immediately and
+    # touches nothing external; /health/ready pings Upstash Redis (browser mode)
+    # and can take seconds when the broker is slow, so pointing the platform
+    # health check at it would let a slow Redis restart the whole web service.
+    healthCheckPath: /health
     # The demonstration's durable state. Without a disk Render's filesystem is
     # wiped on every deploy and every restart, and a request waiting on a client
     # reply — the one thing in this workflow that deliberately outlives the
@@ -82,10 +87,15 @@ services:
       - key: TRANSLOG_QUEUE__REDIS_URL
         sync: false
       # Rates stay simulated and disclosed. The real adapter refuses anyway.
-      # Flip to `browser` ONLY after the Fedora worker is live and the Redis URL
-      # above is set; browser mode enqueues real WebCargo jobs to that worker.
+      # browser mode: this dashboard ENQUEUES each rate search onto the shared
+      # Redis queue (TRANSLOG_QUEUE__REDIS_URL above) for the separately-run
+      # Fedora browser worker to run on live WebCargo, then polls the result. It
+      # runs no browser itself and needs no WebCargo credentials. It depends on
+      # the worker being live and the Redis URL being set; if the worker is
+      # offline the search stays queued (and the dashboard says so) — browser
+      # mode never falls back to simulated data.
       - key: TRANSLOG_WEBCARGO__MODE
-        value: demo
+        value: browser
       # On the persistent disk declared above, not in the ephemeral container
       # filesystem. A subdirectory of the mount rather than the mount itself,
       # so the disk's own lost+found sits beside the state rather than inside

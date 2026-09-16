@@ -1,0 +1,47 @@
+# Committed copy of the live browser-worker systemd unit, kept in the repo so the
+# deployed configuration is reviewable and version-controlled. The running unit
+# lives at ~/.config/systemd/user/translog-webcargo-worker.service on the Fedora
+# host; keep the two in sync. Paths below are host-specific (the operator's home
+# and venv) — adjust WorkingDirectory / ExecStart when deploying elsewhere.
+#
+# Install/update:
+#   cp deploy/translog-worker.service ~/.config/systemd/user/translog-webcargo-worker.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now translog-webcargo-worker
+[Unit]
+Description=Translog WebCargo browser rate-search worker (single, headed Chromium under Xvfb)
+Documentation=file:/home/aayush27/Documents/Projects/Translog/docs/webcargo-operator-auth.md
+After=default.target
+# A worker whose WebCargo session needs an operator sign-in now exits cleanly
+# with code 78 (EX_CONFIG); RestartPreventExitStatus=78 below stops systemd
+# restarting it, so it lands in a visible stopped state rather than thrashing.
+# The burst cap stays as a backstop for any other repeated failure.
+StartLimitIntervalSec=900
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/home/aayush27/Documents/Projects/Translog
+# .env.worker (git-ignored, mode 0600) carries the Upstash + WebCargo config.
+# The unit names the file but embeds NO secret itself.
+ExecStart=/usr/bin/xvfb-run -a --server-args="-screen 0 1280x720x24" /home/aayush27/Documents/Projects/Translog/.venv/bin/python -m translog_quote.interface.worker --env-file .env.worker
+
+# One job at a time; on failure restart, but only after the 120s Redis worker-lock
+# TTL has lapsed, so the successor can actually acquire the single-worker lock.
+Restart=always
+RestartSec=130
+# Exit 78 (EX_CONFIG) means "the WebCargo session needs an operator --login" —
+# a state the process cannot fix by restarting. Leave it stopped; recovery is
+# `--login` then `systemctl --user start translog-webcargo-worker`.
+RestartPreventExitStatus=78
+
+# Graceful stop: default KillMode=control-group delivers the signal to the python
+# worker directly (not only xvfb-run), so RQ warm-shutdown runs and the finally
+# block closes Chromium and RELEASES the lock. SIGINT is the warm path.
+KillSignal=SIGINT
+TimeoutStopSec=200
+
+SyslogIdentifier=translog-webcargo-worker
+
+[Install]
+WantedBy=default.target

@@ -72,12 +72,17 @@ _LIVE_FILES: dict[str, tuple[str, str]] = {
 #: The sign-in surface. Served WITHOUT authentication — it is how an operator
 #: obtains the session in the first place — so it is a third table checked
 #: before the auth gate, never merged into the gated ones. It carries no client
-#: data: a static form, its stylesheet and script, and the shared brand icon.
-#: Every asset here is committed source; the CSP forbids inline script/style, so
-#: the page's behaviour lives in `/login.js`, served from this same origin.
+#: data: a static form, its stylesheets and script, and the shared brand icon.
+#: `/app.css` is included because the login page reuses the dashboard's design
+#: tokens and brand styles from it — WITHOUT it, every `var(--…)` on the page
+#: falls back to nothing and the sign-in card renders unstyled. It is pure
+#: public styling (committed source, no client data), so exposing it pre-auth is
+#: safe. Every asset here is committed source; the CSP forbids inline
+#: script/style, so the page's behaviour lives in `/login.js`, same origin.
 _PUBLIC_FILES: dict[str, tuple[str, str]] = {
     "/login": ("login.html", "text/html; charset=utf-8"),
     "/login.html": ("login.html", "text/html; charset=utf-8"),
+    "/app.css": ("app.css", "text/css; charset=utf-8"),
     "/login.css": ("login.css", "text/css; charset=utf-8"),
     "/login.js": ("login.js", "text/javascript; charset=utf-8"),
     "/favicon.svg": ("favicon.svg", "image/svg+xml"),
@@ -292,13 +297,17 @@ def _dashboard_token() -> str | None:
 
 
 def _password_matches(submitted: str, token: str) -> bool:
-    """Whether a submitted sign-in password equals the token, in constant time.
+    """Whether a submitted access key equals the token, in constant time.
 
-    The username is cosmetic (the token is the whole secret), so only the
-    password is checked, and `compare_digest` keeps a wrong one from leaking a
-    timing signal. The credential is never logged.
+    The username is cosmetic (the token is the whole secret), so only the key is
+    checked, and `compare_digest` keeps a wrong one from leaking a timing signal.
+    The credential is never logged. The submitted key is `.strip()`-ed to match
+    the env token, which `_dashboard_token()` already strips — so a key pasted
+    with a trailing newline or stray space (the common copy-paste footgun) still
+    matches, and no legitimate key is rejected (the real secret can carry no
+    surrounding whitespace, having been stripped on the env side).
     """
-    return hmac.compare_digest(submitted.encode("utf-8"), token.encode("utf-8"))
+    return hmac.compare_digest(submitted.strip().encode("utf-8"), token.encode("utf-8"))
 
 
 def _sign(payload: str, token: str) -> str:

@@ -56,10 +56,12 @@ from translog_quote.errors import (
 )
 from translog_quote.interface.demo.gmail_thread import _request_id_for
 from translog_quote.interface.jobs import (
+    WORKER_UNKNOWN,
     JobState,
     RateSearchJobRequest,
     enqueue_rate_search,
     fetch_job_status,
+    worker_liveness,
 )
 from translog_quote.interface.web.audit_log import JsonFileAuditLog
 from translog_quote.interface.web.demonstration import DemonstrationFile
@@ -336,6 +338,9 @@ class LiveSession:
         next success — so an unreachable mailbox is visible, not silent."""
 
         self.requests: dict[str, LiveRequest] = {}
+        #: Browser-worker liveness, refreshed each poll so the render path reads a
+        #: cached value and never blocks on Redis. "unknown" until the first poll.
+        self.worker_status: str = WORKER_UNKNOWN
         self._restore()
 
     # ------------------------------------------------------------- actions --
@@ -412,6 +417,12 @@ class LiveSession:
                 self._routed.add(email.message_id)
 
         self._search_rates_for_validated()
+        # Refresh the browser-worker liveness here, on the poll path, so the
+        # frequent render path (GET /api/live/state) reads a cached value and
+        # never makes a Redis round-trip. Browser mode only; bounded and total
+        # (returns "unknown" on any Redis error, never raises).
+        if self._settings.webcargo.mode is WebCargoMode.BROWSER:
+            self.worker_status = worker_liveness(self._settings)
         self.last_poll_at = self._clock.now()
 
     def start_demonstration(self) -> None:
@@ -759,7 +770,12 @@ class LiveSession:
                 # its own TTL and is not auto re-enqueued, so a broken search
                 # does not hammer the single browser worker on every poll.
                 request.rate_failure = status.error or "the rate search failed"
-        # QUEUED / PROCESSING: still in flight — reported as pending, nothing to do.
+        else:
+            # QUEUED / STARTED: in flight. Clear any stale failure so a job the
+            # worker REQUEUED after a session loss (it briefly showed FAILED, and
+            # is now QUEUED again) reads as pending, not failed — a request must
+            # never keep a stale failure for a job that is back on the queue.
+            request.rate_failure = None
 
     def _apply_rate_outcome(self, request: LiveRequest, outcome: RateSearchOutcome) -> None:
         """Record a finished rate outcome and build the approval packet if any."""

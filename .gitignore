@@ -36,3 +36,6 @@ evaluation/client_cases/
 evaluation/text/
 evaluation/reports/
 evaluation/ground_truth.json
+
+# Personal documentation
+docs/ai/

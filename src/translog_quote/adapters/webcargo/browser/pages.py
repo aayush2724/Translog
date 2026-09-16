@@ -28,7 +28,12 @@ from translog_quote.adapters.webcargo.browser.records import (
     WebCargoRateRecord,
     WebCargoResultSet,
 )
-from translog_quote.errors import ContractViolation, PermanentFailure, UnresolvedLocation
+from translog_quote.errors import (
+    ContractViolation,
+    PermanentFailure,
+    UnresolvedLocation,
+    WebCargoSessionLost,
+)
 
 if TYPE_CHECKING:
     from datetime import date
@@ -115,12 +120,9 @@ DATE_TAB = "ul.ant-list-items li.ant-list-item"
 AUTHENTICATED_MARKER = ORIGIN_INPUT
 
 
-class WebCargoSessionLost(PermanentFailure):
-    """The persistent session no longer reaches the authenticated app.
-
-    Raised instead of any login attempt. The operator re-authentication
-    command is the only path back — never this process.
-    """
+#: ``WebCargoSessionLost`` now lives in ``translog_quote.errors`` (imported
+#: above and re-exported from this module for existing callers), so the worker's
+#: application layer can recognise it without importing this adapter.
 
 
 # --- in-page scripts ---------------------------------------------------------------

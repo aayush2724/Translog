@@ -23,7 +23,6 @@ from translog_quote.adapters.webcargo.browser.manager import (
 )
 from translog_quote.adapters.webcargo.browser.pages import (
     BrowserDriver,
-    WebCargoSessionLost,
     run_rate_search,
 )
 from translog_quote.adapters.webcargo.browser.records import (
@@ -31,6 +30,7 @@ from translog_quote.adapters.webcargo.browser.records import (
     WebCargoRateRecord,
     WebCargoResultSet,
 )
+from translog_quote.errors import WebCargoSessionLost
 
 __all__ = [
     "BrowserDriver",

@@ -46,6 +46,13 @@ worker = [
     "rq>=1.16",
     "playwright>=1.47",
 ]
+# The model-extraction evaluation harness: it reads labelled client PDFs and
+# scores extraction output against them. Dev/eval tooling only — never imported
+# by the runtime, and its one `pypdf` use is lazy, so a core checkout still
+# imports the module (only `read_pdf_text` needs the extra installed).
+eval = [
+    "pypdf>=4.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/translog_quote"]
@@ -75,11 +82,11 @@ warn_unreachable = true
 module = ["google_auth_oauthlib.*"]
 ignore_missing_imports = true
 
-# The API/worker optional dependencies, absent from a core install for the
+# The API/worker/eval optional dependencies, absent from a core install for the
 # same reason. All runtime imports of these are lazy; their absence must not
 # fail a type check of code paths that never reach them.
 [[tool.mypy.overrides]]
-module = ["fastapi.*", "uvicorn.*", "redis.*", "rq.*", "playwright.*"]
+module = ["fastapi.*", "uvicorn.*", "redis.*", "rq.*", "playwright.*", "pypdf.*"]
 ignore_missing_imports = true
 
 [tool.ruff]

@@ -337,6 +337,26 @@ def test_the_login_page_is_reachable_without_a_session(
     assert "www-authenticate" not in headers
 
 
+def test_the_sign_in_page_assets_load_without_a_session(
+    live_server: DemoServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sign-in card borrows the dashboard's design tokens and brand styles
+    from /app.css, so that stylesheet — with /login.css and /login.js — must be
+    served BEFORE a session exists. If /app.css were gated, every `var(--…)` on
+    the page would fall back to nothing and the card would render unstyled."""
+    monkeypatch.setenv(DASHBOARD_TOKEN_VAR, "s3cret")
+
+    for path, kind in (
+        ("/app.css", "text/css"),
+        ("/login.css", "text/css"),
+        ("/login.js", "javascript"),
+    ):
+        status, headers = get(live_server, path=path)
+        assert status == 200, path
+        assert kind in headers.get("content-type", ""), path
+        assert "www-authenticate" not in headers
+
+
 def test_an_unauthenticated_page_navigation_redirects_to_login(
     live_server: DemoServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -391,6 +411,20 @@ def test_valid_login_sets_a_signed_session_cookie(
     assert "Path=/" in set_cookie
     assert "Max-Age=" in set_cookie  # a finite expiry
     assert "www-authenticate" not in headers
+
+
+def test_an_access_key_with_stray_whitespace_still_authenticates(
+    live_server: DemoServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Copy-paste footgun: a key pasted with a leading/trailing space or newline
+    must still match. The env token is already stripped, so the submitted key is
+    stripped too — no legitimate key is rejected, and a padded paste works."""
+    monkeypatch.setenv(DASHBOARD_TOKEN_VAR, "s3cret")
+
+    status, headers = login(live_server, password="  s3cret\n")
+
+    assert status == 200
+    assert headers.get("set-cookie", "").startswith(f"{_SESSION_COOKIE}=")
 
 
 def test_a_valid_cookie_authenticates_subsequent_requests(

@@ -495,7 +495,29 @@ def _headline(request: LiveRequest) -> str:
 _UNTOUCHED = frozenset({RequestState.RECEIVED, RequestState.EXTRACTED, RequestState.NEEDS_INFO})
 
 
-def request_summary(request: LiveRequest) -> Json:
+def _worker_notice(session: LiveSession, request: LiveRequest) -> str | None:
+    """A note for a *pending* browser search when the worker is not running.
+
+    Only for a request whose search is queued (`rate_search_pending`), and only
+    for the states that warrant a claim: `offline` (no worker draining the
+    queue) and `needs_login` (a worker stopped, awaiting operator sign-in).
+    `online` needs no note and `unknown` must never claim 'offline', so both add
+    nothing. The liveness is the value cached on the last poll — no Redis here."""
+    from translog_quote.interface.jobs import WORKER_NEEDS_LOGIN, WORKER_OFFLINE
+
+    if not request.rate_search_pending:
+        return None
+    if session.worker_status == WORKER_OFFLINE:
+        return "Rate-search worker offline — searches are queued, not running."
+    if session.worker_status == WORKER_NEEDS_LOGIN:
+        return (
+            "Rate-search worker needs sign-in — searches are queued until an "
+            "operator re-authenticates."
+        )
+    return None
+
+
+def request_summary(session: LiveSession, request: LiveRequest) -> Json:
     """One dashboard row.
 
     Carries enough to be useful before extraction has filled anything in: the
@@ -543,6 +565,9 @@ def request_summary(request: LiveRequest) -> Json:
         # A queued WebCargo search is in flight (browser mode): the panel shows
         # "Searching…" rather than an empty rate section that reads as a stall.
         "rate_search_pending": request.rate_search_pending,
+        # When that search is queued but no worker is draining it, say so instead
+        # of leaving the request "pending" forever. None unless it applies.
+        "worker_notice": _worker_notice(session, request),
         "manual_review_notes": list(request.manual_review_notes),
         "waiting_replies": len(request.waiting_replies),
         "awaiting_decision": request.awaiting_quotation_decision,
@@ -571,6 +596,7 @@ def request_detail(session: LiveSession, request: LiveRequest) -> Json:
         "shipment": shipment_json(request),
         "rate_failure": request.rate_failure,
         "rate_search_pending": request.rate_search_pending,
+        "worker_notice": _worker_notice(session, request),
         "manual_review_notes": list(request.manual_review_notes),
         "validation": validation_json(request.validation),
         "clarification": None
@@ -646,7 +672,7 @@ def snapshot(session: LiveSession, *, selected: str | None = None) -> Json:
             },
             "approver_address": session.approver_address,
         },
-        "requests": [request_summary(request) for request in active],
+        "requests": [request_summary(session, request) for request in active],
         "selected": None if chosen is None else request_detail(session, chosen),
         "audit": audit_json(session.audit.events),
         "poll": {

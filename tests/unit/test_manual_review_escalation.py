@@ -167,7 +167,7 @@ def test_the_operator_sees_why(settings: Settings) -> None:
     assert request.manual_review_notes == (TWO_SIZES_NOTE,)  # type: ignore[attr-defined]
     detail = request_detail(session, request)  # type: ignore[arg-type]
     assert detail["manual_review_notes"] == [TWO_SIZES_NOTE]
-    summary = request_summary(request)  # type: ignore[arg-type]
+    summary = request_summary(session, request)  # type: ignore[arg-type]
     assert summary["status"]["label"] == "MANUAL REVIEW"  # type: ignore[index]
 
 

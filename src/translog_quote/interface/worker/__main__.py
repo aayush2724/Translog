@@ -45,8 +45,10 @@ def main(argv: list[str] | None = None) -> int:
 
     from translog_quote.interface.worker.main import run_worker
 
-    run_worker(settings, interactive_login=args.login)
-    return 0
+    # The worker's exit code carries meaning: EXIT_NEEDS_LOGIN (78) tells systemd
+    # (RestartPreventExitStatus=78) to leave it stopped until an operator runs
+    # --login and starts it again, rather than restart-looping.
+    return run_worker(settings, interactive_login=args.login)
 
 
 if __name__ == "__main__":
