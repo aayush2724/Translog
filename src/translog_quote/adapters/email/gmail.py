@@ -33,7 +33,7 @@ import random
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email.utils import parseaddr, parsedate_to_datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -71,6 +71,17 @@ _RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 #: Gmail message ids as the API actually issues them. Anything else in an id
 #: position is a malformed response and must not reach URL construction.
 _GMAIL_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+
+#: How many message ids one ``messages.list`` page asks for on the date-bounded
+#: operations path. Ids only, so a page is cheap; larger pages mean fewer round
+#: trips draining a backlog.
+_LIST_PAGE_SIZE = 100
+
+#: A safety ceiling on how many ids the date-bounded listing will page through
+#: in one poll, so an absurd window (a watermark set far in the past) cannot
+#: list the entire mailbox. The oldest are processed first, so anything beyond
+#: this is simply picked up on later polls as the watermark advances.
+_LIST_ID_CAP = 2000
 
 
 class _Throttled(TransientFailure):
@@ -548,6 +559,15 @@ def parse_gmail_message(message: dict[str, Any]) -> RawEmail:
     )
 
 
+def _ref_id(ref: object) -> str:
+    """The message id from one ``messages.list`` entry, validated. A malformed
+    entry is a broken response, not something to skip past silently."""
+    gmail_id = ref.get("id") if isinstance(ref, dict) else None
+    if not isinstance(gmail_id, str) or not _GMAIL_ID.match(gmail_id):
+        raise ContractViolation("Gmail messages.list entry has no usable id")
+    return gmail_id
+
+
 @dataclass(frozen=True)
 class GmailMessageMetadata:
     """Provider-side identifiers for one ingested message. Adapter metadata,
@@ -578,6 +598,8 @@ class GmailEmailSource:
         mailbox_address: str,
         query: str = "in:inbox",
         max_results: int = 1,
+        overlap_seconds: float = 0.0,
+        is_internal: Callable[[RawEmail], bool] | None = None,
         sent_by_us: Callable[[], Collection[str]] | None = None,
     ) -> None:
         if not mailbox_address:
@@ -588,6 +610,8 @@ class GmailEmailSource:
         self._mailbox_address = mailbox_address
         self._query = query
         self._max_results = max_results
+        self._overlap_seconds = max(0.0, overlap_seconds)
+        self._is_internal = is_internal
         self._sent_by_us_ids = sent_by_us
         self._metadata: dict[str, GmailMessageMetadata] = {}
 
@@ -606,9 +630,27 @@ class GmailEmailSource:
         """Gmail's own ids for a message this source returned, if any."""
         return self._metadata.get(message_id)
 
-    def fetch_new(self) -> tuple[RawEmail, ...]:
-        self._verify_mailbox()
+    def fetch_new(self, *, since: datetime | None = None) -> tuple[RawEmail, ...]:
+        """Inbound client messages to consider.
 
+        ``since is None`` keeps the original behaviour: one ``messages.list``
+        page, newest-first, at most ``max_results`` messages — what
+        demonstration mode and the one-message tests expect.
+
+        ``since`` set is the operations path: read ``<query> after:<since -
+        overlap>``, page the id list to the end (ids only, cheap), then fully
+        fetch **oldest-first** up to ``max_results`` *client* messages. A window
+        holding more than the budget is drained across successive polls; a
+        restart resumes from the persisted watermark, so mail that arrived
+        during a deploy is read exactly once (the durable already-processed
+        check upstream drops anything the overlap re-lists)."""
+        self._verify_mailbox()
+        if since is None:
+            return self._fetch_newest_slice()
+        return self._fetch_since(since)
+
+    def _fetch_newest_slice(self) -> tuple[RawEmail, ...]:
+        """The original single-page, newest-first read."""
         listing = self._transport.get_json(
             "messages", {"q": self._query, "maxResults": str(self._max_results)}
         )
@@ -620,38 +662,84 @@ class GmailEmailSource:
 
         emails: list[RawEmail] = []
         for ref in refs[: self._max_results]:
-            gmail_id = ref.get("id") if isinstance(ref, dict) else None
-            if not isinstance(gmail_id, str) or not _GMAIL_ID.match(gmail_id):
-                raise ContractViolation("Gmail messages.list entry has no usable id")
-
-            try:
-                full = self._transport.get_json(f"messages/{gmail_id}", {"format": "full"})
-            except _NotFound:
-                # Deleted between list and get. Normal, not an error.
-                _log.info("Gmail message %s vanished between list and get; skipped", gmail_id)
-                continue
-
-            if self._is_own_outbound(full):
-                _log.info("Gmail message %s is sent/draft mail; skipped", gmail_id)
-                continue
-
-            if self._sent_by_us(gmail_id):
-                # A message this run delivered, arriving in our own inbox
-                # because Translog reads and sends from one mailbox. It is our
-                # words, not a client's, and reading it back as an inbound
-                # message corrupts the request it correlates to.
-                _log.info("Gmail message %s was sent by this run; skipped", gmail_id)
-                continue
-
-            raw = parse_gmail_message(full)
-            thread_id = full.get("threadId")
-            self._metadata[raw.message_id] = GmailMessageMetadata(
-                gmail_id=gmail_id,
-                thread_id=thread_id if isinstance(thread_id, str) else None,
-            )
-            emails.append(raw)
-
+            gmail_id = _ref_id(ref)
+            self._ingest(gmail_id, emails)
         return tuple(emails)
+
+    def _fetch_since(self, since: datetime) -> tuple[RawEmail, ...]:
+        """The date-bounded, paginated, oldest-first operations read."""
+        cutoff = since - timedelta(seconds=self._overlap_seconds)
+        epoch = max(0, int(cutoff.timestamp()))
+        query = f"{self._query} after:{epoch}"
+
+        ids = self._list_ids(query)
+        ids.reverse()  # Gmail lists newest-first; drain the oldest first.
+
+        emails: list[RawEmail] = []
+        for gmail_id in ids:
+            if len(emails) >= self._max_results:
+                # The per-poll client budget is spent; the rest waits for the
+                # next poll, by which point the watermark has moved forward.
+                break
+            self._ingest(gmail_id, emails)
+        return tuple(emails)
+
+    def _list_ids(self, query: str) -> list[str]:
+        """All message ids the query matches, paged to the end (ids only),
+        bounded by ``_LIST_ID_CAP``. Newest-first, as Gmail returns them."""
+        ids: list[str] = []
+        page_token: str | None = None
+        while len(ids) < _LIST_ID_CAP:
+            params = {"q": query, "maxResults": str(_LIST_PAGE_SIZE)}
+            if page_token:
+                params["pageToken"] = page_token
+            listing = self._transport.get_json("messages", params)
+            refs = listing.get("messages")
+            if refs is None:
+                break  # an empty slice lists no "messages" key at all
+            if not isinstance(refs, list):
+                raise ContractViolation("Gmail messages.list response is malformed")
+            ids.extend(_ref_id(ref) for ref in refs)
+            token = listing.get("nextPageToken")
+            if not isinstance(token, str) or not token:
+                break
+            page_token = token
+        return ids
+
+    def _ingest(self, gmail_id: str, emails: list[RawEmail]) -> None:
+        """Fully fetch one listed id and append it to ``emails`` if it is a
+        client message. Skips (without spending the budget) deleted, own
+        outbound, self-sent, and internal/approver mail."""
+        try:
+            full = self._transport.get_json(f"messages/{gmail_id}", {"format": "full"})
+        except _NotFound:
+            # Deleted between list and get. Normal, not an error.
+            _log.info("Gmail message %s vanished between list and get; skipped", gmail_id)
+            return
+
+        if self._is_own_outbound(full):
+            _log.info("Gmail message %s is sent/draft mail; skipped", gmail_id)
+            return
+
+        if self._sent_by_us(gmail_id):
+            # A message this run delivered, arriving in our own inbox because
+            # Translog reads and sends from one mailbox. It is our words, not a
+            # client's, and reading it back as inbound corrupts its request.
+            _log.info("Gmail message %s was sent by this run; skipped", gmail_id)
+            return
+
+        raw = parse_gmail_message(full)
+        if self._is_internal is not None and self._is_internal(raw):
+            # Approval mail we sent ourselves. Excluded so it never spends the
+            # client fetch budget, on top of the query's own subject exclusion.
+            _log.info("Gmail message %s is internal approval mail; skipped", gmail_id)
+            return
+        thread_id = full.get("threadId")
+        self._metadata[raw.message_id] = GmailMessageMetadata(
+            gmail_id=gmail_id,
+            thread_id=thread_id if isinstance(thread_id, str) else None,
+        )
+        emails.append(raw)
 
     def _verify_mailbox(self) -> None:
         """Refuse to read anything if the token belongs to another account.

@@ -37,6 +37,7 @@ class AuditEventType(StrEnum):
     CLIENT_RESPONDED = "client_responded"
     MANUAL_REVIEW_ESCALATED = "manual_review_escalated"
     STATE_CHANGED = "state_changed"
+    RATE_SEARCH_RERUN_AFTER_RESTART = "rate_search_rerun_after_restart"
     FAILED = "failed"
 
 

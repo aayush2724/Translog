@@ -378,23 +378,30 @@ function renderDashboard() {
   const holder = document.getElementById("dashboard-list");
   renderLiveIndicator();
 
+  /* Terminal requests restored from the store (operations mode). Kept behind a
+     collapsed disclosure so the desk leads with live work while a settled
+     request stays inspectable rather than gone — hidden by default, one click
+     away. Empty (and absent entirely in demonstration mode) when there is none. */
+  const history = snap.history || [];
+  const historySection = history.length
+    ? el("details", { class: "history-band" },
+        el("summary", { class: "group-head" }, `History (${history.length})`),
+        el("div", { class: "request-list" }, ...history.map(requestCard)))
+    : null;
+
   /* The page title is for a page with something on it. The empty state carries
      its own heading and reads better without a second one above it. */
   document.getElementById("page-head").hidden = !snap.requests.length;
 
   if (!snap.requests.length) {
-    holder.replaceChildren(emptyState());
+    holder.replaceChildren(emptyState(), ...(historySection ? [historySection] : []));
     return;
   }
 
   /* Two groups, decided by what extraction actually found — not by a list of
      approved subjects or senders anyone has to maintain. A message that stated
      no shipment is still shown, explaining itself, so the operator can see the
-     classification is right rather than trust it.
-
-     There is no band for earlier work: the session drops what an earlier
-     demonstration left behind, so nothing reaches this function that is not
-     part of the run happening now. */
+     classification is right rather than trust it. */
   const enquiries = snap.requests.filter((r) => r.is_enquiry);
   const others = snap.requests.filter((r) => !r.is_enquiry);
 
@@ -405,6 +412,10 @@ function renderDashboard() {
       el("h2", { class: "group-head" }, "Other messages"),
       el("div", { class: "request-list" }, ...others.map(requestCard))
     );
+  }
+
+  if (historySection) {
+    groups.push(historySection);
   }
 
   holder.replaceChildren(...groups);

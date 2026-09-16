@@ -381,7 +381,7 @@ def test_the_gmail_source_is_built_once_and_reused(
     builds: list[int] = []
 
     class Counting:
-        def fetch_new(self) -> tuple[RawEmail, ...]:
+        def fetch_new(self, *, since: object = None) -> tuple[RawEmail, ...]:
             return ()
 
     def fake_build(*_args: object, **_kwargs: object) -> Counting:
@@ -408,7 +408,7 @@ def test_a_source_that_cannot_be_built_is_retried_next_poll(
     attempts: list[int] = []
 
     class Working:
-        def fetch_new(self) -> tuple[RawEmail, ...]:
+        def fetch_new(self, *, since: object = None) -> tuple[RawEmail, ...]:
             return ()
 
     def flaky(*_args: object, **_kwargs: object) -> Working:
@@ -443,7 +443,7 @@ def test_the_reused_source_still_sees_what_was_sent_after_it_was_built(
         def __init__(self, sent_by_us: object) -> None:
             self.sent_by_us = sent_by_us
 
-        def fetch_new(self) -> tuple[RawEmail, ...]:
+        def fetch_new(self, *, since: object = None) -> tuple[RawEmail, ...]:
             # Copied, not referenced: the callable hands back the sink's live
             # set, so keeping the object would make both samples the same one.
             seen.append(set(self.sent_by_us()))  # type: ignore[operator]

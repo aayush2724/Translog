@@ -67,7 +67,7 @@ class _Source:
         self._states = list(states)
         self._last: tuple[RawEmail, ...] = ()
 
-    def fetch_new(self) -> tuple[RawEmail, ...]:
+    def fetch_new(self, *, since: object = None) -> tuple[RawEmail, ...]:
         if self._states:
             self._last = self._states.pop(0)
         return self._last

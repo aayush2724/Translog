@@ -102,3 +102,60 @@ def test_dashboard_findings_fail_on_a_poll_error() -> None:
     by = {f.check: f for f in hc._dashboard_findings(snapshot)}
     assert by["9 mailbox poll"].verdict == hc.FAIL
     assert by["8 stuck (nothing pending)"].verdict == hc.PASS  # none stuck
+
+
+def test_zero_active_reports_the_cutoff_not_a_bare_pass() -> None:
+    """Req 5. An empty active list after a deploy is exactly the symptom this
+    change addresses, so it is reported with the cutoff, not a silent PASS."""
+    snapshot = {
+        "requests": [],
+        "demonstration": {"startup_mode": "operations", "started_at": "2026-09-16T00:00:00+00:00"},
+        "poll": {"last_checked_at": "x", "error": None},
+    }
+    by = {f.check: f for f in hc._dashboard_findings(snapshot)}
+    detail = by["8 states (active)"].detail
+    assert "0 active requests (demonstration started at 2026-09-16" in detail
+
+
+def test_operations_flags_a_stale_operator_owned_request() -> None:
+    """Req 5. In operations mode a VALIDATED request older than the operator
+    threshold is flagged; a CLARIFICATION_SENT of the same age is not, because it
+    waits on the client and gets the longer window."""
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime(2026, 9, 16, 12, 0, tzinfo=UTC)
+    seen = (now - timedelta(hours=30)).isoformat()
+    snapshot = {
+        "requests": [
+            {"request_id": "R-old", "status": {"state": "validated"}, "first_seen_at": seen},
+            {
+                "request_id": "R-clar",
+                "status": {"state": "clarification_sent"},
+                "first_seen_at": seen,
+            },
+        ],
+        "demonstration": {"startup_mode": "operations"},
+        "poll": {"last_checked_at": "x", "error": None},
+    }
+    by = {
+        f.check: f
+        for f in hc._dashboard_findings(
+            snapshot, now=now, stale_operator_hours=24.0, stale_clarification_hours=72.0
+        )
+    }
+    stale = by["8 stale (operations)"]
+    assert stale.verdict == hc.WARN
+    assert "R-old" in stale.detail
+    assert "R-clar" not in stale.detail
+
+
+def test_demonstration_mode_runs_no_stale_check() -> None:
+    """The stale check is operations-only: a fresh demonstration legitimately
+    empties the view, so an age warning there would be noise."""
+    snapshot = {
+        "requests": [{"request_id": "R", "status": {"state": "validated"}, "first_seen_at": "x"}],
+        "demonstration": {"startup_mode": "demonstration"},
+        "poll": {"last_checked_at": "x", "error": None},
+    }
+    checks = {f.check for f in hc._dashboard_findings(snapshot)}
+    assert "8 stale (operations)" not in checks

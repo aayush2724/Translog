@@ -20,6 +20,7 @@ import sys
 import time
 import urllib.request
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from translog_quote import bootstrap
@@ -240,7 +241,13 @@ def _authed_state(url: str, token: str) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _dashboard_findings(snapshot: dict[str, Any]) -> list[Finding]:
+def _dashboard_findings(
+    snapshot: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    stale_operator_hours: float = 24.0,
+    stale_clarification_hours: float = 72.0,
+) -> list[Finding]:
     """Checks 8 and 9 from a /api/live/state snapshot. Pure — no I/O — so it is
     unit-tested with a fixture snapshot."""
     from collections import Counter
@@ -249,6 +256,8 @@ def _dashboard_findings(snapshot: dict[str, Any]) -> list[Finding]:
 
     terminal = {s.value for s in TERMINAL_STATES}
     requests = snapshot.get("requests", [])
+    demo = snapshot.get("demonstration", {})
+    operations = demo.get("startup_mode") == "operations"
     counts = Counter(r.get("status", {}).get("state", "?") for r in requests)
     gt_holds = [r["request_id"] for r in requests if r.get("goods_type_hold")]
     clar = [r["request_id"] for r in requests if r.get("awaiting_clarification")]
@@ -266,12 +275,18 @@ def _dashboard_findings(snapshot: dict[str, Any]) -> list[Finding]:
         and not r.get("goods_type_hold")
         and not r.get("awaiting_decision")
     ]
+    # An empty active list is not automatically healthy: after a deploy it is
+    # exactly the symptom this whole change addresses, so it is reported with
+    # the cutoff rather than as a bare PASS.
+    if counts:
+        states_detail = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+    else:
+        started = demo.get("started_at")
+        watermark = demo.get("last_poll_watermark")
+        states_detail = f"0 active requests (demonstration started at {started}"
+        states_detail += f", watermark {watermark})" if operations else ")"
     findings = [
-        Finding(
-            "8 states (active)",
-            PASS,
-            ", ".join(f"{k}={v}" for k, v in sorted(counts.items())),
-        ),
+        Finding("8 states (active)", PASS, states_detail),
         Finding(
             "8 holds",
             PASS,
@@ -283,6 +298,10 @@ def _dashboard_findings(snapshot: dict[str, Any]) -> list[Finding]:
             ", ".join(stuck) if stuck else "none",
         ),
     ]
+    if operations:
+        findings.append(
+            _stale_finding(requests, terminal, now, stale_operator_hours, stale_clarification_hours)
+        )
     poll = snapshot.get("poll", {})
     last, err = poll.get("last_checked_at"), poll.get("error")
     findings.append(
@@ -295,11 +314,53 @@ def _dashboard_findings(snapshot: dict[str, Any]) -> list[Finding]:
     return findings
 
 
-def check_dashboard(url: str, token: str) -> list[Finding]:
+def _stale_finding(
+    requests: list[dict[str, Any]],
+    terminal: set[str],
+    now: datetime | None,
+    operator_hours: float,
+    clarification_hours: float,
+) -> Finding:
+    """A WARN listing non-terminal requests older than their state's threshold.
+
+    ``clarification_sent`` waits on a *client* and gets the longer window; every
+    other non-terminal state is operator-owned and gets the shorter one. A row
+    with no known first-seen time is skipped rather than guessed at."""
+    when = now if now is not None else datetime.now(UTC)
+    stale: list[str] = []
+    for r in requests:
+        state = r.get("status", {}).get("state")
+        if state in terminal:
+            continue
+        seen = r.get("first_seen_at")
+        if not seen:
+            continue
+        try:
+            age_hours = (when - datetime.fromisoformat(seen)).total_seconds() / 3600
+        except ValueError:
+            continue
+        limit = clarification_hours if state == "clarification_sent" else operator_hours
+        if age_hours > limit:
+            stale.append(f"{r['request_id']} ({state}, {age_hours:.0f}h)")
+    return Finding(
+        "8 stale (operations)",
+        WARN if stale else PASS,
+        ", ".join(stale) if stale else "none over threshold",
+    )
+
+
+def check_dashboard(url: str, token: str, *, settings: Any = None) -> list[Finding]:
     try:
-        return _dashboard_findings(_authed_state(url, token))
+        snapshot = _authed_state(url, token)
     except Exception as exc:  # noqa: BLE001
         return [Finding("8-9 dashboard", FAIL, f"authenticated API call failed: {exc}")]
+    if settings is None:
+        return _dashboard_findings(snapshot)
+    return _dashboard_findings(
+        snapshot,
+        stale_operator_hours=settings.demo.stale_operator_hours,
+        stale_clarification_hours=settings.demo.stale_clarification_hours,
+    )
 
 
 def _needs_approval() -> list[Finding]:
@@ -324,7 +385,7 @@ def collect(*, url: str, env_file: str | None, token: str | None = None) -> list
         findings.append(Finding("3-5 redis", FAIL, f"could not reach Redis: {exc}"))
     findings += check_worker_process()
     findings += check_clock()
-    findings += check_dashboard(url, token) if token else _needs_approval()
+    findings += check_dashboard(url, token, settings=settings) if token else _needs_approval()
     return findings
 
 

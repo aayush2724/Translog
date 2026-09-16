@@ -83,7 +83,7 @@ class StubSource:
     def __init__(self, *emails: RawEmail) -> None:
         self._emails = emails
 
-    def fetch_new(self) -> tuple[RawEmail, ...]:
+    def fetch_new(self, *, since: object = None) -> tuple[RawEmail, ...]:
         return self._emails
 
 

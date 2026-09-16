@@ -138,6 +138,9 @@ class JsonFileStore:
             {key: value.model_dump(mode="json") for key, value in self._requests.items()},
         )
 
+    def all_requests(self) -> tuple[QuotationRequest, ...]:
+        return tuple(self._requests[key] for key in sorted(self._requests))
+
     def all_threads(self) -> tuple[Thread, ...]:
         return tuple(self._threads[key] for key in sorted(self._threads))
 
