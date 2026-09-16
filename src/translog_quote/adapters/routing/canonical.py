@@ -8,7 +8,8 @@ or any per-place branching. The table is data; the lookup is one dict access.
 
 Three shapes are accepted without guessing:
   * an explicit code the client already gave ("DEL")            -> DEL
-  * a code the client parenthesised ("Delhi (DEL)")             -> DEL
+  * a code the client parenthesised, even with text after it
+    ("Dubai International Airport (DXB), UAE")                   -> DXB
   * a known place name, country suffix folded ("Delhi, India")  -> DEL
 
 Anything the table does not know is **not** guessed. It is refused with
@@ -51,8 +52,11 @@ CANONICAL_IATA: dict[str, str] = {
 #: unknown, to a clarification) rather than being sent as "GOA".
 _EXPLICIT_CODE = re.compile(r"^[A-Z]{3}$")
 
-#: A code the client parenthesised: "Delhi (DEL)", "Mumbai (BOM)".
-_PARENTHESISED_CODE = re.compile(r"\(([A-Za-z]{3})\)\s*$")
+#: A code the client parenthesised: "Delhi (DEL)", "Mumbai (BOM)", and also when
+#: more text follows it — "Dubai International Airport (DXB), UAE". Not anchored
+#: to the end, so a trailing country or airport name does not hide the code the
+#: client explicitly gave.
+_PARENTHESISED_CODE = re.compile(r"\(([A-Za-z]{3})\)")
 
 #: A trailing country the client tacked on, folded before lookup.
 _COUNTRY_SUFFIX = re.compile(r"\s*,\s*(?:india|in)\s*$", re.IGNORECASE)

@@ -50,6 +50,31 @@ def test_parenthesised_code_is_used_directly() -> None:
     assert ref.code == "DEL"
 
 
+@pytest.mark.parametrize(
+    ("stated", "code"),
+    [
+        ("DXB", "DXB"),  # a bare explicit code
+        ("Dubai International Airport (DXB), UAE", "DXB"),  # code parenthesised, country after
+        ("Dubai (DXB)", "DXB"),  # code parenthesised at the end
+        ("dubai international airport (dxb)", "DXB"),  # lower-case parenthesised code
+    ],
+)
+def test_an_explicit_code_resolves_even_with_text_after_it(stated: str, code: str) -> None:
+    """Regression: a parenthesised code followed by a country or airport name
+    ("… (DXB), UAE") was hidden by an end-of-string anchor and wrongly sent to a
+    clarification. An explicit code the client gives must be used directly."""
+    ref = CanonicalLocationResolver().resolve(stated)
+    assert ref.code == code
+    assert ref.resolved_by == "canonical"
+
+
+def test_a_place_without_a_code_or_table_entry_still_clarifies() -> None:
+    """The fix is narrow: a stated place with no explicit code and not in the
+    reviewed table (e.g. "Dubai, UAE") still refuses rather than guessing."""
+    with pytest.raises(UnresolvedLocation):
+        CanonicalLocationResolver().resolve("Dubai, UAE")
+
+
 def test_ambiguous_or_unknown_location_is_refused_not_guessed() -> None:
     with pytest.raises(UnresolvedLocation):
         CanonicalLocationResolver().resolve("some village nobody tabulated")
