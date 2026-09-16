@@ -533,6 +533,16 @@ def _goods_type_hold(session: LiveSession, request: LiveRequest) -> Json | None:
     }
 
 
+def _first_seen_at(session: LiveSession, request: LiveRequest) -> str | None:
+    """The earliest time this request is known to have been seen: the live
+    enquiry's receipt time, or — for a request restored from the store, which
+    carries no enquiry email — the earliest persisted audit event for it."""
+    if request.enquiry is not None:
+        return request.enquiry.received_at.isoformat()
+    times = [event.at for event in session.audit.events if event.request_id == request.request_id]
+    return min(times).isoformat() if times else None
+
+
 def request_summary(session: LiveSession, request: LiveRequest) -> Json:
     """One dashboard row.
 
@@ -573,6 +583,11 @@ def request_summary(session: LiveSession, request: LiveRequest) -> Json:
         or None,
         "weight": render_value("weight_kg", request.record.weight_kg),
         "received_at": received.isoformat() if received else None,
+        # When the desk first saw this request. Unlike ``received_at`` (the live
+        # enquiry email, absent on a request restored from the store) this falls
+        # back to the earliest audit event, so a restored request still has an
+        # age the operations healthcheck can measure staleness against.
+        "first_seen_at": _first_seen_at(session, request),
         "status": status_json(request),
         "awaiting_clarification": request.awaiting_clarification_approval,
         # Why this request has no rates, when it has none. Reported rather
@@ -665,17 +680,29 @@ def snapshot(session: LiveSession, *, selected: str | None = None) -> Json:
     an operator reading the confirmation of what they just sent must not have
     it disappear from under them; it leaves the *desk*, not the record.
     """
-    followed = [r for r in session.requests.values() if session.in_demonstration(r.request_id)]
-    active = [r for r in followed if not r.is_settled]
+    # Operations mode follows the store, not the demonstration's request_ids
+    # (a past restart may have reset them): every restored request is in view,
+    # terminal ones as history. Demonstration mode keeps the focuses filter.
+    if session.operations_mode:
+        followed = list(session.requests.values())
+    else:
+        followed = [r for r in session.requests.values() if session.in_demonstration(r.request_id)]
+    active = [r for r in followed if not r.is_settled and not r.history]
+    history = [r for r in followed if r.history]
     chosen = session.requests.get(selected) if selected else None
     demonstration = session.demonstration
     return {
         "demonstration": {
             "active": demonstration.is_active,
+            "startup_mode": "operations" if session.operations_mode else "demonstration",
             "started_at": demonstration.started_at.isoformat()
             if demonstration.started_at
             else None,
+            "last_poll_watermark": demonstration.last_poll_watermark.isoformat()
+            if demonstration.last_poll_watermark
+            else None,
             "following": len(active),
+            "history": len(history),
             "outside_messages": session.outside_demonstration,
         },
         "mode": {
@@ -692,6 +719,10 @@ def snapshot(session: LiveSession, *, selected: str | None = None) -> Json:
             "approver_address": session.approver_address,
         },
         "requests": [request_summary(session, request) for request in active],
+        # Terminal requests, restored from the store. Sent to the browser but
+        # hidden behind a filter by default, so the desk leads with live work
+        # while a settled request stays inspectable rather than gone.
+        "history": [request_summary(session, request) for request in history],
         "selected": None if chosen is None else request_detail(session, chosen),
         "audit": audit_json(session.audit.events),
         "poll": {

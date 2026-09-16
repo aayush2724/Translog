@@ -8,10 +8,12 @@ clients these values configure do not exist yet.
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_ENV_FILE = ".env"
@@ -223,6 +225,18 @@ class GmailSettings(BaseModel):
     """How many messages one fetch may retrieve. The Phase 10.3 test needs
     exactly one."""
 
+    fetch_cap: int = Field(default=25, ge=1, le=500)
+    """The per-poll ceiling on *client* messages fully fetched in operations
+    mode's date-bounded fetch.
+
+    Operations mode reads ``in:inbox after:<watermark - overlap>`` and pages the
+    id list to the end (cheap, ids only), oldest-first. This bounds how many of
+    those it then fully retrieves in one poll: a mailbox that accumulated more
+    than this during a long downtime is drained across successive polls rather
+    than in one burst, and internal/approver mail never spends the budget. The
+    watermark only advances to the newest message actually handled, so the
+    remainder is picked up next poll."""
+
     timeout_seconds: int = Field(default=30, gt=0)
     max_retries: int = Field(default=2, ge=0)
     retry_backoff_seconds: float = Field(default=2.0, ge=0)
@@ -305,6 +319,57 @@ class DemoSettings(BaseModel):
     all unless something new arrived. Ten seconds is therefore cheap, and about
     as long as a room will watch a dashboard before believing it is broken.
     """
+
+    startup_mode: Literal["demonstration", "operations"] = "demonstration"
+    """What a process restart means.
+
+    ``demonstration`` (the default, for local rehearsals): every boot starts a
+    fresh demonstration — cutoff ``now``, empty view — exactly as before.
+
+    ``operations`` (the Render deployment): a restart does **not** start a new
+    demonstration. Non-terminal requests are restored from the durable store and
+    the mail cutoff is the last successful poll, so a deploy neither empties the
+    dashboard nor drops mail that arrived during it. Starting a fresh
+    demonstration stays an explicit operator action, never a side effect of a
+    restart."""
+
+    operations_since: datetime | None = None
+    """The first mail cutoff for operations mode, used only until the first
+    successful poll persists a real watermark.
+
+    Required in operations mode when no watermark exists yet (a fresh disk, or
+    the first deploy after this change): the server refuses to start without it
+    rather than silently defaulting to ``now`` and skipping every message that
+    arrived earlier. Set it (ISO 8601, e.g. ``2026-09-16T00:00:00+00:00``) to
+    the instant from which mail should be considered. Ignored once a watermark
+    has been written."""
+
+    fetch_overlap_minutes: float = Field(default=30.0, ge=0)
+    """How far *before* the watermark the operations-mode fetch reaches.
+
+    The date-bounded query is ``after:<watermark - overlap>``. The overlap is
+    safe — re-listed messages already handled are dropped by the durable
+    ``already_processed`` check — and guards the boundary against clock skew and
+    a message that landed in the same second the watermark was taken."""
+
+    stale_operator_hours: float = Field(default=24.0, gt=0)
+    """Healthcheck threshold (operations mode): a non-terminal request in an
+    operator-owned state — a goods-type/clarification hold, an approval, or a
+    VALIDATED awaiting its search — older than this is flagged as stuck."""
+
+    stale_clarification_hours: float = Field(default=72.0, gt=0)
+    """Healthcheck threshold (operations mode) for CLARIFICATION_SENT, which
+    legitimately waits on a *client* reply and so is given longer than an
+    operator-owned state before it is flagged."""
+
+    @field_validator("operations_since")
+    @classmethod
+    def _assume_utc(cls, value: datetime | None) -> datetime | None:
+        """A cutoff written without a timezone is read as UTC, so it can be
+        compared against the timezone-aware receipt times Gmail returns."""
+        if value is not None and value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value
 
 
 class GoodsTypeSettings(BaseModel):

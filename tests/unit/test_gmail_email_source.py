@@ -421,3 +421,124 @@ def test_the_source_exposes_no_way_to_send_modify_or_delete() -> None:
     public_names = [name for name in dir(source) if not name.startswith("_")]
     for forbidden in ("send", "modify", "delete", "trash", "draft", "reply"):
         assert not any(forbidden in name for name in public_names)
+
+
+# --- operations mode: the date-bounded, paginated, oldest-first fetch (Req A) ---
+
+
+def dated(gmail_id: str, date_str: str, mid: str, *, subject: str | None = None) -> dict[str, Any]:
+    """A message with a specific Date header and Message-ID, for ordering tests."""
+    override: dict[str, str | None] = {"Date": date_str, "Message-ID": mid}
+    if subject is not None:
+        override["Subject"] = subject
+    return message(
+        gmail_id=gmail_id,
+        payload={
+            "mimeType": "text/plain",
+            "headers": headers(**override),
+            "body": {"data": b64("500 kg, BOM to JFK, 2 pcs.")},
+        },
+    )
+
+
+class PagingTransport:
+    """A Gmail transport that honours pageToken, so ``messages.list`` pagination
+    can be exercised. Pages are given newest-first, as Gmail returns them."""
+
+    def __init__(self, pages: list[tuple[list[str], str | None]], bodies: dict[str, Any]) -> None:
+        self.pages = pages
+        self.bodies = bodies
+        self.calls: list[tuple[str, dict[str, str] | None]] = []
+        self._by_token: dict[str | None, int] = {None: 0}
+        for index, (_ids, token) in enumerate(pages):
+            if token is not None:
+                self._by_token[token] = index + 1
+
+    def get_json(self, path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
+        self.calls.append((path, params))
+        if path == "profile":
+            return {"emailAddress": MAILBOX}
+        if path == "messages":
+            index = self._by_token[(params or {}).get("pageToken")]
+            ids, token = self.pages[index]
+            response: dict[str, Any] = {"messages": [{"id": i} for i in ids]}
+            if token is not None:
+                response["nextPageToken"] = token
+            return response
+        return self.bodies[path]
+
+
+def _ops_source(
+    transport: PagingTransport,
+    *,
+    max_results: int,
+    is_internal: Any = None,
+) -> GmailEmailSource:
+    return GmailEmailSource(
+        transport,
+        mailbox_address=MAILBOX,
+        max_results=max_results,
+        overlap_seconds=0.0,
+        is_internal=is_internal,
+    )
+
+
+def test_operations_fetch_is_date_bounded_paginated_and_oldest_first() -> None:
+    """`since` builds an `after:` query, pages the id list to the end, and
+    returns messages oldest-first — the order a backlog must be drained in."""
+    bodies = {
+        "messages/m1": dated("m1", "Mon, 24 Aug 2026 09:00:00 +0000", "<m1@x>"),
+        "messages/m2": dated("m2", "Tue, 25 Aug 2026 09:00:00 +0000", "<m2@x>"),
+        "messages/m3": dated("m3", "Wed, 26 Aug 2026 09:00:00 +0000", "<m3@x>"),
+    }
+    transport = PagingTransport([(["m3", "m2"], "t1"), (["m1"], None)], bodies)
+    source = _ops_source(transport, max_results=10)
+
+    since = datetime(2026, 8, 20, 0, 0, tzinfo=UTC)
+    emails = source.fetch_new(since=since)
+
+    assert [e.message_id for e in emails] == ["<m1@x>", "<m2@x>", "<m3@x>"]
+    # The listing query is date-bounded and it paged to the end (two list calls).
+    list_calls = [p for path, p in transport.calls if path == "messages"]
+    assert all("after:" in (p or {})["q"] for p in list_calls)
+    assert len(list_calls) == 2
+
+
+def test_operations_fetch_budget_takes_the_oldest_and_leaves_the_rest() -> None:
+    """A window larger than the per-poll budget is drained oldest-first; the
+    newest are left for the next poll rather than the oldest being starved."""
+    bodies = {
+        "messages/m1": dated("m1", "Mon, 24 Aug 2026 09:00:00 +0000", "<m1@x>"),
+        "messages/m2": dated("m2", "Tue, 25 Aug 2026 09:00:00 +0000", "<m2@x>"),
+        "messages/m3": dated("m3", "Wed, 26 Aug 2026 09:00:00 +0000", "<m3@x>"),
+    }
+    transport = PagingTransport([(["m3", "m2", "m1"], None)], bodies)
+    source = _ops_source(transport, max_results=2)
+
+    emails = source.fetch_new(since=datetime(2026, 8, 20, tzinfo=UTC))
+
+    assert [e.message_id for e in emails] == ["<m1@x>", "<m2@x>"]
+    # m3 (the newest) was never fetched — the budget stopped first.
+    assert "messages/m3" not in [path for path, _ in transport.calls]
+
+
+def test_internal_mail_does_not_consume_the_operations_budget() -> None:
+    """An internal/approval message is skipped without spending a client slot, so
+    the budget still yields the intended number of client messages."""
+    bodies = {
+        "messages/m1": dated("m1", "Mon, 24 Aug 2026 09:00:00 +0000", "<m1@x>"),
+        "messages/m2": dated(
+            "m2", "Tue, 25 Aug 2026 09:00:00 +0000", "<m2@x>", subject="[TRANSLOG INTERNAL] review"
+        ),
+        "messages/m3": dated("m3", "Wed, 26 Aug 2026 09:00:00 +0000", "<m3@x>"),
+    }
+    transport = PagingTransport([(["m3", "m2", "m1"], None)], bodies)
+    source = _ops_source(
+        transport,
+        max_results=2,
+        is_internal=lambda e: e.subject.strip().startswith("[TRANSLOG INTERNAL]"),
+    )
+
+    emails = source.fetch_new(since=datetime(2026, 8, 20, tzinfo=UTC))
+
+    assert [e.message_id for e in emails] == ["<m1@x>", "<m3@x>"]

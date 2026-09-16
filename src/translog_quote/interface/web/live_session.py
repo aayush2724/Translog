@@ -47,7 +47,7 @@ from translog_quote.domain.quotation import (
 from translog_quote.domain.rates import FASTEST_ELIGIBLE
 from translog_quote.domain.shipment import DeliveryType, FieldName
 from translog_quote.domain.validation import validate_shipment
-from translog_quote.domain.workflow import RequestState
+from translog_quote.domain.workflow import TERMINAL_STATES, RequestState
 from translog_quote.errors import (
     ContractViolation,
     IllegalTransition,
@@ -75,10 +75,12 @@ if TYPE_CHECKING:
 
     from translog_quote.config import Settings
     from translog_quote.domain.clarification import ClarificationMessage
+    from translog_quote.domain.conversation import Thread
     from translog_quote.domain.email import RawEmail
     from translog_quote.domain.quotation import ApprovalDecision
     from translog_quote.domain.shipment import ShipmentRecord
     from translog_quote.domain.validation import ValidationResult
+    from translog_quote.domain.workflow import QuotationRequest
     from translog_quote.interface.jobs import RateSearchJobResult
     from translog_quote.interface.web.demonstration import Demonstration
     from translog_quote.pipeline import QuotationStage
@@ -197,6 +199,15 @@ class LiveRequest:
     decision: ApprovalDecision | None = None
     quotation_sent: bool = False
     messages: list[str] = field(default_factory=list)
+
+    history: bool = False
+    """Restored from the store in a terminal state: shown as history, hidden by
+    default in the live view, and never advanced by the poll or the rate pass."""
+
+    restored: bool = False
+    """Rebuilt from the durable store on startup rather than seen live this
+    session. Cleared the first time the request acts, so a re-enqueue a restart
+    triggers is audited as a post-restart re-run exactly once."""
 
     @property
     def shipment_field_count(self) -> int:
@@ -372,15 +383,17 @@ class LiveSession:
         CLARIFICATION_SENT, so a reply cannot be processed until the question
         it answers has actually gone out — and only a person can send it.
         """
-        received = self._fetch()
+        received = self._fetch(since=self._mail_cutoff())
         client_mail = [email for email in received if not _is_internal(email)]
         self.skipped_internal = len(received) - len(client_mail)
 
         # Messages older than the demonstration are history, not this
         # presentation. Left unread rather than read-and-hidden: extracting a
         # year of newsletters to then not show them would cost a live model
-        # call each and make the first poll unusable.
-        in_scope = [e for e in client_mail if self._demonstration.current.covers(e.received_at)]
+        # call each and make the first poll unusable. Operations mode does not
+        # filter here — its date-bounded fetch already scoped the read, and the
+        # durable already-processed check below de-duplicates the overlap.
+        in_scope = [e for e in client_mail if self._covers(e.received_at)]
         self.outside_demonstration = len(client_mail) - len(in_scope)
 
         conversation = sorted(in_scope, key=lambda email: email.received_at)
@@ -443,6 +456,46 @@ class LiveSession:
         if self._settings.webcargo.mode is WebCargoMode.BROWSER:
             self.worker_status = worker_liveness(self._settings)
         self.last_poll_at = self._clock.now()
+        # Only now, after a poll that read the mailbox and routed without
+        # raising, is it safe to advance the persisted mail cutoff. A failed
+        # fetch raises before here, so the watermark never moves past mail a
+        # broken poll did not actually read.
+        if self.operations_mode:
+            self._advance_watermark(in_scope)
+
+    def _covers(self, received_at: datetime.datetime) -> bool:
+        """Whether a message that arrived then is in scope this poll.
+
+        Operations mode trusts the date-bounded fetch and the durable
+        already-processed check: everything returned is in scope, and duplicates
+        are dropped downstream. Demonstration mode hides mail older than the
+        cutoff, unchanged."""
+        if self.operations_mode:
+            return True
+        cutoff = self._mail_cutoff()
+        return cutoff is None or received_at >= cutoff
+
+    def _advance_watermark(self, in_scope: list[RawEmail]) -> None:
+        """Persist the mail cutoff, never past a message not durably committed.
+
+        A message is *settled* only when its id is recorded in a durable thread
+        (``commit_request``/``commit_thread`` write it); a NEEDS_INFO draft and a
+        deferred reply commit nothing, so they stay uncommitted and the cutoff
+        must not pass them — a restart re-reads and re-derives them. When
+        everything handled this poll is settled the cutoff advances to the newest
+        handled; otherwise it holds at the oldest uncommitted message."""
+        if not in_scope:
+            return
+        previous = self._demonstration.current.last_poll_watermark
+        committed = {mid for thread in self._durable.all_threads() for mid in thread.message_ids}
+        uncommitted = [e.received_at for e in in_scope if e.message_id not in committed]
+        if uncommitted:
+            watermark = min(uncommitted)
+        else:
+            newest = max(e.received_at for e in in_scope)
+            watermark = newest if previous is None else max(previous, newest)
+        if watermark != previous:
+            self._demonstration.record_watermark(watermark)
 
     def start_demonstration(self) -> None:
         """Begin a fresh demonstration from this moment.
@@ -467,6 +520,27 @@ class LiveSession:
             if self.in_demonstration(request_id)
         }
 
+    def resume_operations(self) -> None:
+        """Resume operations after a restart: no fresh demonstration.
+
+        Requests were already restored from the store in ``__init__``. This
+        settles the mail cutoff. If a watermark was persisted by an earlier
+        poll, it stands. If none exists yet — a fresh disk, or the first deploy
+        after this change — it is seeded from ``operations_since``, and the
+        server **refuses to start** if that is missing rather than silently
+        defaulting the cutoff to ``now`` and skipping every earlier message."""
+        if self._demonstration.current.last_poll_watermark is not None:
+            return
+        since = self._settings.demo.operations_since
+        if since is None:
+            raise PermanentFailure(
+                "Operations mode has no mail cutoff yet. Set TRANSLOG_DEMO__OPERATIONS_SINCE "
+                "to an ISO datetime (e.g. 2026-09-16T00:00:00+00:00) — the instant from which "
+                "mail should be read — so the first poll does not silently skip earlier mail. "
+                "It is used only until the first successful poll records a watermark."
+            )
+        self._demonstration.record_watermark(since)
+
     @property
     def demonstration(self) -> Demonstration:
         return self._demonstration.current
@@ -474,6 +548,23 @@ class LiveSession:
     def in_demonstration(self, request_id: str) -> bool:
         """Whether this request is one the current demonstration follows."""
         return self._demonstration.current.focuses(request_id)
+
+    @property
+    def operations_mode(self) -> bool:
+        """Whether a restart resumes rather than starting a fresh demonstration."""
+        return self._settings.demo.startup_mode == "operations"
+
+    def _mail_cutoff(self) -> datetime.datetime | None:
+        """The instant before which inbound mail is out of scope.
+
+        Demonstration mode: the demonstration's ``started_at`` (``now`` at boot),
+        so history stays out of the room's view. Operations mode: the persisted
+        watermark — the last successful poll — so mail that arrived during a
+        deploy is still read. ``None`` means no bound (a fresh demonstration
+        session that has started nothing, unchanged from before)."""
+        if self.operations_mode:
+            return self._demonstration.current.last_poll_watermark
+        return self._demonstration.current.started_at
 
     def approve_clarification(self, *, by: str, request_id: str | None = None) -> None:
         """Release one held draft on a named person's authority.
@@ -639,7 +730,7 @@ class LiveSession:
 
     # ------------------------------------------------------------ internals --
 
-    def _fetch(self) -> tuple[RawEmail, ...]:
+    def _fetch(self, *, since: datetime.datetime | None = None) -> tuple[RawEmail, ...]:
         """Read the mailbox through this session's own source, built once.
 
         Every poll used to construct a new one. That was reasonable when a
@@ -658,10 +749,23 @@ class LiveSession:
         the session permanently unable to read mail.
         """
         if self._source is None:
-            self._source = bootstrap.build_gmail_email_source(
-                self._settings, max_results=MESSAGE_LIMIT, sent_by_us=self._sent_provider_ids
-            )
-        return self._source.fetch_new()
+            if self.operations_mode:
+                # Operations reads a date-bounded window oldest-first, so the
+                # ceiling is the larger per-poll fetch budget, the overlap lets
+                # the boundary be re-listed safely, and internal approval mail
+                # never spends the client budget.
+                self._source = bootstrap.build_gmail_email_source(
+                    self._settings,
+                    max_results=self._settings.gmail.fetch_cap,
+                    overlap_seconds=self._settings.demo.fetch_overlap_minutes * 60.0,
+                    is_internal=_is_internal,
+                    sent_by_us=self._sent_provider_ids,
+                )
+            else:
+                self._source = bootstrap.build_gmail_email_source(
+                    self._settings, max_results=MESSAGE_LIMIT, sent_by_us=self._sent_provider_ids
+                )
+        return self._source.fetch_new(since=since)
 
     def _sent_provider_ids(self) -> Collection[str]:
         """Provider ids of everything this session has delivered.
@@ -847,6 +951,13 @@ class LiveSession:
             self._emit_goods_type(
                 request.request_id, goods_type, source, by=request.operator_goods_type_by
             )
+            if request.restored:
+                # This request came back from the store on startup and its rate
+                # search is being re-run because the result was never persisted.
+                # Audited once, so the trail shows the re-enqueue was a restart
+                # recovery rather than fresh client work; then cleared.
+                self._emit_rerun_after_restart(request.request_id)
+                request.restored = False
             request.rate_job_id = job_id
             request.rate_failure = None
             return  # the first result arrives on a later poll
@@ -1020,6 +1131,20 @@ class LiveSession:
             )
         )
 
+    def _emit_rerun_after_restart(self, request_id: str) -> None:
+        """Record that a restored request's rate search was re-run after a
+        restart — the packet was never persisted, so the search re-derives it."""
+        from translog_quote.pipeline.audit import AuditEvent, AuditEventType
+
+        self.audit.record(
+            AuditEvent(
+                request_id=request_id,
+                event=AuditEventType.RATE_SEARCH_RERUN_AFTER_RESTART,
+                at=self._clock.now(),
+                detail={},
+            )
+        )
+
     @staticmethod
     def _job_request_from_record(request: LiveRequest, *, goods_type: str) -> RateSearchJobRequest:
         """Build the queue request from a validated record's own fields.
@@ -1142,46 +1267,73 @@ class LiveSession:
     def _restore(self) -> None:
         """Rebuild the interface's view of requests an earlier session persisted.
 
-        Only the ones this demonstration is following. The durable store is
-        still seeded in full — correlation, duplicate protection and the
-        already-sent record all read it, and none of them may lose history —
-        but a request from another demonstration is not active work, and
-        putting it back in `self.requests` would make it so: the rate-search
-        pass walks that dictionary, so a restored VALIDATED request would be
-        priced and pushed to the approval gate by the next background poll.
+        **Demonstration mode** restores only what this demonstration is
+        following (``focuses``): a request from another demonstration is not
+        active work, and putting it back in ``self.requests`` would make it so.
 
-        With no demonstration active `focuses` is true of everything, so a
-        session built without one restores exactly what it always did.
+        **Operations mode** restores from the *store*, not ``demonstration.json``
+        (whose ``request_ids`` a past restart may have reset to empty). Every
+        persisted request comes back: non-terminal ones are active and advanced
+        by the poll; terminal ones are history — shown, hidden by default, and
+        never advanced. This is what recovers requests a deploy hid.
 
         Validation is recomputed rather than stored: it is a pure function of
         the record, so deriving it cannot disagree with the validator, whereas
-        a stored copy could.
+        a stored copy could. The durable store is still seeded in full either
+        way, so correlation and duplicate protection lose no history.
         """
-        for thread in self._durable.all_threads():
-            stored = self._durable.get_request(thread.request_id)
-            if stored is None or not self.in_demonstration(thread.request_id):
+        threads = {thread.request_id: thread for thread in self._durable.all_threads()}
+        if self.operations_mode:
+            for stored in self._durable.all_requests():
+                self.requests[stored.request_id] = self._restored_request(
+                    stored, threads.get(stored.request_id)
+                )
+            return
+        for request_id, thread in threads.items():
+            followed = self._durable.get_request(request_id)
+            if followed is None or not self.in_demonstration(request_id):
                 continue
-            self.requests[stored.request_id] = LiveRequest(
-                request_id=stored.request_id,
-                client_address=stored.client_address,
-                state=stored.state,
-                record=stored.record,
-                validation=validate_shipment(stored.record),
-                last_message_id=thread.message_ids[-1] if thread.message_ids else None,
-                reply_received=len(thread.message_ids) > 1,
-                messages=list(thread.message_ids),
-                clarification_sent_by="(an earlier session)"
-                if stored.state is not RequestState.NEEDS_INFO
-                and stored.state is not RequestState.RECEIVED
-                else None,
-                quotation_sent=stored.state is RequestState.QUOTATION_SENT,
-                # An operator's goods-type pick survives the restart; the next
-                # poll re-derives the decision (applying it while the fingerprint
-                # still matches) or re-holds. The hold itself is never persisted.
-                operator_goods_type=stored.operator_goods_type,
-                operator_goods_type_fingerprint=stored.operator_goods_type_fingerprint,
-                operator_goods_type_by=stored.operator_goods_type_by,
-            )
+            self.requests[request_id] = self._restored_request(followed, thread)
+
+    #: Pre-send rate states whose in-memory packet is never persisted. A restart
+    #: that finds one rewinds it to VALIDATED so the normal rate pass rebuilds a
+    #: usable approval card through the ordinary goods-type/location checks —
+    #: rather than surfacing an approval with no rates behind it.
+    _REDERIVE_STATES = frozenset({RequestState.RATE_SELECTED, RequestState.PENDING_APPROVAL})
+
+    def _restored_request(self, stored: QuotationRequest, thread: Thread | None) -> LiveRequest:
+        """One persisted request as a fresh ``LiveRequest`` for this session.
+
+        The store's furthest committed pre-send state is VALIDATED — a rate
+        selection and its approval packet live only in memory — so a request
+        found in a ``_REDERIVE_STATES`` state (defensively, e.g. an older store)
+        is rewound to VALIDATED and its card re-derived by the next poll. Marked
+        ``restored`` so a re-enqueue it triggers is audited as a post-restart
+        re-run; ``history`` when terminal."""
+        message_ids = list(thread.message_ids) if thread is not None else []
+        state = RequestState.VALIDATED if stored.state in self._REDERIVE_STATES else stored.state
+        return LiveRequest(
+            request_id=stored.request_id,
+            client_address=stored.client_address,
+            state=state,
+            record=stored.record,
+            validation=validate_shipment(stored.record),
+            last_message_id=message_ids[-1] if message_ids else None,
+            reply_received=len(message_ids) > 1,
+            messages=message_ids,
+            clarification_sent_by="(an earlier session)"
+            if state is not RequestState.NEEDS_INFO and state is not RequestState.RECEIVED
+            else None,
+            quotation_sent=stored.state is RequestState.QUOTATION_SENT,
+            # An operator's goods-type pick survives the restart; the next poll
+            # re-derives the decision (applying it while the fingerprint still
+            # matches) or re-holds. The hold itself is never persisted.
+            operator_goods_type=stored.operator_goods_type,
+            operator_goods_type_fingerprint=stored.operator_goods_type_fingerprint,
+            operator_goods_type_by=stored.operator_goods_type_by,
+            history=stored.state in TERMINAL_STATES,
+            restored=True,
+        )
 
 
 _CLASS_PREFIX = re.compile(r"^[A-Za-z][A-Za-z0-9_]*: ")
@@ -1230,11 +1382,16 @@ def build_live_session(settings: Settings) -> LiveSession:
     with a sentence a person can act on, rather than as a 500 in front of an
     audience.
 
-    Starting the demonstration is part of starting the server. There is no
-    button for it and nothing to press: the cutoff is *now*, so the mailbox's
-    history — however much of it there is — is out of scope before the first
-    poll runs, and the first thing this process can process is the enquiry
-    somebody sends after it came up.
+    **Demonstration mode** starts a fresh demonstration as part of starting the
+    server: the cutoff is *now*, so the mailbox's history is out of scope and
+    the first thing this process handles is the enquiry sent after it came up.
+
+    **Operations mode** does the opposite: a restart resumes. It does *not*
+    start a demonstration (that stays an explicit operator action); non-terminal
+    requests are restored from the store by ``LiveSession`` and the mail cutoff
+    is the persisted watermark — seeded from ``operations_since`` the first time,
+    which is required so a fresh deploy cannot silently default the cutoff to
+    ``now`` and skip everything earlier.
     """
     if settings.openrouter.api_key is None:
         raise PermanentFailure("No OpenRouter API key. Set TRANSLOG_OPENROUTER__API_KEY in .env.")
@@ -1247,5 +1404,8 @@ def build_live_session(settings: Settings) -> LiveSession:
             "No internal approver address. Set TRANSLOG_GMAIL__APPROVER_ADDRESS in .env."
         )
     session = LiveSession(settings)
-    session.start_demonstration()
+    if session.operations_mode:
+        session.resume_operations()
+    else:
+        session.start_demonstration()
     return session

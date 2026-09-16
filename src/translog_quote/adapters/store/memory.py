@@ -26,6 +26,9 @@ class InMemoryStore:
     def save_request(self, request: QuotationRequest) -> None:
         self._requests[request.request_id] = request
 
+    def all_requests(self) -> tuple[QuotationRequest, ...]:
+        return tuple(self._requests[k] for k in sorted(self._requests))
+
     def all_threads(self) -> tuple[Thread, ...]:
         return tuple(self._threads[k] for k in sorted(self._threads))
 

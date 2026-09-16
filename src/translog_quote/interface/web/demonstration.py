@@ -56,6 +56,15 @@ class Demonstration(BaseModel):
     request_ids: tuple[str, ...] = ()
     """Requests first seen during this demonstration, in the order they arrived."""
 
+    last_poll_watermark: datetime | None = None
+    """The received-at of the newest message a successful poll has fully settled,
+    never advanced past a message whose work is not yet durably committed.
+
+    In operations mode this — not wall-clock ``now`` — is the mail cutoff, so a
+    restart resumes reading from where the last poll left off and mail that
+    arrived during a deploy is processed. ``None`` until the first successful
+    poll writes one (seeded from ``operations_since`` on a fresh disk)."""
+
     @property
     def is_active(self) -> bool:
         return self.started_at is not None
@@ -78,6 +87,10 @@ class Demonstration(BaseModel):
         if not self.is_active or request_id in self.request_ids:
             return self
         return self.model_copy(update={"request_ids": (*self.request_ids, request_id)})
+
+    def with_watermark(self, at: datetime) -> Demonstration:
+        """This demonstration, with the mail cutoff advanced to ``at``."""
+        return self.model_copy(update={"last_poll_watermark": at})
 
 
 class DemonstrationFile:
@@ -132,4 +145,11 @@ class DemonstrationFile:
         updated = self.current.including(request_id)
         if updated is not self.current:
             self.save(updated)
+        return updated
+
+    def record_watermark(self, at: datetime) -> Demonstration:
+        """Persist the mail cutoff after a successful poll. Written through so a
+        restart resumes from here rather than from wall-clock ``now``."""
+        updated = self.current.with_watermark(at)
+        self.save(updated)
         return updated

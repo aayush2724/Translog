@@ -99,6 +99,8 @@ def build_gmail_email_source(
     settings: Settings,
     *,
     max_results: int | None = None,
+    overlap_seconds: float = 0.0,
+    is_internal: Callable[[RawEmail], bool] | None = None,
     sent_by_us: Callable[[], Collection[str]] | None = None,
 ) -> EmailSource:
     """An `EmailSource` over the configured Gmail **test** mailbox (Phase 10.3).
@@ -134,6 +136,9 @@ def build_gmail_email_source(
         mailbox_address=gmail.test_address,
         query=gmail.query,
         max_results=gmail.max_results if max_results is None else max_results,
+        overlap_seconds=overlap_seconds,
+        # Approval mail we sent ourselves must not spend the client fetch budget.
+        is_internal=is_internal,
         # What this run has already sent, so a mailbox that both reads and
         # sends does not feed Translog its own words back as a client's.
         sent_by_us=sent_by_us,

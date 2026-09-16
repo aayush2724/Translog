@@ -218,7 +218,7 @@ class GrowingSource:
         self._states = list(states)
         self._last: tuple[object, ...] = ()
 
-    def fetch_new(self) -> tuple[object, ...]:
+    def fetch_new(self, *, since: object = None) -> tuple[object, ...]:
         if self._states:
             self._last = self._states.pop(0)
         return self._last

@@ -63,7 +63,7 @@ class Mailbox:
     def add(self, email: RawEmail) -> None:
         self._emails.append(email)
 
-    def fetch_new(self) -> tuple[RawEmail, ...]:
+    def fetch_new(self, *, since: object = None) -> tuple[RawEmail, ...]:
         return tuple(self._emails)
 
 

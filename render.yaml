@@ -120,3 +120,20 @@ services:
       # the directory the store enumerates. Created on first write.
       - key: TRANSLOG_DEMO__STATE_DIR
         value: /var/lib/translog/state
+      # Operations mode: a restart (every deploy redeploys this service) must
+      # NOT start a fresh demonstration. Non-terminal requests are restored from
+      # the store above and the mail cutoff is the last successful poll, so a
+      # deploy neither empties the dashboard nor drops mail that arrived during
+      # it. Starting a fresh demonstration stays an explicit operator action.
+      - key: TRANSLOG_DEMO__STARTUP_MODE
+        value: operations
+      # The first mail cutoff, used ONLY until the first successful poll writes a
+      # watermark to the disk. Required in operations mode when no watermark
+      # exists yet (a fresh disk, or the first deploy onto this change): the
+      # service refuses to start without it rather than defaulting the cutoff to
+      # "now" and silently skipping every earlier message. Set it in the Render
+      # dashboard to an ISO 8601 instant (e.g. 2026-09-16T00:00:00+00:00) — the
+      # moment from which mail should be read. Ignored once a watermark exists,
+      # so it is safe to leave set.
+      - key: TRANSLOG_DEMO__OPERATIONS_SINCE
+        sync: false

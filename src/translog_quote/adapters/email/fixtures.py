@@ -101,7 +101,9 @@ class FixtureEmailSource:
     def __init__(self, directory: Path) -> None:
         self._directory = directory
 
-    def fetch_new(self) -> tuple[RawEmail, ...]:
+    def fetch_new(self, *, since: datetime | None = None) -> tuple[RawEmail, ...]:
+        # Fixtures are a fixed, small set; the ``since`` bound the real Gmail
+        # source honours has nothing to page here, so it is accepted and ignored.
         return load_fixture_emails(self._directory)
 
 
