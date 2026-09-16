@@ -14,6 +14,7 @@ from translog_quote.errors.taxonomy import (
     TranslogError,
     UnresolvedLocation,
     WebCargoSessionLost,
+    WebCargoUnreachable,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "TranslogError",
     "UnresolvedLocation",
     "WebCargoSessionLost",
+    "WebCargoUnreachable",
 ]

@@ -142,6 +142,14 @@ class WebCargoSettings(BaseModel):
     navigation_timeout_seconds: int = Field(default=30, gt=0)
     """Ceiling for one page navigation inside the WebCargo UI."""
 
+    startup_unreachable_max_wait_seconds: float = Field(default=120.0, gt=0)
+    """How long the worker keeps retrying (with backoff) when WebCargo is
+    UNREACHABLE at startup — DNS/connection/timeout/navigation failure, e.g.
+    booting before the network is up — before giving up and exiting
+    ``EXIT_UNREACHABLE`` (75) so systemd restarts it later. This is NOT the
+    needs-login path and never writes ``needs_login``. Env:
+    ``TRANSLOG_WEBCARGO__STARTUP_UNREACHABLE_MAX_WAIT_SECONDS``."""
+
     search_timeout_seconds: int = Field(default=180, gt=0)
     """Ceiling for one complete rate search — form fill, results, detail
     reads, pagination. A job that cannot finish inside this is failed with the

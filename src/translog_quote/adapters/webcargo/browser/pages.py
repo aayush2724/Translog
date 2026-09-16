@@ -657,9 +657,19 @@ def is_authenticated(driver: BrowserDriver, *, base_url: str, timeout_seconds: f
     search surface first. A read-only probe.
 
     It never fills, submits, or bypasses any login control — the answer is
-    "yes/no", never a sign-in."""
+    "yes/no", never a sign-in. ``goto`` raises ``WebCargoUnreachable`` if the
+    page cannot be reached at all — that is not a "no", it is "couldn't ask"."""
     driver.goto(search_url(base_url))
     return _search_form_visible(driver, timeout_seconds=timeout_seconds)
+
+
+def login_page_visible(driver: BrowserDriver) -> bool:
+    """Whether WebCargo has actually rendered its LOGIN page — a password field
+    is present — as opposed to the search form, a blank/error/interstitial page,
+    or nothing loaded. Read-only; lets the caller tell a real 'needs login' from
+    an unreachable page (which must not write needs_login)."""
+    state = driver.evaluate(_JS_LOGIN_CHECK)
+    return bool(isinstance(state, dict) and state.get("hasPassword"))
 
 
 def verify_authenticated(driver: BrowserDriver, *, base_url: str, timeout_seconds: float) -> None:

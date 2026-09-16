@@ -31,6 +31,19 @@ class WebCargoSessionLost(PermanentFailure):
     """
 
 
+class WebCargoUnreachable(TransientFailure):
+    """WebCargo could not be reached or loaded — DNS/connection/timeout or a
+    navigation failure — as distinct from a loaded login page.
+
+    This is the boot-before-network case: transient, not a login problem. The
+    worker retries with backoff and, if still unreachable, exits with a normal
+    non-78 code so systemd restarts it later — it must NEVER be mistaken for
+    ``WebCargoSessionLost`` (which writes ``needs_login`` and stops for an
+    operator). Lives in the taxonomy so the worker layer can tell the two apart
+    without importing the adapter.
+    """
+
+
 class UnresolvedLocation(PermanentFailure):
     """A place the client named could not be resolved to a provider identifier.
 

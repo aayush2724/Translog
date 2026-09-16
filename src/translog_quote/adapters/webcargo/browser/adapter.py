@@ -26,11 +26,12 @@ from translog_quote.adapters.routing import StatedLocationResolver
 from translog_quote.adapters.webcargo.browser.mapper import ADAPTER_ID, map_records
 from translog_quote.adapters.webcargo.browser.pages import (
     is_authenticated,
+    login_page_visible,
     run_rate_search,
 )
 from translog_quote.adapters.webcargo.browser.reauth import run_operator_login
 from translog_quote.domain.rates import RateSearchResult
-from translog_quote.errors import WebCargoSessionLost
+from translog_quote.errors import WebCargoSessionLost, WebCargoUnreachable
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -131,6 +132,16 @@ class WebCargoBrowserAdapter:
             ):
                 return
             if not interactive:
+                # The form is not visible. Only a REAL login page (a password
+                # field) is a session-loss that needs an operator sign-in; a
+                # page that loaded as neither the form nor a login page (a blank
+                # /error/interstitial page — typical when the network is only
+                # half-up) is unreachable, and must NOT write needs_login.
+                if not login_page_visible(driver):
+                    raise WebCargoUnreachable(
+                        "WebCargo loaded neither the search form nor a login page at "
+                        "startup; treating as unreachable rather than needs-login"
+                    )
                 reason = (
                     "the WebCargo session is not authenticated at worker startup; "
                     "start the worker with --login so an operator can sign in"

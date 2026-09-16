@@ -48,6 +48,10 @@ ALLOWED: dict[str, set[str]] = {
         "evaluation",
         "bootstrap",
     },
+    # Operational tooling (read-only health checks). An entry-point area like
+    # `interface`: it observes the running system through the interface/queue
+    # layer and the composition root, and reaches adapters only through them.
+    "ops": {"ops", "interface", "bootstrap", "config", "observability", "errors", "domain"},
     # The package root re-exports nothing and must stay import-free.
     "__init__": set(),
     # The composition root is the single exception: it wires everything.

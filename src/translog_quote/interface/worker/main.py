@@ -23,10 +23,13 @@ import signal
 import time
 from typing import TYPE_CHECKING, Any
 
+from rq import Queue, SimpleWorker
+
 from translog_quote import bootstrap
 from translog_quote.config import WebCargoMode
 from translog_quote.interface.jobs import (
     LockHeartbeat,
+    WorkerLock,
     acquire_worker_lock,
     build_redis,
     clear_pending_requeue,
@@ -46,12 +49,28 @@ if TYPE_CHECKING:
 
 _log = get_logger("interface.worker")
 
+#: RQ worker TTL for the browser worker. RQ derives its blocking-dequeue window
+#: as ``dequeue_timeout = worker_ttl - 15`` (rq 2.12, rq/worker/base.py:443), so
+#: 135 -> a 120s BLPOP. The default 420 gives ~405s, well past Upstash's ~270s
+#: idle reset, which cut the pop every cycle and drifted RQ's reconnect backoff.
+#: A 120s window re-issues the pop before the idle reset, keeping the connection
+#: live. Unrelated to the systemd RestartSec (130) / lock TTL (120).
+_WORKER_TTL_SECONDS = 135
+
 #: The exit code the worker uses when it stops because the persistent WebCargo
 #: session needs an operator sign-in. It is `EX_CONFIG` from sysexits.h — a
 #: configuration/state the process cannot fix itself — and the systemd unit sets
 #: `RestartPreventExitStatus=78`, so this exit does NOT restart-loop. Recovery is
 #: `--login` then `systemctl --user start …` (see docs/webcargo-operator-auth.md).
 EXIT_NEEDS_LOGIN = 78
+
+#: The worker uses this when it stops because WebCargo was UNREACHABLE at
+#: startup (DNS/connection/timeout/navigation failure — e.g. booting before the
+#: network is up), as opposed to a real login page. It is `EX_TEMPFAIL` from
+#: sysexits.h — a temporary condition to retry later — and is deliberately NOT
+#: 78, so `RestartPreventExitStatus=78` does NOT apply and systemd restarts the
+#: worker after `RestartSec`. It never writes `needs_login`.
+EXIT_UNREACHABLE = 75
 
 #: The startup auth probe is retried a few times to absorb a cold-start race:
 #: the persistent browser/profile may not have rendered the authenticated form
@@ -61,15 +80,27 @@ EXIT_NEEDS_LOGIN = 78
 _AUTH_PROBE_ATTEMPTS = 3
 _AUTH_PROBE_BACKOFF_SECONDS = 3.0
 
+#: Boot-before-network: retry the reachability probe with backoff up to this
+#: bounded wall-clock, then exit `EXIT_UNREACHABLE` and let systemd restart us
+#: later. The network usually comes up within seconds; the bound keeps a truly
+#: offline box from holding the process (and the lock) indefinitely.
+_UNREACHABLE_MAX_WAIT_SECONDS = 120.0
+_UNREACHABLE_BACKOFF_START_SECONDS = 5.0
+_UNREACHABLE_BACKOFF_MAX_SECONDS = 30.0
 
-def _stop_worker_on_lock_loss(_lost: BaseException) -> None:
-    """Warmly stop this process when the heartbeat finds the lease lost.
 
-    Sends SIGINT to ourselves so RQ runs its normal warm shutdown — never a
-    hard kill. Invoked from the heartbeat thread; the signal is handled on the
-    main thread, which unblocks ``SimpleWorker.work()`` and runs the finally
-    cleanup (stop heartbeat, close browser, release — a no-op once the lock is
-    another worker's)."""
+def _stop_worker_on_lock_loss(lost: BaseException) -> None:
+    """Warmly stop this process when the heartbeat finds the lease lost, or a
+    job hit a mid-job session loss.
+
+    Logs the reason at WARNING first (so the journal always says *why* the
+    worker self-stopped), then sends SIGINT to ourselves so RQ runs its normal
+    warm shutdown — never a hard kill. Invoked from the heartbeat thread or a
+    job exception handler; the signal is handled on the main thread, which
+    unblocks ``SimpleWorker.work()`` and runs the finally cleanup (stop
+    heartbeat, close browser, release — a no-op once the lock is another
+    worker's)."""
+    _log.warning("worker: self-stopping (%s): %s", type(lost).__name__, lost)
     os.kill(os.getpid(), signal.SIGINT)
 
 
@@ -86,39 +117,90 @@ def build_provider(settings: Settings) -> RateSearchPort:
     return bootstrap.build_rate_provider(settings)
 
 
+class _LockRefreshingWorker(SimpleWorker):
+    """SimpleWorker that re-checks single-worker ownership before each job and
+    caps RQ's reconnect backoff.
+
+    ``max_connection_wait_time`` is 5s (RQ's default is 60s). RQ does not reset
+    its reconnect backoff after a successful reconnect during an idle dequeue,
+    so on a broker that resets idle connections the wait drifts to 60s and stays
+    there. Capping keeps recovery quick and bounded; the real cure is the short
+    dequeue window (``worker_ttl=_WORKER_TTL_SECONDS``), this is the
+    belt-and-suspenders. ``worker_lock`` is refreshed right before each job; the
+    heartbeat keeps the same lease alive in the idle gaps between jobs.
+    """
+
+    max_connection_wait_time = 5.0
+
+    def __init__(self, *args: Any, worker_lock: WorkerLock | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._worker_lock = worker_lock
+
+    def execute_job(self, job: Any, queue: Any) -> None:
+        if self._worker_lock is not None:
+            self._worker_lock.refresh()
+        super().execute_job(job, queue)
+
+
 def _authenticate_with_retry(
     provider: RateSearchPort,
     *,
     interactive: bool,
     attempts: int = _AUTH_PROBE_ATTEMPTS,
+    unreachable_max_wait: float = _UNREACHABLE_MAX_WAIT_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
-    """Bring the session to the authenticated form, absorbing a cold-start race.
+    """Bring the session to the authenticated form, distinguishing two waits.
 
-    Non-interactive startup retries the probe a few times before declaring the
-    session lost, because a freshly launched persistent profile can miss the
-    first navigation-timeout window and read as a false loss. An operator
-    ``--login`` is not retried — they drive it once."""
-    from translog_quote.errors import WebCargoSessionLost
+    Non-interactive startup retries on two conditions, which must not be
+    conflated:
 
-    last: WebCargoSessionLost | None = None
-    for attempt in range(attempts):
+    - ``WebCargoUnreachable`` (DNS/connection/timeout/navigation failure — a
+      boot-before-network) is retried with backoff up to a bounded wall-clock,
+      then re-raised. It is NOT a login problem, so the caller exits
+      ``EXIT_UNREACHABLE`` (not 78) and never writes ``needs_login``.
+    - ``WebCargoSessionLost`` (WebCargo loaded and showed the login page) is
+      retried a few times to absorb the cold-start render race, then re-raised
+      so the caller records ``needs_login`` and exits 78.
+
+    An operator ``--login`` gets one honest attempt — no retries.
+    """
+    from translog_quote.errors import WebCargoSessionLost, WebCargoUnreachable
+
+    if interactive:
+        bootstrap.ensure_worker_session_authenticated(provider, interactive=True)
+        return
+
+    session_attempts = 0
+    deadline = monotonic() + unreachable_max_wait
+    wait = _UNREACHABLE_BACKOFF_START_SECONDS
+    while True:
         try:
-            bootstrap.ensure_worker_session_authenticated(provider, interactive=interactive)
+            bootstrap.ensure_worker_session_authenticated(provider, interactive=False)
             return
-        except WebCargoSessionLost as exc:
-            last = exc
-            if interactive or attempt + 1 >= attempts:
+        except WebCargoUnreachable as exc:
+            if monotonic() >= deadline:
+                _log.error(
+                    "worker: WebCargo still unreachable after ~%.0fs; exiting for a "
+                    "later restart",
+                    unreachable_max_wait,
+                )
+                raise
+            _log.warning("worker: WebCargo unreachable (%s); retrying in %.0fs", exc, wait)
+            sleep(wait)
+            wait = min(wait * 2, _UNREACHABLE_BACKOFF_MAX_SECONDS)
+        except WebCargoSessionLost:
+            session_attempts += 1
+            if session_attempts >= attempts:
                 raise
             _log.warning(
                 "worker: auth probe %d/%d found no session yet; retrying in %.0fs",
-                attempt + 1,
+                session_attempts,
                 attempts,
                 _AUTH_PROBE_BACKOFF_SECONDS,
             )
             sleep(_AUTH_PROBE_BACKOFF_SECONDS)
-    assert last is not None  # noqa: S101 - the loop returns or raises
-    raise last
 
 
 def _requeue_failed_at_front(settings: Settings, job_id: str) -> None:
@@ -183,9 +265,7 @@ def run_worker(settings: Settings, *, interactive_login: bool = False) -> int:
     requeues that job at the front (it must not end permanently FAILED) and exits
     the same way. A live session at startup clears any stale ``needs_login``.
     """
-    from rq import Queue, SimpleWorker
-
-    from translog_quote.errors import WebCargoSessionLost
+    from translog_quote.errors import WebCargoSessionLost, WebCargoUnreachable
 
     lock = acquire_worker_lock(settings)
     heartbeat: LockHeartbeat | None = None
@@ -196,19 +276,31 @@ def run_worker(settings: Settings, *, interactive_login: bool = False) -> int:
     try:
         # Keep the lease alive for the worker's ENTIRE life — the idle waits
         # between jobs and any interactive operator login, not only per job —
-        # so a merely-idle worker never lets its lock lapse. Refresh at ~ttl/2.
+        # so a merely-idle worker never lets its lock lapse. Refresh at ~ttl/6,
+        # frequent enough to survive a couple of skipped ticks during a broker
+        # blip (round-2 fix: a lapse is re-acquired, not fatal).
         heartbeat = LockHeartbeat(
             lock,
-            interval_seconds=max(1.0, settings.queue.worker_lock_ttl_seconds / 2),
+            interval_seconds=max(1.0, settings.queue.worker_lock_ttl_seconds / 6),
             on_lock_lost=_stop_worker_on_lock_loss,
         )
         heartbeat.start()
 
         provider = build_provider(settings)
         try:
-            _authenticate_with_retry(provider, interactive=interactive_login)
+            _authenticate_with_retry(
+                provider,
+                interactive=interactive_login,
+                unreachable_max_wait=settings.webcargo.startup_unreachable_max_wait_seconds,
+            )
+        except WebCargoUnreachable as exc:
+            # Boot-before-network (DNS/connection/timeout/navigation): NOT a
+            # login problem. We already retried with backoff; exit non-78 so
+            # systemd restarts us later, and DO NOT write needs_login.
+            _log.error("worker: WebCargo unreachable at startup; exiting to retry later: %s", exc)
+            return EXIT_UNREACHABLE
         except WebCargoSessionLost as exc:
-            # Startup session loss: degrade cleanly instead of crash-looping.
+            # Startup session loss (a real login page): degrade cleanly.
             _log.error("worker: stopping, session needs an operator sign-in: %s", exc)
             publish_worker_needs_login(settings)
             return EXIT_NEEDS_LOGIN
@@ -236,18 +328,25 @@ def run_worker(settings: Settings, *, interactive_login: bool = False) -> int:
                 return False  # stop other handlers; the failure is still recorded
             return True
 
-        class LockRefreshingWorker(SimpleWorker):
-            """Re-checks single-worker ownership right before each job; the
-            heartbeat keeps the same lease alive in the idle gaps between."""
-
-            def execute_job(self, job: Any, queue: Any) -> None:
-                lock.refresh()
-                super().execute_job(job, queue)
-
         connection = build_redis(settings)
         rq_queue = Queue(settings.queue.rate_search_queue, connection=connection)
-        worker = LockRefreshingWorker(
-            [rq_queue], connection=connection, exception_handlers=[_on_job_exception]
+        worker = _LockRefreshingWorker(
+            [rq_queue],
+            connection=connection,
+            exception_handlers=[_on_job_exception],
+            worker_ttl=_WORKER_TTL_SECONDS,
+            # Guard for the in-process (SimpleWorker) model: a job's worker key
+            # and StartedJobRegistry entry get a heartbeat TTL of
+            # min(job.timeout, job_monitoring_interval) + 60, set once at job
+            # start. SimpleWorker runs the job in this thread and does NOT
+            # refresh mid-job, so with the default interval (30 -> 90s TTL) a
+            # search slower than 90s could have its entry expire and be
+            # abandoned by a later cleanup. Setting the interval to the job
+            # timeout makes that one start-heartbeat cover the WHOLE job
+            # (min(600,600)+60 = 660s), so no search up to job_timeout is ever
+            # marked abandoned. Unrelated to worker_ttl (the idle dequeue TTL).
+            job_monitoring_interval=settings.queue.job_timeout_seconds,
+            worker_lock=lock,
         )
         worker.work(with_scheduler=False)
 

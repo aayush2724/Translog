@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from translog_quote.errors import PermanentFailure
+from translog_quote.errors import PermanentFailure, WebCargoUnreachable
 
 if TYPE_CHECKING:
     from translog_quote.config import Settings
@@ -38,7 +38,17 @@ class PlaywrightWebCargoDriver:
         self._page = page
 
     def goto(self, url: str) -> None:
-        self._page.goto(url, wait_until="domcontentloaded")
+        # A navigation failure — DNS, connection refused, timeout, a browser
+        # net:: error — is WebCargo being *unreachable*, not a lost session or a
+        # login page. Translate it so the worker's startup can back off and exit
+        # non-78 (retry later) instead of writing needs_login. Playwright's
+        # TimeoutError subclasses Error, so catching Error covers both.
+        from playwright.sync_api import Error as PlaywrightError
+
+        try:
+            self._page.goto(url, wait_until="domcontentloaded")
+        except PlaywrightError as exc:
+            raise WebCargoUnreachable(f"could not load WebCargo at {url}: {exc}") from exc
 
     def click(self, selector: str) -> None:
         self._page.click(selector)

@@ -216,3 +216,21 @@ TRANSLOG_GOODS_TYPE__SPECIAL_HANDLING='["battery", "lithium", "perishable"]'
   reviewed accepted phrase (`general cargo`, `non hazardous`, `non haz`, and the
   two combined phrasings), `is_chemical` is explicitly `False`, and no
   special-handling word is on the commodity. Anything else holds.
+
+## Worker log notes (after the reliability round-2 deploy)
+
+- **`lock lapsed, re-acquired` (WARNING) is expected, not a fault.** When Upstash
+  resets the connection long enough for the 120s lock lease to lapse, the
+  heartbeat now re-acquires the lease with the same token and logs this once,
+  instead of self-stopping the worker (which is what the old behaviour did).
+  Occasional occurrences after a broker blip are normal. What is NOT normal is
+  the worker actually stopping (`self-stopping (...)`) — that only happens on a
+  genuinely different lock holder or a lost session.
+- **Startup env for the unreachable bound:**
+  `TRANSLOG_WEBCARGO__STARTUP_UNREACHABLE_MAX_WAIT_SECONDS` (default 120) bounds
+  how long the worker retries a boot-before-network before exiting 75 for a
+  later systemd restart — it never writes `needs_login`.
+- **Verify after deploy:** `python -m translog_quote.ops.healthcheck --env-file
+  .env.worker` (add `--token`, with `TRANSLOG_DASHBOARD_TOKEN` in the env, for
+  the dashboard checks 8-9). `journal(200)` self-stops/reconnects should trend to
+  ~0 once the fix is running.

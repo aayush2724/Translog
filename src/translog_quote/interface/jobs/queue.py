@@ -26,11 +26,14 @@ from translog_quote.interface.jobs.model import (
     RateSearchJobResult,
     job_state_from_rq_status,
 )
+from translog_quote.observability import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from translog_quote.config import Settings
+
+_log = get_logger("interface.jobs.queue")
 
 _T = TypeVar("_T")
 
@@ -314,11 +317,19 @@ class WorkerLock:
     wedges its successor; the live worker refreshes it as it runs.
     """
 
-    def __init__(self, connection: Any, *, key: str, ttl_seconds: int) -> None:
+    def __init__(
+        self,
+        connection: Any,
+        *,
+        key: str,
+        ttl_seconds: int,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self._connection = connection
         self._key = key
         self._ttl = ttl_seconds
         self._token = uuid.uuid4().hex
+        self._sleep = sleep
 
     def acquire(self) -> None:
         taken = self._connection.set(self._key, self._token, nx=True, ex=self._ttl)
@@ -330,20 +341,46 @@ class WorkerLock:
             )
 
     def refresh(self) -> None:
-        """Extend the lease — but only while it is still ours.
+        """Keep the lease, re-acquiring it if it has merely lapsed.
 
-        Finding someone else's token means this worker lost the lock (its TTL
-        lapsed during a stall and another worker started). Continuing would be
-        precisely the concurrent-automation scenario the lock exists to
-        prevent, so the only safe answer is to stop.
+        Three outcomes — the middle one is the round-2 fix:
+
+        - our token still holds the key -> extend the TTL;
+        - the key is **absent** (the lease lapsed during an outage longer than
+          the TTL, or the broker dropped it on a reset) -> re-acquire it with
+          the SAME token via ``SET NX`` and carry on. A lapsed lease is not
+          another worker; stopping here was what took the worker down on an
+          Upstash reset;
+        - a **different** token holds it, or the ``SET NX`` loses the race ->
+          another worker genuinely exists: refuse (`PermanentFailure`) so we
+          never drive two browsers on one profile.
+
+        Transient ``ConnectionError``/``TimeoutError`` are retried a few times
+        in-tick (`_with_retry`); a persistent one propagates to the heartbeat,
+        which skips the tick and tries again next interval.
         """
-        holder = self._connection.get(self._key)
-        if holder is None or holder != self._token.encode("utf-8"):
-            raise PermanentFailure(
-                "the rate-search worker lock is no longer held by this worker; "
-                "refusing to continue alongside another browser worker."
+        token_bytes = self._token.encode("utf-8")
+        holder = self._read_holder()
+        if holder == token_bytes:
+            _with_retry(lambda: self._connection.expire(self._key, self._ttl), sleep=self._sleep)
+            return
+        if holder is None:
+            reacquired = _with_retry(
+                lambda: self._connection.set(self._key, self._token, nx=True, ex=self._ttl),
+                sleep=self._sleep,
             )
-        self._connection.expire(self._key, self._ttl)
+            if reacquired:
+                _log.warning("worker: rate-search lock had lapsed; re-acquired with the same token")
+                return
+            holder = self._read_holder()  # another worker took it in the gap
+        raise PermanentFailure(
+            "the rate-search worker lock is held by a different worker "
+            f"(holder {holder!r} is not this worker's token); refusing to run "
+            "a second browser worker on the same profile."
+        )
+
+    def _read_holder(self) -> Any:
+        return _with_retry(lambda: self._connection.get(self._key), sleep=self._sleep)
 
     def release(self) -> None:
         holder = self._connection.get(self._key)
@@ -354,7 +391,8 @@ class WorkerLock:
 class LockHeartbeat:
     """Keeps an acquired `WorkerLock`'s lease alive for the worker's whole life.
 
-    A daemon thread refreshes the lock every ~ttl/2 seconds, so a worker that
+    A daemon thread refreshes the lock every ~ttl/6 seconds (frequent enough to
+    survive a couple of skipped ticks during a broker blip), so a worker that
     is merely idle — `SimpleWorker` blocked waiting for the next job — does not
     let its lease lapse and then lose the lock on the following job. The moment
     the process dies the daemon thread dies with it: nothing refreshes the

@@ -4,6 +4,14 @@
 # host; keep the two in sync. Paths below are host-specific (the operator's home
 # and venv) — adjust WorkingDirectory / ExecStart when deploying elsewhere.
 #
+# INVARIANT: RestartSec (130) MUST exceed the Redis worker-lock TTL (120,
+# TRANSLOG_QUEUE__WORKER_LOCK_TTL_SECONDS). The lock guarantees exactly one
+# browser worker; a crashed/stopped worker's lease only expires after its TTL.
+# If systemd restarted sooner, the successor would try to acquire a lock the
+# dead worker still nominally holds and refuse to start (PermanentFailure).
+# Waiting out the TTL lets the lease lapse first, so the restart cleanly
+# re-acquires. Change one and you must re-check the other.
+#
 # Install/update:
 #   cp deploy/translog-worker.service ~/.config/systemd/user/translog-webcargo-worker.service
 #   systemctl --user daemon-reload

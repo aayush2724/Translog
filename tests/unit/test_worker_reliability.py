@@ -203,7 +203,7 @@ def test_startup_session_loss_degrades_to_exit_78(monkeypatch: pytest.MonkeyPatc
         def close(self) -> None:
             released["provider_closed"] = True
 
-    def _raise(_p: object, *, interactive: bool) -> None:
+    def _raise(_p: object, *, interactive: bool, **_kw: object) -> None:
         raise WebCargoSessionLost("no session")
 
     monkeypatch.setattr(worker_main, "acquire_worker_lock", lambda _s: _Lock())
@@ -218,7 +218,10 @@ def test_startup_session_loss_degrades_to_exit_78(monkeypatch: pytest.MonkeyPatc
     )
 
     code = worker_main.run_worker(
-        SimpleNamespace(queue=SimpleNamespace(worker_lock_ttl_seconds=120))
+        SimpleNamespace(
+            queue=SimpleNamespace(worker_lock_ttl_seconds=120),
+            webcargo=SimpleNamespace(startup_unreachable_max_wait_seconds=120.0),
+        )
     )
 
     assert code == worker_main.EXIT_NEEDS_LOGIN == 78
@@ -400,3 +403,261 @@ def test_drain_does_nothing_without_a_record(monkeypatch: pytest.MonkeyPatch) ->
     worker_main._drain_pending_requeue(_drain_settings())
 
     assert cleared["n"] == 0  # nothing to clear
+
+
+# --- round 2, Fix 1: the lock heartbeat survives a lapse ------------------------
+
+
+class _FakeLockConn:
+    """A tiny in-memory stand-in for a Redis client's lock ops. ``get`` returns
+    the next scripted value (an Exception is raised); ``set`` (NX) and ``expire``
+    are recorded."""
+
+    def __init__(self, get_returns: list[Any], *, set_returns: bool = True) -> None:
+        self._get = list(get_returns)
+        self._set_returns = set_returns
+        self.calls: list[tuple[Any, ...]] = []
+
+    def get(self, _key: str) -> Any:
+        value = self._get.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    def set(self, _key: str, value: str, nx: bool = False, ex: int | None = None) -> bool:
+        self.calls.append(("set", value, nx, ex))
+        return self._set_returns
+
+    def expire(self, _key: str, ttl: int) -> bool:
+        self.calls.append(("expire", ttl))
+        return True
+
+
+def _lock(conn: _FakeLockConn) -> Any:
+    lock = queue.WorkerLock(object(), key="k", ttl_seconds=120, sleep=lambda _s: None)
+    lock._connection = conn  # type: ignore[attr-defined]
+    return lock
+
+
+def test_one_failed_refresh_is_retried_not_fatal() -> None:
+    lock = queue.WorkerLock(object(), key="k", ttl_seconds=120, sleep=lambda _s: None)
+    token = lock._token.encode("utf-8")  # type: ignore[attr-defined]
+    lock._connection = _FakeLockConn([RedisConnectionError("blip"), token])  # type: ignore[attr-defined]
+
+    lock.refresh()  # the in-tick retry absorbs the blip; no raise
+
+    assert ("expire", 120) in lock._connection.calls  # type: ignore[attr-defined]
+
+
+def test_absent_key_is_reacquired_with_the_same_token() -> None:
+    lock = queue.WorkerLock(object(), key="k", ttl_seconds=120, sleep=lambda _s: None)
+    token = lock._token  # type: ignore[attr-defined]
+    conn = _FakeLockConn([None], set_returns=True)  # key gone -> SET NX succeeds
+    lock._connection = conn  # type: ignore[attr-defined]
+
+    lock.refresh()  # re-acquires; must NOT raise
+
+    assert ("set", token, True, 120) in conn.calls  # re-acquired with our token, NX, full TTL
+
+
+def test_a_foreign_token_stops_the_worker() -> None:
+    from translog_quote.errors import PermanentFailure
+
+    lock = _lock(_FakeLockConn([b"another-workers-token"]))
+    with pytest.raises(PermanentFailure):
+        lock.refresh()
+
+
+def test_losing_the_reacquire_race_stops_the_worker() -> None:
+    from translog_quote.errors import PermanentFailure
+
+    # key absent, but SET NX fails (someone took it), and the re-read is foreign.
+    lock = _lock(_FakeLockConn([None, b"another-workers-token"], set_returns=False))
+    with pytest.raises(PermanentFailure):
+        lock.refresh()
+
+
+# --- round 2, Fix 2: dequeue window + capped backoff ----------------------------
+
+
+@pytest.mark.filterwarnings("ignore:CLIENT LIST command not supported")
+def test_dequeue_timeout_is_well_under_the_idle_reset() -> None:
+    from unittest.mock import MagicMock
+
+    from rq import Queue
+
+    from translog_quote.interface.worker.main import _WORKER_TTL_SECONDS, _LockRefreshingWorker
+
+    conn = MagicMock()
+    conn.connection_pool.connection_kwargs = {}  # RQ reads socket_timeout from here
+    worker = _LockRefreshingWorker(
+        [Queue("rate-search", connection=conn)], connection=conn, worker_ttl=_WORKER_TTL_SECONDS
+    )
+    assert worker.dequeue_timeout == 120  # worker_ttl - 15 (rq 2.12)
+    assert worker.dequeue_timeout < 250  # re-issues the BLPOP before Upstash's ~270s reset
+
+
+def test_reconnect_backoff_is_capped_below_the_rq_default() -> None:
+    from rq.worker import Worker
+
+    from translog_quote.interface.worker.main import _LockRefreshingWorker
+
+    assert _LockRefreshingWorker.max_connection_wait_time == 5.0
+    assert _LockRefreshingWorker.max_connection_wait_time < Worker.max_connection_wait_time  # 60.0
+
+
+def test_in_tick_retries_finish_well_within_the_refresh_interval() -> None:
+    """A refresh that hits two transient blips retries in-tick, and the total
+    sleep is far under the ttl/6 heartbeat interval (20s for a 120s TTL) — the
+    retries never eat into the next tick."""
+    slept: list[float] = []
+    lock = queue.WorkerLock(object(), key="k", ttl_seconds=120, sleep=slept.append)
+    token = lock._token.encode("utf-8")  # type: ignore[attr-defined]
+    lock._connection = _FakeLockConn(  # type: ignore[attr-defined]
+        [RedisConnectionError("x"), RedisConnectionError("y"), token]
+    )
+
+    lock.refresh()  # two blips absorbed, then our token -> expire
+
+    interval = 120 / 6  # the heartbeat interval this TTL implies
+    assert sum(slept) < interval  # comfortably inside one tick
+    assert sum(slept) < 1.5  # and actually sub-second (0.2 + 0.4 backoff)
+
+
+@pytest.mark.filterwarnings("ignore:CLIENT LIST command not supported")
+def test_a_long_job_keeps_its_registry_entry_alive_for_the_whole_timeout() -> None:
+    """The in-process (SimpleWorker) guard: with job_monitoring_interval set to
+    the job timeout, the heartbeat TTL taken once at job start covers the WHOLE
+    job, so a slow search is never abandoned mid-run. The RQ default (30) would
+    give only 90s."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from rq import Queue
+
+    from translog_quote.interface.worker.main import _WORKER_TTL_SECONDS, _LockRefreshingWorker
+
+    conn = MagicMock()
+    conn.connection_pool.connection_kwargs = {}
+    worker = _LockRefreshingWorker(
+        [Queue("rate-search", connection=conn)],
+        connection=conn,
+        worker_ttl=_WORKER_TTL_SECONDS,
+        job_monitoring_interval=600,  # = job_timeout
+    )
+    worker.current_job_working_time = 0.0
+
+    ttl = worker.get_heartbeat_ttl(SimpleNamespace(timeout=600))
+
+    assert ttl >= 600  # the start heartbeat covers the whole 600s job timeout
+    assert int(min(600, 30)) + 60 == 90  # what the RQ default interval would have given
+
+
+# --- round 2, Fix 3: unreachable vs login page ----------------------------------
+
+
+def test_startup_unreachable_exits_75_and_never_writes_needs_login(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from translog_quote.errors import WebCargoUnreachable
+    from translog_quote.interface.worker import main as worker_main
+
+    flags: dict[str, Any] = {}
+
+    class _Lock:
+        def release(self) -> None:
+            flags["released"] = True
+
+    class _Heartbeat:
+        def __init__(self, *a: object, **k: object) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    class _Provider:
+        def close(self) -> None:
+            pass
+
+    def _unreachable(_p: object, *, interactive: bool, **_kw: object) -> None:
+        raise WebCargoUnreachable("name resolution failed")
+
+    monkeypatch.setattr(worker_main, "acquire_worker_lock", lambda _s: _Lock())
+    monkeypatch.setattr(worker_main, "LockHeartbeat", _Heartbeat)
+    monkeypatch.setattr(worker_main, "build_provider", lambda _s: _Provider())
+    monkeypatch.setattr(worker_main, "_authenticate_with_retry", _unreachable)
+    monkeypatch.setattr(
+        worker_main, "publish_worker_needs_login", lambda _s: flags.__setitem__("needs_login", True)
+    )
+    monkeypatch.setattr(worker_main, "clear_worker_status", lambda _s: None)
+
+    code = worker_main.run_worker(
+        SimpleNamespace(
+            queue=SimpleNamespace(worker_lock_ttl_seconds=120),
+            webcargo=SimpleNamespace(startup_unreachable_max_wait_seconds=120.0),
+        )
+    )
+
+    assert code == worker_main.EXIT_UNREACHABLE == 75
+    assert "needs_login" not in flags  # a network problem must NOT look like needs-login
+    assert flags.get("released") is True  # the lock is still released
+
+
+def test_authenticate_with_retry_backs_off_then_raises_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from translog_quote.errors import WebCargoUnreachable
+    from translog_quote.interface.worker import main as worker_main
+
+    def always_unreachable(_p: object, *, interactive: bool) -> None:
+        raise WebCargoUnreachable("net down")
+
+    monkeypatch.setattr(
+        worker_main.bootstrap, "ensure_worker_session_authenticated", always_unreachable
+    )
+    clock = [0.0, 0.0, 999.0]  # deadline calc, first check (retry), second check (past deadline)
+
+    def _monotonic() -> float:
+        return clock.pop(0) if clock else 999.0
+
+    with pytest.raises(WebCargoUnreachable):
+        worker_main._authenticate_with_retry(
+            object(),  # type: ignore[arg-type]
+            interactive=False,
+            sleep=lambda _s: None,
+            monotonic=_monotonic,
+        )
+
+
+def test_login_page_visible_reads_the_password_field_not_the_placeholder() -> None:
+    from translog_quote.adapters.webcargo.browser import pages
+
+    class _Driver:
+        def __init__(self, state: dict[str, bool]) -> None:
+            self._state = state
+
+        def evaluate(self, _script: str, _argument: object = None) -> dict[str, bool]:
+            return self._state
+
+    assert pages.login_page_visible(_Driver({"hasPassword": True, "hasSearchForm": False})) is True
+    assert (
+        pages.login_page_visible(_Driver({"hasPassword": False, "hasSearchForm": False})) is False
+    )
+
+
+def test_is_authenticated_propagates_unreachable_from_a_failed_goto() -> None:
+    from translog_quote.adapters.webcargo.browser import pages
+    from translog_quote.errors import WebCargoUnreachable
+
+    class _Driver:
+        def goto(self, _url: str) -> None:
+            raise WebCargoUnreachable("dns")
+
+        def wait_visible(self, _sel: str, timeout_seconds: float) -> bool:
+            return True
+
+    with pytest.raises(WebCargoUnreachable):
+        pages.is_authenticated(_Driver(), base_url="https://x.invalid/app/", timeout_seconds=1)

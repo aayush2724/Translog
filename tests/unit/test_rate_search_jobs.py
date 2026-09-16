@@ -241,8 +241,8 @@ def test_refresh_extends_only_a_lock_this_worker_still_holds() -> None:
 
     lock.refresh()  # fine: still ours
 
-    redis.store["lock"] = b"someone-else"  # lease lapsed; another worker took it
-    with pytest.raises(PermanentFailure, match="no longer held"):
+    redis.store["lock"] = b"someone-else"  # another worker genuinely holds it now
+    with pytest.raises(PermanentFailure, match="different worker"):
         lock.refresh()
 
 
