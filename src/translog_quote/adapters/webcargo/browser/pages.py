@@ -556,15 +556,20 @@ def _await_exact_option(
 
 #: Reads the Goods Type select's *selected item* — the committed value — NOT the
 #: grey placeholder (WebCargo's placeholder text happens to be "General Cargo",
-#: which must never be mistaken for a selection). AntD renders a chosen value as
-#: `.ant-select-selection-item` and an empty select as
-#: `.ant-select-selection-placeholder`; this reads only the former, so nothing
-#: selected reads as "".
+#: which must never be mistaken for a selection). The live WebCargo control is
+#: AntD **v3**, which renders a chosen value in `.ant-select-selection-selected-value`;
+#: newer AntD (v4/v5) uses `.ant-select-selection-item`. This reads the v3 element
+#: first and falls back to the v4 class, so the committed value is read on either
+#: — and an empty select (only the placeholder) still reads as "". Reading only
+#: `.ant-select-selection-item` (the v4 class) against the live v3 control
+#: returned "" for a real selection, so a confirmed pick read as "the
+#: placeholder" and the search refused to run.
 _JS_GOODS_TYPE_SELECTED = """
 () => {
   const sel = document.querySelector('[id^="goodsType"]');
   if (!sel) return '';
-  const item = sel.querySelector('.ant-select-selection-item');
+  const item = sel.querySelector('.ant-select-selection-selected-value')
+            || sel.querySelector('.ant-select-selection-item');
   return item ? (item.getAttribute('title') || item.textContent || '').trim() : '';
 }
 """
@@ -577,6 +582,46 @@ def _selected_goods_type(driver: BrowserDriver) -> str:
     return str(value).strip() if value else ""
 
 
+def _goods_type_query(label: str) -> str:
+    """The autocomplete *filter query* for a Goods Type ``label``.
+
+    WebCargo's commodity field filters on the HS code / commodity name; typing
+    the whole ``"CODE - Label"`` string matches nothing (the field returns "No
+    Data"). The code is the text before the first ``" - "`` separator — "0000",
+    "8506-3", "29-1" — short, precise, and exactly the "4-digit HS code" the
+    field is built to accept. The subsequent exact-option match still uses the
+    FULL label, so a broad code that surfaces several entries never widens the
+    selection. Falls back to the whole label when there is no separator
+    (defensive; every real WebCargo label carries one)."""
+    head = label.split(" - ", 1)[0].strip()
+    return head or label.strip()
+
+
+def _normalise_goods_type(text: str) -> str:
+    """Casefold and collapse whitespace — for comparing a committed selection
+    against the option that was clicked, tolerating case/spacing differences."""
+    return " ".join(text.casefold().split())
+
+
+def _selection_confirms(selected: str, chosen: str) -> bool:
+    """Whether the committed selected-item display corresponds to ``chosen``,
+    the exact option that was clicked.
+
+    WebCargo renders the committed selection differently from the option text:
+    it drops the numeric code and may recase/reformat it — the option
+    ``"30 - Pharmaceutical Products (no Temperature Control)"`` commits as
+    ``"Pharmaceutical Products (NO Temperature Control)"``. So a match is
+    accepted on the FULL label or on the label's name part (the text after the
+    first ``" - "``), normalised for case and whitespace — but only on a WHOLE
+    match, never a loose substring, so one commodity is never mistaken for
+    another. An empty selection (only the grey placeholder) is never a match."""
+    if not selected.strip():
+        return False
+    sel = _normalise_goods_type(selected)
+    name = chosen.split(" - ", 1)[1] if " - " in chosen else chosen
+    return sel == _normalise_goods_type(chosen) or sel == _normalise_goods_type(name)
+
+
 def _select_goods_type(
     driver: BrowserDriver, label: str | None, *, timeout_seconds: float
 ) -> str:
@@ -584,9 +629,12 @@ def _select_goods_type(
 
     The Goods Type is the AntD select whose entries look like "0000 - General
     Cargo". The client's free-text commodity is NEVER typed here — that returned
-    no options for every realistic enquiry. This types the decided label, waits
-    for an option equal to it, and selects it — or fails loudly naming the label,
-    so a config/catalog entry that WebCargo does not offer is caught, not guessed
+    no options for every realistic enquiry. WebCargo's autocomplete filters on
+    the HS code / name, so this types a *filter query derived from the label*
+    (its code prefix — see ``_goods_type_query``; typing the whole "code - label"
+    string returns "No Data"), waits for an option whose text equals the FULL
+    label exactly, and selects it — or fails loudly naming the label, so a
+    config/catalog entry that WebCargo does not offer is caught, not guessed
     around.
 
     The AntD select keeps its inner search field hidden until opened, so the
@@ -601,7 +649,7 @@ def _select_goods_type(
             "the WebCargo Goods Type search field never became visible after "
             "opening the Goods Type select; the search cannot choose a Goods Type blind"
         )
-    driver.fill(COMMODITY_INPUT, label)
+    driver.fill(COMMODITY_INPUT, _goods_type_query(label))
     chosen = _await_exact_option(driver, DROPDOWN_OPTION, label, timeout_seconds=timeout_seconds)
     if chosen is None:
         raise PermanentFailure(
@@ -610,15 +658,17 @@ def _select_goods_type(
             "(check TRANSLOG_GOODS_TYPE__GENERAL_CARGO_LABEL and the catalog)"
         )
     driver.click_option(DROPDOWN_OPTION, chosen)
-    # Verify the click registered: the SELECTED ITEM must now be the chosen
-    # label. A click that did not take leaves the grey placeholder showing
-    # (WebCargo's placeholder is literally "General Cargo"), which must never
-    # read as a successful selection.
+    # Verify the click registered: the SELECTED ITEM must now correspond to the
+    # chosen option. A click that did not take leaves the grey placeholder
+    # showing (WebCargo's placeholder is literally "General Cargo"), which reads
+    # as an empty selection. The committed display drops the code and may recase
+    # the label, so this compares robustly (``_selection_confirms``) rather than
+    # by strict equality — while still refusing an empty or unrelated selection.
     selected = _selected_goods_type(driver)
-    if selected != chosen:
+    if not _selection_confirms(selected, chosen):
         raise PermanentFailure(
             f"the Goods Type {chosen!r} did not register as selected "
-            f"(the select still shows {selected or 'the placeholder'!r}); "
+            f"(the select shows {selected or 'the placeholder'!r}); "
             "the search will not run under an unconfirmed Goods Type"
         )
     return chosen

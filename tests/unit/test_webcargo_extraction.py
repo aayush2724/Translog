@@ -393,7 +393,10 @@ def test_commodity_targets_the_goods_type_select_not_a_generic_field() -> None:
 
     assert chosen == "0000 - General Cargo"
     assert ("click", pages.COMMODITY_CONTROL) in driver.calls  # opened the select first
-    assert ("fill", f"{pages.COMMODITY_INPUT}=0000 - General Cargo") in driver.calls
+    # the field is filtered by the CODE query, not the full "code - label"
+    # string (which WebCargo returns "No Data" for):
+    assert ("fill", f"{pages.COMMODITY_INPUT}=0000") in driver.calls
+    assert ("fill", f"{pages.COMMODITY_INPUT}=0000 - General Cargo") not in driver.calls
     # never touches origin/destination fields:
     assert all(pages.ORIGIN_INPUT not in detail for _, detail in driver.calls)
 
@@ -448,8 +451,9 @@ def test_goods_type_fails_loudly_when_the_label_is_not_offered() -> None:
     a loud refusal naming it, not a fallback."""
     driver = FakeDriver(
         rows=rows_payload(1),
-        # WebCargo offers a different code; the exact configured label is absent.
-        options={"9999 - General Cargo (other)": ["9999 - General Cargo (other)"]},
+        # The code query "0000" surfaces an entry, but not the exact configured
+        # label — a loud refusal naming it, never a fallback to the near-miss.
+        options={"0000": ["0000 - General Cargo (other)"]},
     )
 
     with pytest.raises(PermanentFailure, match="did not offer the Goods Type"):
@@ -462,8 +466,9 @@ def test_goods_type_selects_only_the_exact_label_not_a_similar_one() -> None:
     Vulnerable entry is never matched or clicked."""
     driver = FakeDriver(
         rows=rows_payload(1),
+        # the code query "0000" surfaces both; exact equality picks the former:
         options={
-            "0000 - General Cargo": ["0000 - General Cargo", "0000-90 - Vulnerable cargo"],
+            "0000": ["0000 - General Cargo", "0000-90 - Vulnerable cargo"],
         },
     )
 
@@ -494,11 +499,105 @@ def test_a_goods_type_offered_twice_is_a_loud_ambiguous_refusal() -> None:
     never resolved by picking the first."""
     driver = FakeDriver(
         rows=rows_payload(1),
-        options={"0000 - General Cargo": ["0000 - General Cargo", "0000 - General Cargo"]},
+        options={"0000": ["0000 - General Cargo", "0000 - General Cargo"]},
     )
 
     with pytest.raises(PermanentFailure, match="more than once"):
         pages._select_goods_type(driver, "0000 - General Cargo", timeout_seconds=1)
+
+
+def test_goods_type_query_is_the_code_prefix_not_the_full_label() -> None:
+    """The autocomplete filter query is the label's code (the text before the
+    first ' - '), never the whole 'code - label' string (which returns 'No
+    Data' live)."""
+    assert pages._goods_type_query("0000 - General Cargo") == "0000"
+    assert pages._goods_type_query("8506-3 - Lithium Metal Batteries Un3090 Section Ii") == "8506-3"
+    assert pages._goods_type_query("29-1 - Organic Chemicals (passive Temp. Control)") == "29-1"
+    # defensive: a label with no separator falls back to the whole (stripped) text
+    assert pages._goods_type_query("General Cargo") == "General Cargo"
+
+
+def test_a_suffix_coded_goods_type_filters_by_its_code_and_selects_exactly() -> None:
+    """A suffixed code like '8506-3' is derived as the query; the code surfaces
+    the whole family and exact equality selects the intended variant only."""
+    label = "8506-3 - Lithium Metal Batteries"
+    driver = FakeDriver(
+        rows=rows_payload(1),
+        options={
+            "8506-3": [
+                "8506 - Lithium Batteries",
+                "8506-1 - Lithium Metal Batteries (Section Ia)",
+                "8506-3 - Lithium Metal Batteries",
+            ],
+        },
+    )
+
+    chosen = pages._select_goods_type(driver, label, timeout_seconds=5)
+
+    assert chosen == label
+    assert ("fill", f"{pages.COMMODITY_INPUT}=8506-3") in driver.calls  # code query
+    assert ("option", label) in driver.calls  # exact variant selected
+    assert ("option", "8506 - Lithium Batteries") not in driver.calls  # family head never matched
+
+
+def test_full_label_is_never_typed_as_the_filter_query() -> None:
+    """Guard against a regression to typing the whole label: WebCargo returns
+    'No Data' for it, so the field must be filled with the code query only."""
+    driver = FakeDriver(rows=rows_payload(1))
+
+    pages._select_goods_type(driver, "0000 - General Cargo", timeout_seconds=5)
+
+    fills = [detail for kind, detail in driver.calls if kind == "fill"]
+    assert f"{pages.COMMODITY_INPUT}=0000" in fills
+    assert all("0000 - General Cargo" not in f for f in fills)
+
+
+def test_selection_confirms_tolerates_code_removal_and_case_but_not_mismatch() -> None:
+    """The committed selected-item display drops the code and may recase — a
+    real match is accepted, but an empty, partial, or different value is not."""
+    chosen = "30 - Pharmaceutical Products (no Temperature Control)"
+    assert pages._selection_confirms(chosen, chosen)  # exact
+    # live-observed: code dropped + recased
+    assert pages._selection_confirms("Pharmaceutical Products (NO Temperature Control)", chosen)
+    # whitespace/format differences are tolerated
+    assert pages._selection_confirms(" Pharmaceutical  Products (NO Temperature Control) ", chosen)
+    assert not pages._selection_confirms("", chosen)  # only the placeholder -> not a selection
+    assert not pages._selection_confirms("Organic Chemicals", chosen)  # a different commodity
+    # a partial name (not the whole name) is not enough:
+    assert not pages._selection_confirms("Pharmaceutical Products", chosen)
+
+
+def test_goods_type_selection_accepts_a_code_dropped_recased_display() -> None:
+    """End to end: WebCargo commits the selection as the name only, uppercased
+    (no code). The exact option was still clicked, so selection is accepted."""
+
+    class _CommitsDisplayName(FakeDriver):
+        def click_option(self, selector: str, text: str) -> None:
+            self.calls.append(("option", text))
+            name = text.split(" - ", 1)[1]
+            self._goods_type_selected = name.upper()  # drops the code, recases
+
+    driver = _CommitsDisplayName(rows=rows_payload(1))
+
+    chosen = pages._select_goods_type(driver, "0000 - General Cargo", timeout_seconds=5)
+
+    assert chosen == "0000 - General Cargo"
+    assert ("option", "0000 - General Cargo") in driver.calls
+
+
+def test_goods_type_selection_rejects_a_mismatched_committed_display() -> None:
+    """If the committed selection is a DIFFERENT commodity, refuse loudly — the
+    robust check must never accept one commodity as proof another was chosen."""
+
+    class _CommitsWrongCommodity(FakeDriver):
+        def click_option(self, selector: str, text: str) -> None:
+            self.calls.append(("option", text))
+            self._goods_type_selected = "Organic Chemicals"  # not what was clicked
+
+    driver = _CommitsWrongCommodity(rows=rows_payload(1))
+
+    with pytest.raises(PermanentFailure, match="did not register as selected"):
+        pages._select_goods_type(driver, "0000 - General Cargo", timeout_seconds=5)
 
 
 # --- the readonly AntD DatePicker interaction --------------------------------------
@@ -590,8 +689,9 @@ class FakeDriver:
         self.options = options or {
             "Bangalore": ["BLR - Bangalore"],
             "Manila": ["MNL - Manila"],
-            # Goods Type is now typed and matched by the exact label:
-            "0000 - General Cargo": ["0000 - General Cargo"],
+            # Goods Type: the field is filtered by the label's CODE query
+            # (`_goods_type_query`), then matched on the exact full label.
+            "0000": ["0000 - General Cargo"],
         }
         self.dimension_unit = dimension_unit
         self.weight_unit = weight_unit
