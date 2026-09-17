@@ -26,6 +26,7 @@ class AuditEventType(StrEnum):
     CLARIFICATION_SENT = "clarification_sent"
     LOCATION_UNRESOLVED = "location_unresolved"
     CONFLICT_DETECTED = "conflict_detected"
+    MSDS_UNAVAILABLE = "msds_unavailable"
     RATES_FETCHED = "rates_fetched"
     RATES_NORMALIZED = "rates_normalized"
     RATES_FILTERED = "rates_filtered"

@@ -50,7 +50,16 @@ TERMINAL_STATES: frozenset[RequestState] = frozenset(
 TRANSITIONS: dict[RequestState, frozenset[RequestState]] = {
     RequestState.RECEIVED: frozenset({RequestState.EXTRACTED, RequestState.FAILED}),
     RequestState.EXTRACTED: frozenset(
-        {RequestState.VALIDATED, RequestState.NEEDS_INFO, RequestState.FAILED}
+        {
+            RequestState.VALIDATED,
+            RequestState.NEEDS_INFO,
+            RequestState.FAILED,
+            # A required field the client has explicitly *denied* leaves nothing
+            # to ask and nothing the record can take. There is no automated way
+            # forward, so it is handed to a person rather than parked silently at
+            # EXTRACTED (the ``is_stuck`` dead-end this edge closes).
+            RequestState.MANUAL_REVIEW,
+        }
     ),
     RequestState.NEEDS_INFO: frozenset({RequestState.CLARIFICATION_SENT}),
     # The one loop in scope. A request may traverse it any number of times while

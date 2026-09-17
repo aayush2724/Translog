@@ -174,6 +174,26 @@ def test_terminal_requests_return_as_hidden_history(tmp_path: object) -> None:
     assert snap["demonstration"]["history"] == 1
 
 
+def test_manual_review_restores_as_active_needing_attention(tmp_path: object) -> None:
+    """MANUAL_REVIEW is terminal for automation but a person still owes it a
+    decision, so it comes back active — not collapsed under history like the
+    truly-finished terminal states."""
+    settings = _operations(_base_settings(tmp_path), since=NOW - timedelta(hours=1))
+    durable = InMemoryStore()
+    durable.save_request(_stored("R-review", RequestState.MANUAL_REVIEW))
+    durable.save_thread(Thread(request_id="R-review", message_ids=("<r>",)))
+
+    session = _session(settings, durable=durable)
+
+    restored = session.requests["R-review"]
+    assert restored.state is RequestState.MANUAL_REVIEW
+    assert restored.history is False
+
+    snap = live_serialize.snapshot(session)
+    assert any(r["request_id"] == "R-review" for r in snap["requests"])
+    assert all(r["request_id"] != "R-review" for r in snap["history"])
+
+
 def test_a_request_awaiting_approval_restores_as_validated(tmp_path: object) -> None:
     """Req C. The approval packet is never persisted, so a request found in a
     pre-send rate state is rewound to VALIDATED and its card re-derived by the

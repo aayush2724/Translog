@@ -126,6 +126,17 @@ def test_the_hold_shows_the_cargo_facts_and_the_catalog(
     assert hold["catalog"] == list(_CATALOG)
     # the client's own cargo facts, to judge by:
     assert "commodity" in hold and "cargo_type" in hold and "is_chemical" in hold
+    # ...including the MSDS status, so an operator sees a chemical-with-no-MSDS:
+    assert "msds" in hold
+
+
+def test_msds_note_puts_a_client_stated_no_into_words() -> None:
+    """The operator sees WHY there is no MSDS on the hold card: an explicit
+    client "no" (however the model shaped it) reads as 'not available (client
+    stated)', an attached one as 'attached', and an unknown as nothing."""
+    assert live_serialize._msds_note(True) == "attached"
+    assert live_serialize._msds_note(False) == "not available (client stated)"
+    assert live_serialize._msds_note(None) is None
 
 
 def test_default_config_offers_general_cargo_and_is_configured(

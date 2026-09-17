@@ -41,6 +41,12 @@ def test_clarification_loop_returns_to_extracted(machine: StateMachine) -> None:
     assert machine.can_transition(RequestState.CLARIFICATION_SENT, RequestState.EXTRACTED)
 
 
+def test_extracted_can_hand_a_denied_shipment_to_a_person(machine: StateMachine) -> None:
+    """A required field the client explicitly denied has nowhere automated to go,
+    so EXTRACTED may hand it straight to MANUAL_REVIEW rather than stranding it."""
+    assert machine.can_transition(RequestState.EXTRACTED, RequestState.MANUAL_REVIEW)
+
+
 def test_illegal_transition_raises(machine: StateMachine) -> None:
     with pytest.raises(IllegalTransition) as excinfo:
         machine.assert_transition(RequestState.RECEIVED, RequestState.QUOTATION_SENT)
