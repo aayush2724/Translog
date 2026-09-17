@@ -1331,7 +1331,12 @@ class LiveSession:
             operator_goods_type=stored.operator_goods_type,
             operator_goods_type_fingerprint=stored.operator_goods_type_fingerprint,
             operator_goods_type_by=stored.operator_goods_type_by,
-            history=stored.state in TERMINAL_STATES,
+            # MANUAL_REVIEW is terminal for *automation* but not settled work: a
+            # person still owes it a decision. So it comes back as active/needs
+            # attention, not collapsed under history like the truly-finished
+            # terminal states (accepted, declined, no-eligible-rate, ...).
+            history=stored.state in TERMINAL_STATES
+            and stored.state is not RequestState.MANUAL_REVIEW,
             restored=True,
         )
 

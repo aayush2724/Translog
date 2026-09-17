@@ -97,6 +97,23 @@ def test_dashboard_findings_flag_only_the_stuck_request() -> None:
     assert by["9 mailbox poll"].verdict == hc.PASS
 
 
+def test_a_stranded_extracted_request_is_flagged_as_stuck() -> None:
+    """Point 4 safety net. Extraction statuses are not persisted, so a request
+    stranded at EXTRACTED by an old build (before the denied-MSDS fix / the
+    EXTRACTED->MANUAL_REVIEW edge) cannot be re-classified on restore. It has
+    nothing pending, so the healthcheck surfaces it for a human to look at."""
+    snapshot = {
+        "requests": [{"request_id": "R-old-stuck", "status": {"state": "extracted"}}],
+        "poll": {"last_checked_at": "2026-09-16T12:00:00+00:00", "error": None},
+    }
+
+    by = {f.check: f for f in hc._dashboard_findings(snapshot)}
+
+    stuck = by["8 stuck (nothing pending)"]
+    assert stuck.verdict == hc.WARN
+    assert "R-old-stuck" in stuck.detail
+
+
 def test_dashboard_findings_fail_on_a_poll_error() -> None:
     snapshot = {"requests": [], "poll": {"last_checked_at": "x", "error": "TimeoutError"}}
     by = {f.check: f for f in hc._dashboard_findings(snapshot)}

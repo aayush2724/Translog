@@ -110,6 +110,70 @@ def test_explicit_false_is_preserved_and_is_not_an_absence() -> None:
     assert fields.msds_attached is False
 
 
+def test_a_denied_msds_is_carried_as_an_explicit_no() -> None:
+    """A model that emits DENIED for "MSDS not available" has stated the client's
+    "no" in the wrong shape. It is a yes/no field, so it is carried as False (an
+    answer), never None — otherwise a chemical enquiry that already answered gets
+    stranded. The sole field-specific exception to the lossy narrowing."""
+    result = ExtractionResult(
+        is_chemical=ExtractedValue[bool].stated(value=True),
+        msds_attached=ExtractedValue[bool].denied(evidence="MSDS not available"),
+    )
+
+    fields = to_extracted_fields(result)
+
+    assert fields.msds_attached is False
+
+
+def test_a_denied_is_chemical_never_becomes_not_chemical() -> None:
+    """The exception is confined to msds_attached. A denied chemical status is
+    NOT an explicit False — it must stay None, so the shipment is not silently
+    treated as non-chemical (which would skip the MSDS requirement, BR-12)."""
+    result = ExtractionResult(
+        is_chemical=ExtractedValue[bool].denied(evidence="we can't say"),
+    )
+
+    fields = to_extracted_fields(result)
+
+    assert fields.is_chemical is None
+
+
+def test_a_denied_non_msds_field_still_collapses_to_none() -> None:
+    """The carve-out is msds_attached only; every other denied field still maps
+    to None, exactly as before."""
+    result = ExtractionResult(
+        delivery_address=ExtractedValue[str].denied(evidence="no address needed"),
+    )
+
+    assert to_extracted_fields(result).delivery_address is None
+
+
+def test_a_denied_msds_validates_for_a_chemical_shipment() -> None:
+    """The boundary end to end: the denied MSDS becomes False, so VR-8 reads it
+    as answered rather than raising MSDS_REQUIRED_FOR_CHEMICAL."""
+    result = ExtractionResult(
+        origin=ExtractedValue[str].stated("Ankleshwar"),
+        destination=ExtractedValue[str].stated("Dammam"),
+        weight_kg=ExtractedValue[float].stated(920.0),
+        dimensions_in=ExtractedValue[CargoDimensions].stated(
+            CargoDimensions(length=36, width=24, height=20)
+        ),
+        commodity=ExtractedValue[str].stated("Specialty Resin Compound"),
+        cargo_type=ExtractedValue[str].stated("Haz"),
+        is_chemical=ExtractedValue[bool].stated(value=True),
+        msds_attached=ExtractedValue[bool].denied(evidence="MSDS not available"),
+        pcs=ExtractedValue[int].stated(12),
+        delivery_type=ExtractedValue[DeliveryType].stated(DeliveryType.AIRPORT),
+        ship_date=ExtractedValue[date].stated(date(2026, 9, 15)),
+    )
+
+    record = build_initial_record("R-X", RequestSource.EMAIL, to_extracted_fields(result))
+    validation = validate_shipment(record)
+
+    assert record.msds_attached is False
+    assert ValidationRuleId.MSDS_REQUIRED_FOR_CHEMICAL not in {i.rule_id for i in validation.issues}
+
+
 def test_the_mapping_performs_no_validation() -> None:
     """A chemical shipment with no MSDS maps cleanly. Noticing the gap is the
     validator's job, and it happens afterwards."""

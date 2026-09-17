@@ -23,8 +23,19 @@ from translog_quote.domain.shipment import CargoDimensions, DeliveryType, FieldN
 from translog_quote.domain.workflow import RequestState
 from translog_quote.errors import IllegalTransition
 from translog_quote.pipeline import ClarificationWorkflow
+from translog_quote.pipeline.audit import AuditEvent, AuditEventType
 
 REQ = "R-TEST"
+
+
+class _RecordingAudit:
+    """A minimal in-test audit sink: keeps every event so a test can read it."""
+
+    def __init__(self) -> None:
+        self.events: list[AuditEvent] = []
+
+    def record(self, event: AuditEvent) -> None:
+        self.events.append(event)
 
 
 class ScriptedExtractor:
@@ -335,6 +346,52 @@ def test_i_an_explicit_no_is_not_treated_as_missing() -> None:
     assert sink.sent == []
 
 
+def test_i_a_denied_msds_on_a_chemical_is_not_left_stuck() -> None:
+    """The reported bug. A model that returns DENIED for "MSDS not available"
+    used to strand a chemical enquiry at EXTRACTED with rate search pending
+    forever. The denied "no" is now carried as False, so VR-8 is answered and
+    the request validates and proceeds — no clarification, no dead-end."""
+    wf, sink = workflow(
+        complete(
+            is_chemical=ExtractedValue[bool].stated(value=True),
+            msds_attached=ExtractedValue[bool].denied(evidence="MSDS not available"),
+        )
+    )
+
+    outcome = wf.handle(REQ, email("chemical, MSDS not available"))
+
+    assert outcome.state is RequestState.VALIDATED
+    assert outcome.is_complete
+    assert outcome.state is not RequestState.EXTRACTED
+    assert outcome.analysis.is_stuck is False
+    assert outcome.record.msds_attached is False
+    assert outcome.clarification is None
+    assert sink.sent == []
+
+
+def test_i_a_chemical_with_no_msds_is_recorded_in_the_audit() -> None:
+    """The operator picking a Goods Type must be able to see WHY there is no
+    MSDS. The client's explicit "no MSDS" for a chemical is recorded as evidence,
+    on the turn it is stated."""
+    audit = _RecordingAudit()
+    wf = ClarificationWorkflow(
+        extractor=ScriptedExtractor(
+            complete(
+                is_chemical=ExtractedValue[bool].stated(value=True),
+                msds_attached=ExtractedValue[bool].denied(evidence="MSDS not available"),
+            )
+        ),
+        sink=CollectingEmailSink(),
+        store=InMemoryStore(),
+        clock=FixedClock(),
+        audit=audit,
+    )
+
+    wf.handle(REQ, email("chemical, MSDS not available"))
+
+    assert AuditEventType.MSDS_UNAVAILABLE in [event.event for event in audit.events]
+
+
 # --- J. Terminal valid state, no further clarification ------------------------
 
 
@@ -348,6 +405,24 @@ def test_j_a_valid_shipment_is_terminal_for_this_phase() -> None:
 
 
 # --- guards -------------------------------------------------------------------
+
+
+def test_a_denied_required_field_is_handed_to_a_person() -> None:
+    """The general safety net (point 2). A client who explicitly denies a
+    required field (here a non-boolean field, commodity) leaves nothing to ask
+    and nothing the record can take. It moves to MANUAL_REVIEW from EXTRACTED —
+    never parked silently — with the denied field named for the operator."""
+    wf, sink = workflow(
+        complete(commodity=ExtractedValue[str].denied(evidence="won't disclose the commodity"))
+    )
+
+    outcome = wf.handle(REQ, email("everything but the commodity, which we won't give"))
+
+    assert outcome.state is RequestState.MANUAL_REVIEW
+    assert outcome.needs_a_person
+    assert outcome.clarification is None
+    assert sink.sent == []
+    assert FieldName.COMMODITY.value in " ".join(outcome.escalation_notes)
 
 
 def test_a_thread_that_will_not_converge_goes_to_a_person() -> None:

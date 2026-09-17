@@ -528,9 +528,23 @@ def _goods_type_hold(session: LiveSession, request: LiveRequest) -> Json | None:
         "commodity": request.record.commodity,
         "cargo_type": request.record.cargo_type,
         "is_chemical": request.record.is_chemical,
+        "msds": _msds_note(request.record.msds_attached),
         "catalog": options,
         "catalog_configured": configured,
     }
+
+
+def _msds_note(msds_attached: bool | None) -> str | None:
+    """The MSDS status in words for the operator judging a Goods Type hold.
+
+    ``False`` means the client explicitly answered "no MSDS" (whether the model
+    said so as ``STATED False`` or as a ``DENIED`` fix 1 carried to ``False``) —
+    the operator sees the shipment is a chemical with no MSDS on file."""
+    if msds_attached is True:
+        return "attached"
+    if msds_attached is False:
+        return "not available (client stated)"
+    return None
 
 
 def _first_seen_at(session: LiveSession, request: LiveRequest) -> str | None:

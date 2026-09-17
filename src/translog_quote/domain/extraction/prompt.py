@@ -133,8 +133,10 @@ Fields, with the exact representation required:
                      and chemical. If only the cargo type is given, this field
                      is `not_stated`.
   msds_attached      true when the email says an MSDS is attached; false when
-                     the email says there is none, or that one will follow
-                     later. Note the promise in `note` when one is made.
+                     the email says there is none. "No MSDS", "MSDS not
+                     available", "unavailable" and "MSDS to follow" are all
+                     `stated` false - an explicit "no", never `denied` and never
+                     `not_stated`. Note the promise in `note` when one is made.
   pcs                whole number of pieces, whatever noun the client uses -
                      bags, drums, cartons, crates, pallets
   delivery_type      "door" or "airport", only when stated. Recognise the

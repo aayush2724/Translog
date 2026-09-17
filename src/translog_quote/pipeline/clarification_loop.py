@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from translog_quote.domain.clarification import ClarificationMessage, UnresolvedPlace
     from translog_quote.domain.email import RawEmail
     from translog_quote.domain.extraction import ExtractionResult
-    from translog_quote.domain.shipment import MergeResult
+    from translog_quote.domain.shipment import FieldName, MergeResult
     from translog_quote.domain.validation import ValidationResult
     from translog_quote.pipeline.audit import AuditSink
     from translog_quote.ports import ClockPort, EmailSink, ExtractionPort, StorePort
@@ -107,12 +107,12 @@ class TurnOutcome:
 
     @property
     def needs_a_person(self) -> bool:
-        """Handed over, or stuck in a way that only a person can settle.
+        """Handed over to a person.
 
-        `is_stuck` is included because the approved transition table has no
-        EXTRACTED -> MANUAL_REVIEW edge, so a shipment blocked by an explicit
-        client denial cannot currently *move* to manual review. It reports the
-        condition instead of pretending otherwise.
+        A shipment blocked by an explicit client denial of a required field now
+        *moves* to MANUAL_REVIEW (the EXTRACTED -> MANUAL_REVIEW edge), so the
+        state alone tells the whole story; `is_stuck` is kept as a belt-and-braces
+        check in case a caller inspects an analysis without applying the turn.
         """
         return self.state is RequestState.MANUAL_REVIEW or self.analysis.is_stuck
 
@@ -257,10 +257,42 @@ class ClarificationWorkflow:
             {"valid": validation.is_valid, "missing": len(validation.missing_fields)},
         )
 
+        # The client explicitly said there is no MSDS for a chemical shipment.
+        # It is a valid answer (VR-8 is satisfied), so the request proceeds — but
+        # the operator picking a Goods Type must see *why* there is no MSDS, so it
+        # is recorded here and surfaced on the hold card. Fires only on the turn
+        # the client states it, whether the model said STATED False or (wrongly)
+        # DENIED — fix 1 carries both to msds_attached=False.
+        if merge.record.is_chemical is True and _stated_no_msds(extraction):
+            self._emit(
+                request_id,
+                AuditEventType.MSDS_UNAVAILABLE,
+                {"msds": "not available (client stated)"},
+            )
+
         analysis = identify_unresolved(validation, extraction, merge.conflicts)
 
+        # An explicit client denial of a *required* field is the second way a
+        # thread has nowhere to go: nothing to ask (they answered) and nothing
+        # the record can take. It is handed to a person rather than parked
+        # silently at EXTRACTED — the dead-end this replaces — which is why the
+        # table now carries an EXTRACTED -> MANUAL_REVIEW edge. MSDS never reaches
+        # here: an explicit "no MSDS" is an answer (fix 1), so it validates.
+        if not abandoned and not futile and analysis.is_stuck:
+            notes = [_denial_note(analysis.blocked_by_denial)]
+            state = self._advance(request_id, state, RequestState.MANUAL_REVIEW)
+            self._emit(
+                request_id,
+                AuditEventType.MANUAL_REVIEW_ESCALATED,
+                {
+                    "fields": [field.value for field in analysis.blocked_by_denial],
+                    "notes": notes,
+                    "reason": "client_denied_required_field",
+                },
+            )
+
         clarification: ClarificationMessage | None = None
-        if not abandoned and not futile:
+        if not abandoned and not futile and not analysis.is_stuck:
             state, clarification = self._decide(request_id, state, email, analysis)
 
         self._store.save_request(
@@ -295,16 +327,9 @@ class ClarificationWorkflow:
         analysis: UnresolvedAnalysis,
     ) -> tuple[RequestState, ClarificationMessage | None]:
         if not analysis.needs_clarification:
-            if analysis.is_stuck:
-                # The client has explicitly said they cannot supply something
-                # required. Asking again would be rude and useless, and whether
-                # to quote anyway is a person's call.
-                #
-                # The request stays at EXTRACTED and reports `is_stuck`: the
-                # approved table has no EXTRACTED -> MANUAL_REVIEW edge, and
-                # adding one changes the state model, which needs sign-off.
-                return state, None
-
+            # Nothing left unresolved. A client denial of a required field
+            # (`is_stuck`) is handled by `handle` before this point and routed to
+            # MANUAL_REVIEW, so it cannot be true here.
             return self._advance(request_id, state, RequestState.VALIDATED), None
 
         state = self._advance(request_id, state, RequestState.NEEDS_INFO)
@@ -525,6 +550,28 @@ class ClarificationWorkflow:
         self._audit.record(
             AuditEvent(request_id=request_id, event=event, at=self._clock.now(), detail=detail)
         )
+
+
+def _stated_no_msds(extraction: ExtractionResult) -> bool:
+    """Whether this email explicitly says there is no MSDS.
+
+    Both shapes count: the contract's ``STATED False`` ("no MSDS available") and
+    a model's ``DENIED`` for the same "no" — fix 1 carries both to
+    ``msds_attached=False``. ``NOT_STATED`` (silent) and ``AMBIGUOUS`` do not.
+    """
+    field = extraction.msds_attached
+    return field.status is FieldStatus.DENIED or (field.is_stated and field.value is False)
+
+
+def _denial_note(fields: Sequence[FieldName]) -> str:
+    """A deterministic operator-facing sentence for a client-denied required
+    field. The wording carries no internal vocabulary beyond the field names,
+    which the operator already sees on the record."""
+    named = ", ".join(field.value for field in fields) or "a required detail"
+    return (
+        f"The client stated they cannot supply: {named}. Asking again will not "
+        "resolve it — a person must decide whether to proceed."
+    )
 
 
 def _reply_subject(inbound: str, fallback: str) -> str:
