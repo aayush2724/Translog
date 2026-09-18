@@ -793,7 +793,17 @@ class FakeDriver:
         if "CM|IN" in script:
             return {"ok": True, "unit": self.dimension_unit}
         if "KG|LB" in script:
-            return {"ok": True, "unit": self.weight_unit, "totalMode": True}
+            # Mirror the browser script's contract: only an exact "KG" is Total
+            # mode; "KG/Unit" (per-piece) or a non-KG unit reports failure, so the
+            # search refuses rather than entering a piece-multiplied weight.
+            if self.weight_unit == "KG":
+                return {"ok": True, "unit": "KG", "totalMode": True}
+            return {
+                "ok": False,
+                "unit": self.weight_unit,
+                "totalMode": False,
+                "reason": f"weight not in Total KG mode ({self.weight_unit})",
+            }
         if "settled" in script:  # _JS_RESULTS_STATE (wait-for-settle)
             if self.never_settles:
                 return {"onResults": True, "settled": False, "loading": True, "empty": False}
@@ -906,6 +916,44 @@ def test_a_wrong_weight_unit_stops_the_search() -> None:
 
     with pytest.raises(ContractViolation, match="weight unit"):
         search_with(driver)
+
+
+def test_per_piece_kg_unit_weight_stops_the_search_and_enters_no_weight() -> None:
+    """The 300 kg -> 900 kg bug. Left in per-piece ("KG/Unit") mode, WebCargo
+    multiplies the entered figure by the Pieces count. RateQuery.weight_kg is a
+    shipment total, so the search must refuse rather than search a multiplied
+    weight — and must never fill the weight field on that path."""
+    driver = FakeDriver(rows=rows_payload(1), weight_unit="KG/Unit")
+
+    with pytest.raises(ContractViolation, match="weight unit"):
+        search_with(driver)
+
+    assert not any(
+        call[0] == "fill" and call[1].startswith(f"{pages.WEIGHT_INPUT}=")
+        for call in driver.calls
+    ), "the weight must not be entered when Total KG mode was not verified"
+
+
+def test_require_ok_rejects_kg_per_unit_as_not_total() -> None:
+    """Defence in depth: even if the browser script reported ok, a 'KG/Unit'
+    unit must not pass a check that expects an exact 'KG' (total) — the old
+    startswith('KG') let it through, which is how the tripled weight escaped."""
+    with pytest.raises(ContractViolation, match="not exactly 'KG'"):
+        pages._require_ok(
+            {"ok": True, "unit": "KG/Unit", "totalMode": False},
+            expect_unit="KG",
+            what="weight unit",
+        )
+
+
+def test_total_kg_mode_is_positively_verified_before_the_weight_is_entered() -> None:
+    """The positive path: with the weight select in exact "KG" (Total) mode the
+    search proceeds and the total weight is entered verbatim (not multiplied)."""
+    driver = FakeDriver(rows=rows_payload(1))  # weight_unit defaults to "KG" (Total)
+
+    search_with(driver)
+
+    assert ("fill", f"{pages.WEIGHT_INPUT}={pages._figure(QUERY.weight_kg)}") in driver.calls
 
 
 def test_a_query_without_commodity_never_reaches_the_browser() -> None:

@@ -185,7 +185,18 @@ async () => {
     option.click();
     await new Promise(r => setTimeout(r, 300));
   }
-  return {ok: true, unit: selects[0].innerText.trim(), totalMode: !!total};
+  // Re-read the FINAL state and require exactly "KG" (shipment total). A unit of
+  // "KG/Unit" is per-piece: WebCargo multiplies the entered figure by the Pieces
+  // count, turning a 300 kg total into 900 kg for 3 pieces. RateQuery.weight_kg
+  // is a total, so refuse per-piece mode rather than search a multiplied weight.
+  const finalUnit = selects[0].innerText.trim();
+  const totalMode = finalUnit === 'KG';
+  if (!totalMode) {
+    return {ok: false, totalMode: false, unit: finalUnit,
+            reason: 'weight is in per-piece mode (' + finalUnit +
+                    '); the Total toggle did not engage'};
+  }
+  return {ok: true, unit: finalUnit, totalMode: true};
 }
 """
 
@@ -864,10 +875,14 @@ def _require_ok(state: object, *, expect_unit: str, what: str) -> None:
     if not (isinstance(state, dict) and state.get("ok")):
         raise ContractViolation(f"could not set the {what}: {state!r}")
     unit = str(state.get("unit", ""))
-    if not unit.startswith(expect_unit):
+    # Exact match, not startswith: "KG/Unit" (per-piece) must NOT pass a check
+    # that expects "KG" (total). A per-piece weight would be multiplied by the
+    # Pieces count, so accepting it silently searched a tripled weight.
+    if unit != expect_unit:
         raise ContractViolation(
-            f"the {what} reads {unit!r} after selecting {expect_unit!r}; "
-            "refusing to search under an unverified unit"
+            f"the {what} reads {unit!r}, not exactly {expect_unit!r}; "
+            "refusing to search under an unverified unit "
+            "(a per-piece 'KG/Unit' weight is multiplied by the piece count)"
         )
 
 
