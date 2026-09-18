@@ -95,13 +95,23 @@ def carrier_code_of(record: WebCargoRateRecord) -> str:
     return record.company.strip()
 
 
-def map_record(record: WebCargoRateRecord) -> Rate:
+def map_record(record: WebCargoRateRecord, index: int = 0) -> Rate:
     """One captured row, as a canonical Rate. Nothing invented anywhere.
 
     No restriction fields are populated: this surface declares neither a
     liquids policy nor door-delivery capability, and an undeclared
     capability must stay undeclared (the service filter treats "did not
     say" as "not offered", which is the safe polarity).
+
+    ``index`` is the row's position in the captured result set, appended to
+    ``source_ref`` as ``#<index>``. It is required because the semantic parts
+    (date tab, service, departure) are NOT unique on their own: WebCargo can
+    return two distinct itineraries on the same date tab, same service, and
+    same first-leg departure that differ only in routing and transit — live
+    data showed ``…:QR General:Sun 27 Sep - 13:20`` on both a 23h55m and a
+    29h25m rate. The interface marks the selected card by ``source_ref``
+    equality, so a shared ref lit up both cards; the position disambiguates
+    them without inventing anything (it is the row's own place in the list).
     """
     total, currency = parse_price(record.price)
     return Rate(
@@ -113,11 +123,17 @@ def map_record(record: WebCargoRateRecord) -> Rate:
         transit=parse_duration(record.duration),
         restrictions=RateRestrictions(),
         source_ref=f"{ADAPTER_ID}:{record.date_tab}:{record.service.strip()}"
-        f":{record.departure.strip()}",
+        f":{record.departure.strip()}#{index}",
         departure_date_label=record.date_tab.strip(),
     )
 
 
 def map_records(records: tuple[WebCargoRateRecord, ...]) -> tuple[Rate, ...]:
-    """Every captured row, order preserved, membership preserved."""
-    return tuple(map_record(record) for record in records)
+    """Every captured row, order preserved, membership preserved.
+
+    Each rate's ``source_ref`` carries its position (``#<index>``), which is
+    what makes the identity unique across the mapped set — see ``map_record``.
+    Deterministic: the same captured list yields the same indices, so a rate
+    keeps its ref across re-serialisations of one result.
+    """
+    return tuple(map_record(record, index) for index, record in enumerate(records))

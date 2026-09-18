@@ -199,6 +199,45 @@ def test_the_domain_picks_fastest_over_cheaper_from_mapped_rows() -> None:
     assert selection.rate.carrier_code == "QR"  # fastest, though 10x the price
 
 
+def test_source_ref_is_unique_when_date_service_and_departure_collide() -> None:
+    """The live identity collision, reproduced.
+
+    WebCargo returned two distinct itineraries sharing a date tab, service and
+    first-leg departure (``…:QR General:Sun 27 Sep - 13:20``), differing only in
+    routing and transit (23h55m vs 29h25m, same price). The pre-``#index``
+    source_ref was therefore identical, and the dashboard — which marks the
+    selected card by source_ref equality — lit up BOTH cards. Mapping must now
+    give them distinct refs, and exactly one may carry the winner's identity.
+    """
+    shared: dict[str, object] = {
+        "date_tab": "27/09/2026",
+        "service": "QR General",
+        "departure": "Sun 27 Sep - 13:20",
+    }
+    winner_rec = record(duration="23h 55m", price="a/kg/ 525,000 Rs", **shared)
+    slower_rec = record(duration="29h 25m", price="a/kg/ 525,000 Rs", **shared)
+
+    mapped = map_records((winner_rec, slower_rec))
+
+    # The semantic parts collide (this is the live bug); only the #index differs.
+    prefixes = [rate.source_ref.rsplit("#", 1)[0] for rate in mapped]
+    assert prefixes[0] == prefixes[1]  # same date tab, service, departure
+    assert mapped[0].source_ref != mapped[1].source_ref  # …but the refs are distinct
+    assert mapped[0].source_ref.endswith("#0")
+    assert mapped[1].source_ref.endswith("#1")
+
+    outcome = filter_rates(mapped)
+    selection = select_rate(outcome.eligible, FASTEST_ELIGIBLE)
+    assert selection is not None
+    assert selection.rate.transit is not None
+    assert selection.rate.transit.minutes == 23 * 60 + 55  # the faster of the two
+
+    # Exactly one eligible rate carries the winner's identity — no double-SELECTED.
+    matches = [r for r in outcome.eligible if r.source_ref == selection.rate.source_ref]
+    assert len(matches) == 1
+    assert matches[0].source_ref == mapped[0].source_ref  # the 23h55m rate, #0
+
+
 # --- choosing provider options -----------------------------------------------------
 
 
