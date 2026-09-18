@@ -79,7 +79,7 @@ _SNAPSHOT = {
         {"request_id": "R2", "status": {"state": "validated"}, "goods_type_hold": {"catalog": []}},
         {"request_id": "R3", "status": {"state": "needs_info"}, "awaiting_clarification": True},
         {"request_id": "R4", "status": {"state": "validated"}, "awaiting_decision": True},
-        {"request_id": "R5", "status": {"state": "no_eligible_rate"}},  # terminal -> not stuck
+        {"request_id": "R5", "status": {"state": "closed_no_rates"}},  # terminal -> not stuck
         {"request_id": "R6", "status": {"state": "validated"}, "rate_search_pending": True},
     ],
     "poll": {"last_checked_at": "2026-09-16T12:00:00+00:00", "error": None},

@@ -43,6 +43,7 @@ from translog_quote.domain.quotation import (
     INTERNAL_SUBJECT_PREFIX,
     ReviewPacket,
     decision_from_choice,
+    no_rates_message,
 )
 from translog_quote.domain.rates import FASTEST_ELIGIBLE
 from translog_quote.domain.shipment import DeliveryType, FieldName
@@ -198,6 +199,11 @@ class LiveRequest:
     packet: ReviewPacket | None = None
     decision: ApprovalDecision | None = None
     quotation_sent: bool = False
+    final_reply_sent: bool = False
+    """A terminal client reply has been sent for a request that could not be
+    fulfilled — currently the "no eligible rate" notice. In-memory guard against
+    notifying twice within a run; the persisted ``CLOSED_NO_RATES`` state is the
+    cross-restart guard (see ``_notify_no_rates``)."""
     messages: list[str] = field(default_factory=list)
 
     history: bool = False
@@ -259,7 +265,11 @@ class LiveRequest:
 
     @property
     def is_settled(self) -> bool:
-        return self.state in {RequestState.QUOTATION_SENT, RequestState.MAKER_REJECTED}
+        return self.state in {
+            RequestState.QUOTATION_SENT,
+            RequestState.MAKER_REJECTED,
+            RequestState.CLOSED_NO_RATES,
+        }
 
 
 class LiveSession:
@@ -1005,7 +1015,13 @@ class LiveSession:
             request.rate_failure = None
 
     def _apply_rate_outcome(self, request: LiveRequest, outcome: RateSearchOutcome) -> None:
-        """Record a finished rate outcome and build the approval packet if any."""
+        """Record a finished rate outcome and build the approval packet if any.
+
+        A selection opens the human approval gate. A search that found nothing
+        usable (``NO_ELIGIBLE_RATE``) is closed out instead: the client is sent a
+        "no rates" notice and the request moves to ``CLOSED_NO_RATES`` — see
+        ``_notify_no_rates`` for the send/persist ordering and its crash window.
+        """
         request.rate_failure = None
         request.rates = outcome
         request.state = outcome.state
@@ -1018,6 +1034,79 @@ class LiveSession:
                 rates=outcome.filtered,
                 selection=outcome.selection,
             )
+        elif outcome.state is RequestState.NO_ELIGIBLE_RATE:
+            self._notify_no_rates(request)
+
+    def _notify_no_rates(self, request: LiveRequest) -> None:
+        """Email the client that no rate could be sourced, and close the request.
+
+        Scoped strictly to ``NO_ELIGIBLE_RATE`` (a search that ran and found
+        nothing usable). Location-resolution failures, missing fields and
+        conflicts never reach here — they are still handled by the clarification
+        path before any search.
+
+        Idempotency and the crash window (deliberate, documented):
+        - In-memory: ``final_reply_sent`` / already-``CLOSED_NO_RATES`` stops a
+          second send when the same finished job is re-applied on a later poll.
+        - Across a restart: rate outcomes are NOT persisted, so a restored
+          request re-runs its search — the durable ``CLOSED_NO_RATES`` state,
+          committed here right after the send, is what stops it re-notifying.
+        - Residual window: the send and the commit are two writes with no
+          transaction between them (the same shape ``QuotationStage`` has). A
+          crash strictly between ``_sink.send`` returning and ``commit_request``
+          completing leaves the notice sent but the durable state still
+          VALIDATED, so the restart re-runs and sends a SECOND notice. This is
+          an at-least-once guarantee, accepted here rather than re-architected:
+          a duplicate apology is the benign failure, and it is not bounded by a
+          human gate the way the quotation send's identical window is.
+        """
+        if request.final_reply_sent or request.state is RequestState.CLOSED_NO_RATES:
+            return
+        if not request.client_address:
+            # Nothing to send to: leave it at NO_ELIGIBLE_RATE (non-terminal) so
+            # the healthcheck surfaces it for a person rather than closing it
+            # as "client notified" when no client was.
+            _log.warning(
+                "No client address on %s; leaving at NO_ELIGIBLE_RATE without a notice.",
+                request.request_id,
+            )
+            return
+        self._sink.send(
+            no_rates_message(
+                request.record,
+                reference=request.request_id,
+                to_address=request.client_address,
+                in_reply_to=request.last_message_id,
+            )
+        )
+        request.final_reply_sent = True
+        request.state = RequestState.CLOSED_NO_RATES
+        self._emit_no_rates_notice(request.request_id)
+        self._persist_closed_no_rates(request.request_id)
+
+    def _emit_no_rates_notice(self, request_id: str) -> None:
+        """Record that a "no eligible rate" notice was sent to the client."""
+        from translog_quote.pipeline.audit import AuditEvent, AuditEventType
+
+        self.audit.record(
+            AuditEvent(
+                request_id=request_id,
+                event=AuditEventType.NO_RATES_NOTICE_SENT,
+                at=self._clock.now(),
+                detail={},
+            )
+        )
+
+    def _persist_closed_no_rates(self, request_id: str) -> None:
+        """Commit ``CLOSED_NO_RATES`` to the durable store immediately after the
+        notice is sent, so a restart does not re-run the search and re-notify."""
+        stored = self._working.get_request(request_id)
+        if stored is None:
+            return
+        self._working.save_request(
+            stored.model_copy(update={"state": RequestState.CLOSED_NO_RATES})
+        )
+        bootstrap.commit_request(self._working, self._durable, request_id)
 
     def _unresolved_places(self, record: ShipmentRecord) -> tuple[UnresolvedPlace, ...]:
         """The stated origin/destination the resolver cannot turn into an airport

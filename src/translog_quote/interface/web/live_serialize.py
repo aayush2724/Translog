@@ -119,6 +119,7 @@ _STATUS_LABELS: dict[RequestState, tuple[str, str]] = {
     RequestState.QUOTATION_SENT: ("QUOTATION SENT", "green"),
     RequestState.MAKER_REJECTED: ("DECLINED — NOT SENT", "gray"),
     RequestState.NO_ELIGIBLE_RATE: ("NO ELIGIBLE RATE", "gray"),
+    RequestState.CLOSED_NO_RATES: ("NO RATES — CLIENT NOTIFIED", "gray"),
     RequestState.MANUAL_REVIEW: ("MANUAL REVIEW", "amber"),
     RequestState.FAILED: ("FAILED", "gray"),
     RequestState.ACCEPTED: ("ACCEPTED", "green"),
@@ -455,6 +456,29 @@ def timeline_json(request: LiveRequest, events: list[AuditEvent]) -> list[Json]:
                 "at": None,
                 "note": "Handed to a person — automated processing has stopped",
                 "waiting_on": "operator",
+            }
+        )
+
+    if request.state in (RequestState.CLOSED_NO_RATES, RequestState.NO_ELIGIBLE_RATE):
+        # The search ran and found no usable rate. Same failure mode the manual-
+        # review block fixes: without this the first not-done row rendered as
+        # "Rate search — Pending" (or "Rate selected — Pending"), reading as
+        # stuck when the request is in fact done. Drop the rows that will not
+        # happen and end on the true, terminal outcome.
+        notified = request.state is RequestState.CLOSED_NO_RATES
+        rows = [row for row in rows if row["state"] == "done"]
+        rows.append(
+            {
+                "key": "no_rates",
+                "label": "No eligible rate — client notified"
+                if notified
+                else "No eligible rate found",
+                "state": "done" if notified else "current",
+                "at": None,
+                "note": None
+                if notified
+                else "No rate could be sourced; a client could not be notified — needs a look",
+                "waiting_on": None if notified else "operator",
             }
         )
     return rows

@@ -31,6 +31,7 @@ from tests.unit.test_gmail_thread import ScriptedExtractor, StubSource
 
 from translog_quote.adapters.email import CollectingEmailSink
 from translog_quote.adapters.routing import StatedLocationResolver
+from translog_quote.adapters.store import InMemoryStore
 from translog_quote.adapters.webcargo import DemoRateProvider, MockWebCargoAdapter
 from translog_quote.config import Settings
 from translog_quote.domain.email import RawEmail
@@ -288,11 +289,13 @@ def test_a_door_enquiry_halts_at_the_gate_with_a_door_capable_rate(
     assert "Door delivery included" in client_mail[0].body_text
 
 
-def test_a_dead_end_sends_nothing_and_offers_no_approval(
+def test_a_dead_end_notifies_the_client_and_closes(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No door-capable rate -> NO_ELIGIBLE_RATE. No email, no gate, and no
-    automatic clarification either — a thin market is not missing information."""
+    """No door-capable rate -> the search found nothing usable. The client is
+    sent a "no rates" notice and the request closes at CLOSED_NO_RATES — no
+    approval gate, and no automatic clarification (a thin market is not missing
+    information). The notice carries no figures and no selection."""
     sink = CollectingEmailSink()
     session = LiveSession(
         settings,
@@ -310,8 +313,50 @@ def test_a_dead_end_sends_nothing_and_offers_no_approval(
 
     request = next(iter(session.requests.values()))
 
-    assert request.state is RequestState.NO_ELIGIBLE_RATE
+    assert request.state is RequestState.CLOSED_NO_RATES
+    assert request.final_reply_sent is True
     assert request.packet is None
     assert request.awaiting_quotation_decision is False
     assert request.clarification is None
-    assert sink.sent == []
+    # Exactly one client message: the no-rates notice, with nothing to quote.
+    client_mail = [m for m in sink.sent if m.to_address == "client@example.com"]
+    assert len(client_mail) == 1
+    assert "unable to source" in client_mail[0].body_text.lower()
+
+
+def test_a_dead_end_notifies_once_and_persists_the_closed_state(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The notice is sent exactly once and CLOSED_NO_RATES is committed durably.
+
+    The durable commit is what stops a restart re-running the search and sending
+    a second notice (rate outcomes are otherwise not persisted). A second poll
+    in the same run must also send nothing further — the in-memory guard.
+    """
+    store = InMemoryStore()
+    sink = CollectingEmailSink()
+    session = LiveSession(
+        settings,
+        source=StubSource(_enquiry()),  # type: ignore[arg-type]
+        sink=sink,
+        extractor=ScriptedExtractor(_door_extraction()),  # type: ignore[arg-type]
+        resolver=StatedLocationResolver(),
+        durable=store,
+    )
+    from translog_quote import bootstrap
+
+    monkeypatch.setattr(bootstrap, "build_demo_rate_provider", MockWebCargoAdapter)
+    session.poll()
+
+    request = next(iter(session.requests.values()))
+    # Durably closed, so a restart restores it as history and never re-notifies.
+    stored = store.get_request(request.request_id)
+    assert stored is not None
+    assert stored.state is RequestState.CLOSED_NO_RATES
+    sent_after_first = len(sink.sent)
+
+    # A second poll re-ingests nothing new and must not re-send the notice.
+    session.poll()
+    assert len(sink.sent) == sent_after_first
+    client_mail = [m for m in sink.sent if m.to_address == "client@example.com"]
+    assert len(client_mail) == 1

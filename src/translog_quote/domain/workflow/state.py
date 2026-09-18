@@ -15,7 +15,13 @@ from translog_quote.domain.shipment import ShipmentRecord
 
 
 class RequestState(StrEnum):
-    """Twelve states (docs/architecture.md §10). Six are terminal."""
+    """Thirteen states (docs/architecture.md §10). Six are terminal.
+
+    ``NO_ELIGIBLE_RATE`` is no longer terminal: a search that finds nothing now
+    notifies the client and closes at ``CLOSED_NO_RATES``. The intermediate
+    state persists only in the rare case a notice could not be sent (no client
+    address), where it is a request a person should look at, not a dead end.
+    """
 
     RECEIVED = "received"
     EXTRACTED = "extracted"
@@ -25,11 +31,12 @@ class RequestState(StrEnum):
     RATE_SELECTED = "rate_selected"
     PENDING_APPROVAL = "pending_approval"
     QUOTATION_SENT = "quotation_sent"
+    NO_ELIGIBLE_RATE = "no_eligible_rate"
 
     # Terminal
     ACCEPTED = "accepted"
     DECLINED = "declined"
-    NO_ELIGIBLE_RATE = "no_eligible_rate"
+    CLOSED_NO_RATES = "closed_no_rates"
     MAKER_REJECTED = "maker_rejected"
     FAILED = "failed"
     MANUAL_REVIEW = "manual_review"
@@ -39,7 +46,7 @@ TERMINAL_STATES: frozenset[RequestState] = frozenset(
     {
         RequestState.ACCEPTED,
         RequestState.DECLINED,
-        RequestState.NO_ELIGIBLE_RATE,
+        RequestState.CLOSED_NO_RATES,
         RequestState.MAKER_REJECTED,
         RequestState.FAILED,
         RequestState.MANUAL_REVIEW,
@@ -90,9 +97,12 @@ TRANSITIONS: dict[RequestState, frozenset[RequestState]] = {
     # DECLINED is terminal pending AMB-4. If the specification's next-best loop is
     # confirmed, it becomes one edge DECLINED -> RATE_SELECTED with an exclusion
     # set and a repeat cap. Nothing else changes.
+    # A search that found nothing usable is not a dead end: the client is sent a
+    # "no rates" notice and the request closes at CLOSED_NO_RATES. The only exit.
+    RequestState.NO_ELIGIBLE_RATE: frozenset({RequestState.CLOSED_NO_RATES}),
     RequestState.ACCEPTED: frozenset(),
     RequestState.DECLINED: frozenset(),
-    RequestState.NO_ELIGIBLE_RATE: frozenset(),
+    RequestState.CLOSED_NO_RATES: frozenset(),
     RequestState.MAKER_REJECTED: frozenset(),
     RequestState.FAILED: frozenset(),
     RequestState.MANUAL_REVIEW: frozenset(),

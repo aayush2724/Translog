@@ -162,7 +162,7 @@ def test_terminal_requests_return_as_hidden_history(tmp_path: object) -> None:
     out of the active list and the rate pass, surfaced under a separate key."""
     settings = _operations(_base_settings(tmp_path), since=NOW - timedelta(hours=1))
     durable = InMemoryStore()
-    durable.save_request(_stored("R-done", RequestState.NO_ELIGIBLE_RATE))
+    durable.save_request(_stored("R-done", RequestState.CLOSED_NO_RATES))
     durable.save_thread(Thread(request_id="R-done", message_ids=("<t>",)))
 
     session = _session(settings, durable=durable)

@@ -320,3 +320,58 @@ def quotation_message(
         body_text=quotation.body_text,
         in_reply_to=in_reply_to,
     )
+
+
+def compose_no_rates_subject(record: ShipmentRecord, *, reference: str) -> str:
+    lane = f"{record.origin or '?'} to {record.destination or '?'}"
+    return f"Air freight enquiry {reference} — unable to quote at this time ({lane})"
+
+
+def compose_no_rates_body(record: ShipmentRecord, *, reference: str) -> str:
+    """The client-facing "no rates available" reply. States no figures.
+
+    No rate exists to quote, so none is implied: this restates the shipment the
+    client asked about and says plainly that we could not source a rate for it
+    at this time, inviting them to adjust the date or details. Deterministic,
+    like every other outbound message — no model writes it, nothing is invented.
+    """
+    lines: list[str] = [
+        "Dear Sir/Madam,",
+        "",
+        "Thank you for your enquiry. Unfortunately we were unable to source an "
+        "air freight rate for the shipment below at this time.",
+        "",
+        f"Reference: {reference}",
+        "",
+        "SHIPMENT",
+        "-" * 60,
+        _shipment_block(record),
+        "",
+        "This may be because no carrier returned a rate for this lane on the "
+        "requested date, or for the stated cargo. You are welcome to reply with "
+        "an alternative shipment date or revised details and we will be glad to "
+        "search again.",
+        "",
+        "We apologise for the inconvenience.",
+        "",
+        "Kind regards,",
+        "Translog",
+    ]
+    return "\n".join(lines)
+
+
+def no_rates_message(
+    record: ShipmentRecord, *, reference: str, to_address: str, in_reply_to: str | None
+) -> OutboundMessage:
+    """The client message for an enquiry that produced no eligible rate.
+
+    Carries no ``Selection`` and no figures — there is nothing to quote — so it
+    cannot be confused with (or built from) a quotation. Composed only from the
+    record the client already stated.
+    """
+    return OutboundMessage(
+        to_address=to_address,
+        subject=compose_no_rates_subject(record, reference=reference),
+        body_text=compose_no_rates_body(record, reference=reference),
+        in_reply_to=in_reply_to,
+    )
