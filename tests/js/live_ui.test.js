@@ -769,6 +769,45 @@ check("the detail view renders nothing when there is no failure and no rates", (
   eq(t.sectionRates({ rates: null, rate_failure: null }), null, "still nothing to show");
 });
 
+check("exactly one card is SELECTED when the winning carrier returns several rates", () => {
+  /* Bug A: the SELECTED card was matched by carrier_code, so every rate from the
+     winning carrier lit up SELECTED and inherited the winner's reason. Identity
+     is source_ref now, so exactly one card is marked — and Bug B: its chip and
+     its reason are the same spelling of the same duration, never "1110 minutes"
+     beside "18h 30m". */
+  const t = load();
+  const qr = (source_ref, transit, amount) => ({
+    carrier_code: "QR", carrier_name: "Qatar Airways", product: "QR General",
+    amount, currency: "Rs", transit, source_ref,
+  });
+  const rates = {
+    simulated: false, banner: null, adapter_id: "webcargo-browser",
+    returned: 2, eligible_count: 2,
+    query: { origin: "Bangalore", destination: "Manila", weight_kg: 320, date: "2026-09-25" },
+    strategy: "Fastest eligible transit — ranked by transit time, not price",
+    eligible: [qr("ref-fast", "18h 30m", "185597"), qr("ref-slow", "22h 30m", "90000")],
+    excluded: [],
+    selection: Object.assign(qr("ref-fast", "18h 30m", "185597"), {
+      reason: "fastest eligible transit at 18h 30m", runners_up: [],
+    }),
+  };
+
+  const section = t.sectionRates({ rates, rate_failure: null, rate_search_pending: false });
+
+  eq(section.findAll((n) => n.className === "rate-ribbon").length, 1, "one SELECTED ribbon");
+  const selectedCards = section.findAll((n) => /rate-selected/.test(n.className));
+  eq(selectedCards.length, 1, "exactly one selected card despite two QR rates");
+
+  const chip = selectedCards[0].find((n) => n.className === "transit-chip");
+  const why = selectedCards[0].find((n) => n.className === "rate-why");
+  eq(/18h 30m/.test(chip.textContent), true, "the selected card's chip is the winner's transit");
+  eq(/18h 30m/.test(why.textContent), true, "and its reason states the same duration");
+  eq(/minutes/.test(chip.textContent), false, "never a raw minute count");
+
+  const chips = section.findAll((n) => n.className === "transit-chip").map((n) => n.textContent);
+  eq(chips.some((c) => /22h 30m/.test(c)), true, "the slower QR rate keeps its own chip");
+});
+
 checkAsync("an action failing on the DASHBOARD renders a visible error", async () => {
   /* The regression: ui.error was only ever appended by renderDetail(), so a
      poll that failed while the dashboard was on screen — every poll on a fresh

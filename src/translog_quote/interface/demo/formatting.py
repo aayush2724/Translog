@@ -84,16 +84,17 @@ def render_evidence(evidence: str) -> str:
 
 
 def render_transit(transit: object) -> str:
-    """A transit time as a person writes it: "1 day", not "1 days".
+    """A transit time as a person writes it: "18h 30m", "2h", "1 day".
 
-    Shared so the rate demo and the quotation preview cannot drift apart on
-    something a reader will notice immediately.
+    Delegates to ``TransitTime.spelled`` — the one place a duration is turned
+    into words — so this view, the quotation preview and the selection reason
+    cannot drift apart on how the same duration reads. A minute-precision
+    transit therefore renders as hours and minutes here too, never as a raw
+    minute count.
     """
     if transit is None:
         return "—"
-    value = transit.value  # type: ignore[attr-defined]
-    unit = transit.unit.value  # type: ignore[attr-defined]
-    return f"{value} {unit.rstrip('s') if value == 1 else unit}"
+    return str(transit.spelled)  # type: ignore[attr-defined]
 
 
 def format_email(email: RawEmail) -> str:

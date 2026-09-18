@@ -168,6 +168,10 @@ def _rate_json(rate: Rate) -> Json:
         "amount": str(rate.total_amount) if rate.total_amount is not None else None,
         "currency": rate.currency,
         "transit": render_transit(rate.transit),
+        # The adapter's own per-rate identity, so the browser can mark exactly
+        # the selected card. Matching on carrier_code alone flagged every rate
+        # from the winning carrier as SELECTED; source_ref is unique per rate.
+        "source_ref": rate.source_ref,
     }
 
 

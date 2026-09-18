@@ -717,12 +717,15 @@ function sectionRates(detail) {
       el("span", { class: "search-meta muted" },
         `${rates.returned} returned · ${rates.eligible_count} eligible`)),
     el("p", { class: "strategy-note" }, rates.strategy),
-    /* Every eligible rate as a comparison card, the selected one leading. */
+    /* Every eligible rate as a comparison card, the selected one leading.
+       Identity is source_ref, not carrier_code: the winning carrier can return
+       several rates, and matching on the code alone marked every one of them
+       SELECTED and pinned the winner's reason to all of them. */
     selection
       ? el("div", { class: "rate-board" },
           ...[...rates.eligible]
-            .sort((a, b) => (a.carrier_code === selection.carrier_code ? -1 : b.carrier_code === selection.carrier_code ? 1 : 0))
-            .map((rate) => rateCard(rate, rate.carrier_code === selection.carrier_code ? selection : null)))
+            .sort((a, b) => (a.source_ref === selection.source_ref ? -1 : b.source_ref === selection.source_ref ? 1 : 0))
+            .map((rate) => rateCard(rate, rate.source_ref === selection.source_ref ? selection : null)))
       : el("p", { class: "muted" }, "No eligible rate — nothing will be quoted."),
     rates.excluded.length
       ? el("details", { class: "excluded-fold" },

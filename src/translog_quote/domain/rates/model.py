@@ -55,6 +55,25 @@ class TransitTime(BaseModel):
         """
         return self.minutes // 60
 
+    @property
+    def spelled(self) -> str:
+        """This duration written the way a person reads it: "18h 30m", "2h",
+        "45m", "1 day". For display and audit only, never for ranking.
+
+        The single place a transit is turned into words, so the selection
+        reason and every interface that shows a transit cannot disagree on how
+        the same duration is spelled. A minute-precision value is rendered as
+        hours and minutes rather than a bare minute count, which nobody reads
+        as a transit time; hours and days keep the provider's own unit.
+        """
+        if self.unit is TransitUnit.MINUTES:
+            hours, minutes = divmod(self.value, 60)
+            if hours and minutes:
+                return f"{hours}h {minutes:02d}m"
+            return f"{hours}h" if hours else f"{minutes}m"
+        unit = self.unit.value
+        return f"{self.value} {unit.rstrip('s') if self.value == 1 else unit}"
+
 
 class RateRestrictions(BaseModel):
     """What a carrier will and will not take on this lane.
