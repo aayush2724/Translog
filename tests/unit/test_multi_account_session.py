@@ -359,3 +359,130 @@ def test_per_account_state_directories_are_isolated(tmp_path: Path) -> None:
     assert b._demonstration.path == accounts / "beta" / "demonstration.json"
     # and they are genuinely different locations (the watermark lives in demonstration.json)
     assert a._demonstration.path != b._demonstration.path
+
+
+# --- arbitrary N accounts, including the intended production count of 16 (K) ----
+
+
+def _ops_multi_settings(tmp_path: Path, *specs: tuple[str, bool]) -> Settings:
+    """Multi-account settings in OPERATIONS mode with a seed cutoff, so a restart
+    resumes from each account's own watermark rather than starting fresh."""
+    base = _multi_settings(tmp_path, *specs)
+    return base.model_copy(
+        update={
+            "demo": DemoSettings(
+                state_dir=base.demo.state_dir,
+                startup_mode="operations",
+                operations_since=datetime.datetime(2026, 9, 20, tzinfo=datetime.UTC),
+            )
+        }
+    )
+
+
+def test_sixteen_accounts_all_appear_in_one_unified_dashboard(tmp_path: Path) -> None:
+    """The production target: 16 mailboxes, one dashboard, every request tagged
+    with the account it arrived on. Nothing about the count is special-cased, so
+    this is really the arbitrary-N test with N pinned at 16."""
+    specs = tuple((f"mbx-{n:02d}", True) for n in range(16))
+    ms = MultiAccountSession.build(_multi_settings(tmp_path, *specs))
+    assert len(ms.sessions) == 16
+
+    for account_id, sess in ms.sessions.items():
+        rid = f"{account_id}:R-1"
+        sess.requests[rid] = _live_request(rid)
+
+    snap = live_serialize.snapshot(ms)
+    rows = list(snap["requests"]) + list(snap["history"])  # type: ignore[operator]
+    assert len(rows) == 16
+    # every account is represented exactly once, each row tagged with its owner
+    assert {row["account"] for row in rows} == set(ms.sessions)  # type: ignore[index]
+    for row in rows:
+        assert row["request_id"].startswith(row["account"] + ":")  # type: ignore[index]
+
+
+def test_a_disabled_account_among_sixteen_is_not_polled_or_shown(tmp_path: Path) -> None:
+    specs = [(f"mbx-{n:02d}", True) for n in range(16)]
+    specs[7] = ("mbx-07", False)  # one paused mailbox
+    ms = MultiAccountSession.build(_multi_settings(tmp_path, *specs))
+    assert "mbx-07" not in ms.sessions
+    assert len(ms.sessions) == 15
+
+
+# --- restart / recovery: per-account watermark isolation (H) --------------------
+
+
+def test_restart_resumes_each_account_from_its_own_persisted_watermark(
+    tmp_path: Path,
+) -> None:
+    """Operations mode: a restart resumes from the watermark each account itself
+    persisted, never a shared or default one. Advancing one account's watermark
+    and rebuilding must leave the other account exactly where it was."""
+    settings = _ops_multi_settings(tmp_path, ("alpha", True), ("beta", True))
+
+    first = build_live_session(settings)
+    assert isinstance(first, MultiAccountSession)
+    seed = settings.demo.operations_since
+    # Both accounts seeded from the same cutoff on the very first boot...
+    assert first.sessions["alpha"].demonstration.last_poll_watermark == seed
+    assert first.sessions["beta"].demonstration.last_poll_watermark == seed
+    # ...then alpha polls forward while beta stays put.
+    advanced = datetime.datetime(2026, 9, 21, 12, 0, tzinfo=datetime.UTC)
+    first.sessions["alpha"]._demonstration.record_watermark(advanced)
+    first.close()
+
+    # Restart: brand-new session objects over the same on-disk state.
+    second = build_live_session(settings)
+    assert isinstance(second, MultiAccountSession)
+    assert second.sessions["alpha"].demonstration.last_poll_watermark == advanced
+    assert second.sessions["beta"].demonstration.last_poll_watermark == seed
+    second.close()
+
+
+def test_a_committed_request_is_restored_once_to_its_owning_account(
+    tmp_path: Path,
+) -> None:
+    """Restart/recovery + no duplication: a request committed to one account's
+    durable store comes back under that account only, exactly once, and tagged
+    to it in the unified snapshot — never resurrected under a sibling mailbox."""
+    from translog_quote.adapters.store import JsonFileStore
+    from translog_quote.domain.conversation import Thread
+    from translog_quote.domain.workflow import QuotationRequest
+
+    settings = _ops_multi_settings(tmp_path, ("alpha", True), ("beta", True))
+    # Seed a committed request+thread into ALPHA's own state directory.
+    alpha_dir = bootstrap.account_state_dir(settings, "alpha")
+    store = JsonFileStore(alpha_dir)
+    store.save_request(
+        QuotationRequest(
+            request_id="alpha:R-7",
+            state=RequestState.VALIDATED,
+            record=ShipmentRecord(request_id="alpha:R-7", source=RequestSource.EMAIL),
+            client_address="client@example.com",
+        )
+    )
+    store.save_thread(Thread(request_id="alpha:R-7", message_ids=("m7@x",)))
+
+    ms = build_live_session(settings)
+    assert isinstance(ms, MultiAccountSession)
+    # restored under alpha, absent from beta
+    assert "alpha:R-7" in ms.sessions["alpha"].requests
+    assert "alpha:R-7" not in ms.sessions["beta"].requests
+
+    snap = live_serialize.snapshot(ms)
+    rows = list(snap["requests"]) + list(snap["history"])  # type: ignore[operator]
+    matches = [row for row in rows if row["request_id"] == "alpha:R-7"]  # type: ignore[index]
+    assert len(matches) == 1  # exactly once — not duplicated across accounts
+    assert matches[0]["account"] == "alpha"
+    ms.close()
+
+
+# --- detail view carries the source account (B) ---------------------------------
+
+
+def test_unified_detail_view_is_tagged_with_its_source_account(tmp_path: Path) -> None:
+    ms = MultiAccountSession.build(_multi_settings(tmp_path, ("alpha", True), ("beta", True)))
+    ms.sessions["alpha"].requests["alpha:R-1"] = _live_request("alpha:R-1")
+
+    snap = live_serialize.snapshot(ms, selected="alpha:R-1")
+    assert snap["selected"] is not None
+    assert snap["selected"]["account"] == "alpha"  # type: ignore[index]

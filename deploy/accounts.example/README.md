@@ -64,6 +64,40 @@ python -m translog_quote.interface.demo gmail-auth-send
 The token file paths must match `read_token_path` / `send_token_path` in the
 account JSON.
 
+## 4. Scaling to 16 (or any N) mailboxes
+
+Nothing in the runtime is written for two accounts — the count is simply "every
+`*.json` in the accounts directory that is `enabled`". To run the intended
+production fleet:
+
+1. Drop **one JSON file per mailbox** into the accounts directory — `mbx-01.json`
+   … `mbx-16.json`, or any names you like (the file stem is the `account_id`
+   when the file omits one). Each names its own mailbox address and its own two
+   token paths.
+2. Mint that mailbox's **two tokens** with the commands in §3, overriding
+   `TRANSLOG_GMAIL__TEST_ADDRESS` and the token paths per account, signing in to
+   that mailbox each time. Sixteen mailboxes = sixteen read + sixteen send
+   consents, each into its own file under `.secrets/`.
+3. Start the **one** dashboard with `TRANSLOG_GMAIL__ACCOUNTS_DIR` pointing at
+   the directory. It builds one session per enabled account and presents them as
+   a single unified dashboard.
+
+The loader **refuses** two enabled accounts that share a read or send token file,
+so a copy-paste slip that would make two mailboxes act as one fails loudly at
+start-up rather than silently mis-routing a reply.
+
+**How routing is guaranteed.** Every request id is namespaced `"<account_id>:…"`,
+so the mailbox a request arrived on is carried in its id, not inferred. A reply,
+clarification or quotation is sent through *that* account's send credential —
+never a default or round-robin mailbox. The dashboard shows each request's
+source mailbox as a badge, taken from session ownership, not anything typed.
+
+**Isolation.** Each account has its own state directory
+(`<state_dir>/accounts/<account_id>/`): its own request/thread store, audit log
+and poll watermark. One mailbox's failed poll is logged against that account and
+never stops the others. Redis/RQ and the WebCargo worker stay shared and
+account-agnostic.
+
 ## Never commit
 - `.secrets/` (OAuth tokens) — git-ignored.
 - Real mailbox addresses / a real accounts directory — keep it under `.secrets/`.

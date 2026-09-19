@@ -104,6 +104,19 @@ function pill(text, tone) {
   return el("span", { class: `pill pill-${tone}` }, text);
 }
 
+/* The Gmail mailbox a request arrived on — the "source account". Rendered only
+   when the snapshot carries an `account`, which the server sets solely in
+   multi-account mode: a single-account snapshot has no `account`, so the badge
+   never appears and that view is unchanged. The identity comes from the session
+   that owns the request (its namespaced id), never from anything the operator
+   typed, so it cannot be spoofed from the page. */
+function mailboxTag(account) {
+  if (!account) return null;
+  return el("span", { class: "mailbox-tag", title: `Source mailbox: ${account}` },
+    el("span", { class: "mailbox-tag-key" }, "Mailbox"),
+    el("span", { class: "mailbox-tag-id" }, account));
+}
+
 function card(headChildren, ...body) {
   return el(
     "article",
@@ -438,6 +451,7 @@ function requestCard(request) {
           el("p", { class: "muted small" },
             [request.weight, request.client_address].filter(Boolean).join(" · "))),
         el("div", { class: "request-side" },
+          mailboxTag(request.account),
           pill(request.status.label, request.status.tone),
           button("Open request", "primary", () => {
             ui.selected = request.request_id;
@@ -883,7 +897,9 @@ function renderDetail() {
         el("h1", null, detail.headline),
         el("p", { class: "muted small" },
           [detail.subject, detail.client_address].filter(Boolean).join(" · "))),
-      pill(detail.status.label, detail.status.tone))
+      el("div", { class: "detail-head-side" },
+        mailboxTag(detail.account),
+        pill(detail.status.label, detail.status.tone)))
   );
   renderTimeline(detail.timeline);
 

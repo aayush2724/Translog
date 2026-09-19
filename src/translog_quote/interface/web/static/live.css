@@ -159,8 +159,35 @@
 /* --- the request card ----------------------------------------------------- */
 
 .request-main { min-width: 16rem; }
-.request-side { display: flex; align-items: center; gap: 0.75rem; }
+.request-side { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
 .request-title { margin: 0.15rem 0 0.3rem; font-size: 1.15rem; }
+
+/* The source-mailbox badge (multi-account mode only). Deliberately shaped
+   unlike the status pill — a two-part key/value chip — so "which mailbox" and
+   "what state" never read as the same kind of tag at a glance. */
+.detail-head-side { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+.mailbox-tag {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--stone);
+  border-radius: 999px;
+  overflow: hidden;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.mailbox-tag-key {
+  background: #ece8de;
+  color: var(--muted);
+  padding: 0.28rem 0.55rem;
+  text-transform: uppercase;
+}
+.mailbox-tag-id {
+  background: var(--teal-soft);
+  color: var(--teal-ink);
+  padding: 0.28rem 0.6rem;
+}
 .request-card .kv { margin-top: 0.9rem; }
 
 /* --- the vertical activity timeline --------------------------------------- */
