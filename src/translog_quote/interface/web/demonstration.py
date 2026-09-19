@@ -36,9 +36,30 @@ from translog_quote.observability import get_logger
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from translog_quote.config import Settings
+
 _log = get_logger("interface.web.demonstration")
 
 DEMONSTRATION_FILE = "demonstration.json"
+
+
+def build_demonstration(settings: Settings, *, account_id: str | None = None) -> DemonstrationFile:
+    """The demonstration/watermark file for a live run, optionally per account.
+
+    Rooted like the store and the audit log: ``demo.state_dir`` when
+    ``account_id`` is omitted (today's single-account layout), the account's own
+    directory when given, so each account's watermark is isolated. Kept beside
+    the class rather than in the composition root, which may not import
+    ``interface``.
+    """
+    from translog_quote import bootstrap
+
+    directory = (
+        settings.demo.state_dir
+        if account_id is None
+        else bootstrap.account_state_dir(settings, account_id)
+    )
+    return DemonstrationFile(directory)
 
 
 class Demonstration(BaseModel):

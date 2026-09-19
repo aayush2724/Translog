@@ -302,6 +302,16 @@ class GmailSettings(BaseModel):
 _ACCOUNT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
+def is_valid_account_id(value: str) -> bool:
+    """Whether ``value`` is a safe account slug: letters, digits and ``.-_``
+    only, not starting with ``.-_``.
+
+    A single rule shared by :class:`GmailAccount` validation and by any code that
+    turns an ``account_id`` into a filesystem path, so an id can never escape its
+    directory (no ``/``, ``\\`` or ``..``)."""
+    return bool(_ACCOUNT_ID_PATTERN.match(value))
+
+
 class GmailAccount(BaseModel):
     """One Gmail mailbox Translog reads and replies from — the account-scoped
     unit of a multi-account deployment.
@@ -352,7 +362,7 @@ class GmailAccount(BaseModel):
     @field_validator("account_id")
     @classmethod
     def _valid_slug(cls, value: str) -> str:
-        if not _ACCOUNT_ID_PATTERN.match(value):
+        if not is_valid_account_id(value):
             raise ValueError(
                 f"account_id {value!r} is not a valid slug: use letters, digits "
                 "and .-_ only, not starting with .-_"

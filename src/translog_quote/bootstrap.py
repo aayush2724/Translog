@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from translog_quote.config import Settings, load_settings
+from translog_quote.config.settings import is_valid_account_id
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "Settings",
+    "account_state_dir",
     "authorize_gmail",
     "authorize_gmail_send",
     "build_browser_rate_provider",
@@ -230,15 +232,50 @@ def build_memory_store() -> StorePort:
     return InMemoryStore()
 
 
-def build_persistent_store(settings: Settings) -> StorePort:
+def account_state_dir(settings: Settings, account_id: str) -> Path:
+    """The directory holding one account's durable state.
+
+    Single-account mode (no ``gmail.accounts_dir``) keeps the historical layout
+    unchanged: state lives directly under ``demo.state_dir``. Multi-account mode
+    nests each account under ``demo.state_dir / "accounts" / <account_id>`` so the
+    mailboxes never share a requests/threads/audit/watermark file.
+
+    ``account_id`` must be a validated slug (see :class:`GmailAccount`); a value
+    that is not is rejected here too, so no caller can turn it into a path that
+    escapes the state directory.
+    """
+    if not is_valid_account_id(account_id):
+        raise ValueError(
+            f"account_id {account_id!r} is not a safe slug; "
+            "refusing to build a state path from it."
+        )
+    base = settings.demo.state_dir
+    if settings.gmail.accounts_dir is None:
+        return base
+    return base / "accounts" / account_id
+
+
+def _state_dir_for(settings: Settings, account_id: str | None) -> Path:
+    """The state directory a persistence builder should use: the historical root
+    when ``account_id`` is omitted (behaviour unchanged), the account's own
+    directory when it is given."""
+    if account_id is None:
+        return settings.demo.state_dir
+    return account_state_dir(settings, account_id)
+
+
+def build_persistent_store(settings: Settings, *, account_id: str | None = None) -> StorePort:
     """A store that outlives the process, under the git-ignored state directory.
 
     Asked for explicitly. The in-memory store stays the default everywhere, so
     no test and no other demo gains a file on disk by accident.
+
+    With ``account_id`` given, the store is rooted in that account's per-account
+    directory; omitted, it uses ``demo.state_dir`` exactly as before.
     """
     from translog_quote.adapters.store import JsonFileStore
 
-    return JsonFileStore(settings.demo.state_dir)
+    return JsonFileStore(_state_dir_for(settings, account_id))
 
 
 def persistent_state_files() -> tuple[str, ...]:

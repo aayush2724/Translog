@@ -27,9 +27,29 @@ from translog_quote.pipeline.audit import AuditEvent
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from translog_quote.config import Settings
+
 _log = get_logger("interface.web.audit_log")
 
 AUDIT_FILE = "audit.jsonl"
+
+
+def build_audit_log(settings: Settings, *, account_id: str | None = None) -> JsonFileAuditLog:
+    """The durable audit log for a live run, optionally per account.
+
+    Rooted like the durable store: ``demo.state_dir`` when ``account_id`` is
+    omitted (today's single-account layout), the account's own directory when
+    given. Kept here beside the class rather than in the composition root, which
+    may not import ``interface``.
+    """
+    from translog_quote import bootstrap
+
+    directory = (
+        settings.demo.state_dir
+        if account_id is None
+        else bootstrap.account_state_dir(settings, account_id)
+    )
+    return JsonFileAuditLog(directory)
 
 
 class JsonFileAuditLog:

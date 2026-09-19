@@ -26,7 +26,7 @@ import sys
 from typing import TYPE_CHECKING, TextIO
 
 from translog_quote import bootstrap
-from translog_quote.config import load_settings
+from translog_quote.config import load_settings, resolve_gmail_accounts
 from translog_quote.interface.demo.formatting import RULE, THIN
 from translog_quote.interface.web.audit_log import AUDIT_FILE
 from translog_quote.interface.web.demonstration import DEMONSTRATION_FILE
@@ -44,6 +44,22 @@ EXIT_REFUSED = 2
 REMOVABLE = (*bootstrap.persistent_state_files(), AUDIT_FILE, DEMONSTRATION_FILE)
 
 
+def _state_directories(settings: Settings) -> list[Path]:
+    """Every state directory a reset may clear, derived from configuration.
+
+    Single-account mode (no ``gmail.accounts_dir``): the historical root, exactly
+    as before. Multi-account mode: one directory per configured account. There is
+    still no glob and no directory walk — the set of directories comes from the
+    account configuration, and within each directory only the named `REMOVABLE`
+    files are ever removed."""
+    if settings.gmail.accounts_dir is None:
+        return [settings.demo.state_dir]
+    return [
+        bootstrap.account_state_dir(settings, account.account_id)
+        for account in resolve_gmail_accounts(settings)
+    ]
+
+
 def run_reset_state(
     *,
     settings: Settings | None = None,
@@ -52,16 +68,21 @@ def run_reset_state(
 ) -> int:
     """Show what would be cleared; clear it only when explicitly confirmed."""
     settings = settings or load_settings()
-    directory: Path = settings.demo.state_dir
+    directories = _state_directories(settings)
 
     print(f"{RULE}\n  RESET LOCAL DEMO STATE\n{RULE}", file=out)
-    print(f"  state directory : {directory}", file=out)
-    print(f"  files           : {', '.join(REMOVABLE)}", file=out)
+    print(f"  state directories : {', '.join(str(d) for d in directories)}", file=out)
+    print(f"  files             : {', '.join(REMOVABLE)}", file=out)
     print("\n  This clears only the local record of what has been processed", file=out)
     print("  and sent. It does not touch Gmail, any message in any mailbox,", file=out)
     print("  or the OAuth credentials under .secrets/.", file=out)
 
-    present = [directory / name for name in REMOVABLE if (directory / name).exists()]
+    present = [
+        directory / name
+        for directory in directories
+        for name in REMOVABLE
+        if (directory / name).exists()
+    ]
     if not present:
         print(f"\n{THIN}\n  Nothing to clear — the demo state is already empty.\n", file=out)
         return EXIT_OK
