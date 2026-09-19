@@ -196,6 +196,30 @@ def test_processing_the_same_message_twice_adds_no_second_anchor() -> None:
     assert store.all_threads()[0].message_ids == (ENQUIRY_ID,)
 
 
+def test_a_duplicate_reply_produces_no_second_clarification() -> None:
+    """Duplicate client replies must not each spawn a clarification email. A
+    partial reply leaves a gap, so a fresh single draft forms and is held; the
+    same message arriving again is recognised as already processed, which is the
+    signal a caller uses to skip it — so no second draft, and nothing new sent."""
+    partial = ExtractionResult(
+        commodity=ExtractedValue[str].stated("Engineering components"),
+        is_chemical=ExtractedValue[bool].stated(value=False),
+    )
+    router, sink, _ = build(ENQUIRY_EXTRACTION, partial)
+    first = router.route(enquiry())
+    assert first.request_id is not None
+    router.approve(first.request_id, by="ops.manager@translog.example")
+    sent_after_round_one = len(sink.sent)
+
+    second = router.route(reply())  # answers two of four gaps, leaves two
+    assert second.outcome is not None
+    assert second.outcome.awaiting_approval, "a single fresh draft, held for approval"
+
+    # The same reply arriving again is recognised, so a caller skips the re-run.
+    assert router.already_processed(REPLY_ID) is True
+    assert len(sink.sent) == sent_after_round_one, "the duplicate sent no clarification"
+
+
 # --- the critical data-integrity case -------------------------------------------
 
 

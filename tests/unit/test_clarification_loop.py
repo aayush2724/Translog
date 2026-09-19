@@ -288,6 +288,71 @@ def test_f_a_conflicting_reply_is_never_silently_resolved() -> None:
     assert "which is correct" in body.lower()
 
 
+def test_f_multiple_conflicts_go_in_a_single_message() -> None:
+    """Two fields the client answered differently the second time are asked
+    about together, in ONE email — never one conflict per message."""
+    wf, sink = workflow(
+        complete(pcs=ExtractedValue[int].not_stated()),
+        ExtractionResult(
+            pcs=ExtractedValue[int].stated(10),
+            weight_kg=ExtractedValue[float].stated(700.0),
+            destination=ExtractedValue[str].stated("Dubai"),
+        ),
+    )
+
+    wf.handle(REQ, email("500 kg to Bahrain, no piece count", n=1))
+    approve(wf)
+    second = wf.handle(REQ, email("actually 700 kg, and send it to Dubai", n=2))
+
+    assert second.merge.has_conflicts
+    assert len(second.merge.conflicts) == 2, "both re-answers are conflicts"
+    assert second.awaiting_approval
+    assert second.clarification is not None
+    assert set(second.clarification.asked_for) == {FieldName.DESTINATION, FieldName.WEIGHT_KG}
+    assert second.clarification.reasons == frozenset({UnresolvedReason.CONFLICT})
+    body = second.clarification.body_text
+    assert "500" in body and "700" in body
+    assert "Bahrain" in body and "Dubai" in body
+    assert "which is correct" in body.lower()
+    assert len(sink.sent) == 1, "only the round-1 clarification went out; round 2 is held"
+
+
+# --- F+C. Missing AND conflicting fields together -> ONE message --------------
+
+
+def test_missing_and_conflicting_fields_share_one_message() -> None:
+    """Everything unresolved at this moment — a gap and a clash — goes in one
+    email: the gap under the ask lead, the clash under the conflict lead."""
+    wf, sink = workflow(
+        complete(
+            pcs=ExtractedValue[int].not_stated(),
+            commodity=ExtractedValue[str].not_stated(),
+        ),
+        ExtractionResult(
+            commodity=ExtractedValue[str].stated("Industrial adhesive"),
+            weight_kg=ExtractedValue[float].stated(700.0),
+        ),
+    )
+
+    wf.handle(REQ, email("500 kg, no pieces, no commodity", n=1))
+    approve(wf)
+    second = wf.handle(REQ, email("commodity is adhesive, actually 700 kg", n=2))
+
+    assert second.merge.has_conflicts
+    assert second.awaiting_approval
+    assert second.clarification is not None
+    # pcs was never answered (still missing); weight was re-answered (conflict).
+    assert set(second.clarification.asked_for) == {FieldName.PCS, FieldName.WEIGHT_KG}
+    assert second.clarification.reasons == frozenset(
+        {UnresolvedReason.MISSING, UnresolvedReason.CONFLICT}
+    )
+    body = second.clarification.body_text
+    assert "pieces" in body.lower(), "the still-missing field is asked"
+    assert "500" in body and "700" in body and "which is correct" in body.lower()
+    assert "adhesive" not in body.lower(), "the answered commodity is not re-asked"
+    assert len(sink.sent) == 1, "only the round-1 clarification went out; round 2 is held"
+
+
 # --- G. Ambiguity -> clarification asking for the usable form -----------------
 
 
