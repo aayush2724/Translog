@@ -10,16 +10,24 @@ from __future__ import annotations
 
 import datetime
 import json
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from translog_quote import bootstrap
+from translog_quote.adapters.email import CollectingEmailSink
 from translog_quote.config import Settings
 from translog_quote.config.settings import DemoSettings, GmailSettings, OpenRouterSettings
 from translog_quote.domain.email import RawEmail
-from translog_quote.domain.shipment import RequestSource, ShipmentRecord
+from translog_quote.domain.quotation import ReviewPacket
+from translog_quote.domain.rates import FilterOutcome, Rate, Selection, TransitTime, TransitUnit
+from translog_quote.domain.shipment import (
+    CargoDimensions,
+    RequestSource,
+    ShipmentRecord,
+)
 from translog_quote.domain.validation import ValidationResult
 from translog_quote.domain.workflow import RequestState
 from translog_quote.interface.demo.gmail_thread import _request_id_for
@@ -251,3 +259,103 @@ def test_build_live_session_multi_mode_returns_a_multi_account_session(tmp_path:
     session = build_live_session(settings)
     assert isinstance(session, MultiAccountSession)
     assert set(session.sessions) == {"alpha", "beta"}
+
+
+# --- outbound routing: replying to A uses A's sink, B uses B's (C / D) ----------
+
+
+def _quotation_ready_request(request_id: str) -> LiveRequest:
+    """A request sitting at the quotation gate, with a packet ready to decide."""
+    record = ShipmentRecord(
+        request_id=request_id,
+        source=RequestSource.EMAIL,
+        origin="BLR",
+        destination="DXB",
+        weight_kg=100.0,
+        pcs=1,
+        commodity="General Cargo",
+        dimensions_in=CargoDimensions(length=10, width=10, height=10),
+        ship_date=datetime.date(2026, 9, 26),
+    )
+    rate = Rate(
+        carrier_code="QR",
+        carrier_name="Qatar Airways",
+        product="GEN",
+        total_amount=Decimal("100.00"),
+        currency="Rs",
+        transit=TransitTime(value=10, unit=TransitUnit.HOURS),
+        source_ref="ref-1",
+    )
+    packet = ReviewPacket(
+        request_id=request_id,
+        record=record,
+        validation=ValidationResult(),
+        clarification_sent=False,
+        rates=FilterOutcome(eligible=(rate,), excluded=()),
+        selection=Selection(rate=rate, reason="fastest eligible", runners_up=()),
+    )
+    request = _live_request(request_id)
+    request.state = RequestState.PENDING_APPROVAL
+    request.packet = packet
+    request.last_message_id = "<enquiry@client>"
+    return request
+
+
+def _per_account_sinks(monkeypatch: pytest.MonkeyPatch) -> dict[str, CollectingEmailSink]:
+    """Give every account its own delivering (collecting) sink, keyed by account."""
+    sinks: dict[str, CollectingEmailSink] = {}
+
+    def build(settings: Settings, *, account: object = None) -> CollectingEmailSink:
+        key = account.account_id if account is not None else "default"  # type: ignore[attr-defined]
+        sink = CollectingEmailSink()
+        sinks[key] = sink
+        return sink
+
+    monkeypatch.setattr(bootstrap, "build_gmail_email_sink", build)
+    return sinks
+
+
+def test_replying_to_an_alpha_request_sends_only_through_alphas_sink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sinks = _per_account_sinks(monkeypatch)
+    ms = MultiAccountSession.build(_multi_settings(tmp_path, ("alpha", True), ("beta", True)))
+    ms.sessions["alpha"].requests["alpha:R-1"] = _quotation_ready_request("alpha:R-1")
+
+    ms.decide("alpha:R-1", choice="approve", by="Operator")
+
+    # the client quotation left through ALPHA's sink, and nothing left through beta's
+    assert any(m.to_address == "client@example.com" for m in sinks["alpha"].sent)
+    assert sinks["beta"].sent == []
+
+
+def test_replying_to_a_beta_request_sends_only_through_betas_sink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sinks = _per_account_sinks(monkeypatch)
+    ms = MultiAccountSession.build(_multi_settings(tmp_path, ("alpha", True), ("beta", True)))
+    ms.sessions["beta"].requests["beta:R-1"] = _quotation_ready_request("beta:R-1")
+
+    ms.decide("beta:R-1", choice="approve", by="Operator")
+
+    assert any(m.to_address == "client@example.com" for m in sinks["beta"].sent)
+    assert sinks["alpha"].sent == []
+
+
+# --- per-account state and watermark isolation (F) ------------------------------
+
+
+def test_per_account_state_directories_are_isolated(tmp_path: Path) -> None:
+    ms = MultiAccountSession.build(_multi_settings(tmp_path, ("alpha", True), ("beta", True)))
+    a, b = ms.sessions["alpha"], ms.sessions["beta"]
+    accounts = tmp_path / "state" / "accounts"
+
+    # request/thread store, audit, and demonstration/watermark all in the account's own dir
+    assert a._durable.directory == accounts / "alpha"  # type: ignore[attr-defined]
+    assert b._durable.directory == accounts / "beta"  # type: ignore[attr-defined]
+    assert a.audit.path == accounts / "alpha" / "audit.jsonl"  # type: ignore[union-attr]
+    assert b.audit.path == accounts / "beta" / "audit.jsonl"  # type: ignore[union-attr]
+    assert a._demonstration.path == accounts / "alpha" / "demonstration.json"
+    assert b._demonstration.path == accounts / "beta" / "demonstration.json"
+    # and they are genuinely different locations (the watermark lives in demonstration.json)
+    assert a._demonstration.path != b._demonstration.path
