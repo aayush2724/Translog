@@ -12,22 +12,26 @@ from translog_quote.config.settings import (
     DEFAULT_ENV_FILE,
     ENV_FILE_VAR,
     Environment,
+    GmailAccount,
     GmailSettings,
     LogLevel,
     QueueSettings,
     Settings,
     WebCargoMode,
     load_settings,
+    resolve_gmail_accounts,
 )
 
 __all__ = [
     "DEFAULT_ENV_FILE",
     "ENV_FILE_VAR",
     "Environment",
+    "GmailAccount",
     "GmailSettings",
     "LogLevel",
     "QueueSettings",
     "Settings",
     "WebCargoMode",
     "load_settings",
+    "resolve_gmail_accounts",
 ]

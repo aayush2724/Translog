@@ -7,14 +7,19 @@ clients these values configure do not exist yet.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 DEFAULT_ENV_FILE = ".env"
 """The base configuration layer. Always read when it exists."""
@@ -278,6 +283,96 @@ class GmailSettings(BaseModel):
     runner-up rates, exclusion reasons — which is internal commercial detail
     and must not reach a client."""
 
+    accounts_dir: Path | None = None
+    """Directory of per-account config files for a multi-account deployment.
+
+    Each ``*.json`` file in it describes one :class:`GmailAccount` (its mailbox
+    and its own OAuth token paths). When set, :func:`resolve_gmail_accounts`
+    loads every file; when unset (the default), that function synthesises exactly
+    one ``default`` account from the single-account fields above, so an existing
+    single-account deployment is unchanged. ``TRANSLOG_GMAIL__ACCOUNTS_DIR``.
+
+    Introduced for the multi-account model (Phase 1); nothing in the runtime
+    polling, sending or persistence path consumes it yet."""
+
+
+#: A filesystem- and identifier-safe account slug: letters/digits, then
+#: letters/digits/``.-_``. Keeps ``account_id`` safe to use later as a state
+#: subdirectory name and a request-id prefix.
+_ACCOUNT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+class GmailAccount(BaseModel):
+    """One Gmail mailbox Translog reads and replies from — the account-scoped
+    unit of a multi-account deployment.
+
+    Phase 1 introduces this shape only; no polling, sending or persistence code
+    consumes it yet. A single-account deployment is exactly one account with
+    ``account_id == "default"`` synthesised from :class:`GmailSettings`, so the
+    current behaviour is preserved unchanged.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    account_id: str
+    """Stable slug identifying this mailbox. Used later to scope state, message
+    de-duplication and outbound routing, so it must be filesystem- and id-safe
+    (letters, digits and ``.-_`` only, not starting with ``.-_``)."""
+
+    address: str
+    """The Gmail mailbox this account reads. Also the ``From`` unless
+    ``sender_address`` overrides it — Gmail validates ``From`` against the
+    authenticated account."""
+
+    read_token_path: Path
+    """This account's own ``gmail.readonly`` OAuth token. Never shared."""
+
+    send_token_path: Path
+    """This account's own ``gmail.send`` OAuth token. Never shared."""
+
+    approver_address: str | None = None
+    """Internal review recipient for this account, or ``None`` to fall back to a
+    global default when the outbound path is wired (a later phase). Never a
+    client address."""
+
+    query: str = "in:inbox"
+    """Gmail search scope for this account's inbound fetch."""
+
+    enabled: bool = True
+    """A disabled account is configured but neither polled nor sent from."""
+
+    operations_since: datetime | None = None
+    """This account's first mail cutoff for operations mode, used only until its
+    own first watermark is written."""
+
+    sender_address: str | None = None
+    """Overrides ``address`` as the ``From`` when set; otherwise ``address`` is
+    used (see :attr:`effective_sender`)."""
+
+    @field_validator("account_id")
+    @classmethod
+    def _valid_slug(cls, value: str) -> str:
+        if not _ACCOUNT_ID_PATTERN.match(value):
+            raise ValueError(
+                f"account_id {value!r} is not a valid slug: use letters, digits "
+                "and .-_ only, not starting with .-_"
+            )
+        return value
+
+    @field_validator("operations_since")
+    @classmethod
+    def _assume_utc_account(cls, value: datetime | None) -> datetime | None:
+        """A cutoff written without a timezone is read as UTC (mirrors
+        :class:`DemoSettings.operations_since`)."""
+        if value is not None and value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value
+
+    @property
+    def effective_sender(self) -> str:
+        """The ``From`` address: ``sender_address`` if given, else ``address``."""
+        return self.sender_address or self.address
+
 
 class DemoSettings(BaseModel):
     fixtures_dir: Path = Path("fixtures/scenarios")
@@ -475,3 +570,108 @@ def load_settings(env_file: str | Path | None = None) -> Settings:
     # Later files win, so the account file overrides the base one field by
     # field and inherits everything it does not mention.
     return Settings(_env_file=(DEFAULT_ENV_FILE, path))  # type: ignore[call-arg]
+
+
+#: The per-account config files `resolve_gmail_accounts` reads from `accounts_dir`.
+_ACCOUNT_FILE_GLOB = "*.json"
+
+
+def resolve_gmail_accounts(settings: Settings) -> tuple[GmailAccount, ...]:
+    """The Gmail accounts to operate, or exactly one ``default`` account.
+
+    With no ``gmail.accounts_dir`` this returns a single account synthesised from
+    the single-account :class:`GmailSettings` fields, so a single-account
+    deployment behaves exactly as before. With a directory set, every
+    ``*.json`` file in it is loaded (sorted for determinism), validated, and
+    checked for duplicate ids and shared token files among enabled accounts.
+
+    Phase 1: provided for configuration and tests; the runtime does not consume
+    it yet, so behaviour is unchanged until a later phase wires it in.
+    """
+    accounts_dir = settings.gmail.accounts_dir
+    if accounts_dir is None:
+        return (_default_account(settings),)
+    if not accounts_dir.is_dir():
+        raise FileNotFoundError(
+            f"TRANSLOG_GMAIL__ACCOUNTS_DIR names {accounts_dir}, which is not a directory."
+        )
+    files = sorted(accounts_dir.glob(_ACCOUNT_FILE_GLOB))
+    if not files:
+        raise ValueError(
+            f"No Gmail account files ({_ACCOUNT_FILE_GLOB}) found in {accounts_dir}."
+        )
+    accounts = tuple(_load_account_file(path) for path in files)
+    _reject_collisions(accounts)
+    return accounts
+
+
+def _default_account(settings: Settings) -> GmailAccount:
+    """One account standing in for the single-account configuration — the exact
+    mailbox, tokens, query and approver already in use, so nothing changes."""
+    gmail = settings.gmail
+    return GmailAccount(
+        account_id="default",
+        address=gmail.test_address or "",
+        read_token_path=gmail.token_path,
+        send_token_path=gmail.send_token_path,
+        approver_address=gmail.approver_address,
+        query=gmail.query,
+        enabled=True,
+        operations_since=settings.demo.operations_since,
+        sender_address=gmail.sender_address,
+    )
+
+
+def _load_account_file(path: Path) -> GmailAccount:
+    """One account config file → a validated :class:`GmailAccount`.
+
+    ``account_id`` defaults to the file's stem when the file omits it. Any read,
+    JSON or validation problem is raised as a ``ValueError`` naming the file, so
+    a bad account file fails loudly rather than being silently skipped."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Gmail account file {path} is not readable JSON: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"Gmail account file {path} must contain a JSON object, got {type(raw).__name__}."
+        )
+    raw.setdefault("account_id", path.stem)
+    try:
+        return GmailAccount.model_validate(raw)
+    except ValidationError as exc:
+        raise ValueError(f"Gmail account file {path} is malformed: {exc}") from exc
+
+
+def _reject_collisions(accounts: tuple[GmailAccount, ...]) -> None:
+    """Refuse duplicate ids, and refuse two *enabled* accounts sharing a token.
+
+    A shared OAuth token would make two accounts read and send as one mailbox
+    while appearing to be two — the exact confusion the per-account token split
+    exists to prevent. Disabled accounts are inert and so are not checked."""
+    seen_ids: set[str] = set()
+    for account in accounts:
+        if account.account_id in seen_ids:
+            raise ValueError(
+                f"Duplicate Gmail account_id {account.account_id!r}; ids must be unique."
+            )
+        seen_ids.add(account.account_id)
+    live = [account for account in accounts if account.enabled]
+    _reject_shared_path(live, lambda account: account.read_token_path, "read token")
+    _reject_shared_path(live, lambda account: account.send_token_path, "send token")
+
+
+def _reject_shared_path(
+    accounts: list[GmailAccount],
+    of: Callable[[GmailAccount], Path],
+    what: str,
+) -> None:
+    by_path: dict[Path, str] = {}
+    for account in accounts:
+        path = of(account)
+        if path in by_path:
+            raise ValueError(
+                f"Gmail accounts {by_path[path]!r} and {account.account_id!r} share a "
+                f"{what} file ({path}); each account needs its own credential."
+            )
+        by_path[path] = account.account_id
