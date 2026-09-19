@@ -103,17 +103,20 @@ services:
       # not match, so a wrong value never silently mis-selects.
       - key: TRANSLOG_GOODS_TYPE__GENERAL_CARGO_LABEL
         value: "0000 - General Cargo"
-      # JSON arrays, EMPTY by default and filled in by the business. EMPTY
-      # SPECIAL_HANDLING means the automatic General Cargo rule is OFF: every
-      # request is held for an operator to pick a Goods Type. Populate CATALOG
-      # (exact WebCargo labels the operator may pick — General Cargo is always
-      # offered) and SPECIAL_HANDLING (reviewed words that force an operator
-      # decision, e.g. ["battery","lithium","perishable"]) to enable the rule and
-      # the picker. See docs/webcargo-operator-auth.md.
+      # JSON arrays. A populated SPECIAL_HANDLING turns the automatic General
+      # Cargo rule ON: a clear General Cargo / Non-Haz enquiry auto-resolves to
+      # GENERAL_CARGO_LABEL, while a special-handling word (whole-word match on
+      # the commodity), a chemical, or any non-general cargo_type is held for an
+      # operator pick. CATALOG is the operator's pick list — every entry MUST be
+      # an EXACT live WebCargo label (the adapter selects on equality and fails
+      # loudly); General Cargo is always offered even if absent. Only labels
+      # confirmed against the live dropdown are listed here; extend CATALOG only
+      # with labels captured from the real dropdown. See
+      # docs/webcargo-operator-auth.md.
       - key: TRANSLOG_GOODS_TYPE__CATALOG
-        value: "[]"
+        value: '["0000 - General Cargo","0000-90 - Vulnerable cargo"]'
       - key: TRANSLOG_GOODS_TYPE__SPECIAL_HANDLING
-        value: "[]"
+        value: '["battery","lithium","airbag","perfume","fresh","frozen","chilled","perishable","pharma","medicine","vaccine","live","animal","gold","jewel","valuable","dry ice","magnet","aerosol"]'
       # On the persistent disk declared above, not in the ephemeral container
       # filesystem. A subdirectory of the mount rather than the mount itself,
       # so the disk's own lost+found sits beside the state rather than inside
