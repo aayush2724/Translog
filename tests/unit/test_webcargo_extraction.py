@@ -680,6 +680,37 @@ def test_a_date_that_will_not_take_is_a_loud_failure_not_a_wrong_date(
         pages._fill_departure_date(driver, date(2026, 9, 21), timeout_seconds=0.05)
 
 
+def test_a_far_future_departure_date_is_entered_and_verified_exactly() -> None:
+    """Characterization: the UI layer applies no date-range limit. A clearly
+    far-future date takes the same path as any near date — typed in DD/MM/YYYY
+    and confirmed on the display exactly, never clamped."""
+    driver = FakeDriver(rows=rows_payload(1))  # default display: 11/09/2026
+    pages._fill_departure_date(driver, date(2099, 12, 31), timeout_seconds=5)
+
+    assert driver._date_value == "31/12/2099"
+    assert ("fill", f"{pages.CALENDAR_INPUT}=31/12/2099") in driver.calls
+    assert ("press", f"{pages.CALENDAR_INPUT}:Enter") in driver.calls
+
+
+def test_a_far_future_date_that_will_not_commit_is_still_a_loud_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Characterization: nothing special-cases a far-future date. If the calendar
+    refuses it — as WebCargo's own picker might for an out-of-window date — the
+    display never updates and the existing ContractViolation is raised, the same
+    loud failure as any unconfirmed date. There is no silent clamp to a nearer
+    date; a future-date rule, if wanted, does not exist yet."""
+    monkeypatch.setattr(pages, "_OPTION_POLL_SECONDS", 0.0)
+
+    class _StuckDate(FakeDriver):
+        def press(self, selector: str, key: str) -> None:  # never commits
+            self.calls.append(("press", f"{selector}:{key}"))
+
+    driver = _StuckDate(rows=rows_payload(1))  # stays on 11/09/2026
+    with pytest.raises(ContractViolation, match="unconfirmed date"):
+        pages._fill_departure_date(driver, date(2099, 12, 31), timeout_seconds=0.05)
+
+
 # --- the search flow, against a scripted driver -------------------------------------
 
 

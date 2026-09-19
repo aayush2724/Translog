@@ -157,6 +157,16 @@ def test_the_same_query_always_gives_the_same_rates() -> None:
     assert search(REFERENCE).rates == search(REFERENCE).rates
 
 
+def test_the_demo_provider_ignores_the_requested_date() -> None:
+    """Characterization of existing behaviour (unchanged): the demo prices on the
+    shipment, not the date. Two queries differing only in date — a near one and a
+    clearly far-future one — give identical rates, so the date is passed through
+    without ever shaping the result."""
+    far = REFERENCE.model_copy(update={"date": datetime.date(2099, 12, 31)})
+
+    assert search(REFERENCE).rates == search(far).rates
+
+
 # --- the shape a real adapter will have -----------------------------------------
 
 

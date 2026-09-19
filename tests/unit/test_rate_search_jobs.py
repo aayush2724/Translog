@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 import pytest
@@ -136,6 +136,30 @@ def test_to_query_carries_the_piece_count() -> None:
     """The client's stated piece count reaches the provider query verbatim, so
     the WebCargo Pieces field reflects the real shipment."""
     assert request(pieces=8).to_query().pieces == 8
+
+
+# --- characterization: the search date reaches the RateQuery unchanged ----------
+#
+# Fixed dates offset from a fixed reference (never the real clock), so the
+# tomorrow / +7 / +30 / far-future cases are deterministic. This pins that the
+# queue boundary neither clamps nor shifts the date: no future-date rule exists.
+
+_BASE = date(2026, 9, 2)
+
+
+@pytest.mark.parametrize(
+    "requested",
+    [
+        _BASE + timedelta(days=1),  # tomorrow
+        _BASE + timedelta(days=7),  # +7 days
+        _BASE + timedelta(days=30),  # +30 days
+        date(2099, 12, 31),  # clearly far future
+    ],
+)
+def test_to_query_passes_the_search_date_through_unchanged(requested: date) -> None:
+    """``RateSearchJobRequest.search_date`` reaches ``RateQuery.date`` verbatim,
+    for a near date or a far-future one alike — no clamp, no shift."""
+    assert request(search_date=requested).to_query().date == requested
 
 
 # --- RQ statuses become exactly four client-visible states ------------------------

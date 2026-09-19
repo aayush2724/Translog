@@ -6,7 +6,7 @@ mapper is exercised against literal payloads.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -150,6 +150,44 @@ def test_the_query_cannot_carry_a_client_identity() -> None:
             date=WHEN,
             client_email="x@y.example",
         )
+
+
+# --- characterization: the requested date is passed through unchanged -----------
+#
+# There is no future-date rule anywhere in the pipeline: build_query neither
+# clamps nor shifts the date it is given. These pin that contract with fixed
+# dates offset from a fixed reference (never the real clock), so "tomorrow",
+# "+7", "+30" and "far future" are deterministic. If a date-range rule is ever
+# added, these turn red and say exactly where.
+
+BASE = date(2026, 9, 2)  # a fixed "reference today"; the tests never read the clock
+
+
+@pytest.mark.parametrize(
+    "requested",
+    [
+        BASE + timedelta(days=1),  # tomorrow
+        BASE + timedelta(days=7),  # +7 days
+        BASE + timedelta(days=30),  # +30 days
+        date(2099, 12, 31),  # clearly far future
+    ],
+)
+def test_build_query_passes_the_requested_date_through_unchanged(requested: date) -> None:
+    """The RateQuery carries exactly the ``on_date`` it was given — no clamp,
+    no shift, no future-date rule."""
+    query = build_query(record(), on_date=requested, resolver=RESOLVER)
+
+    assert query.date == requested
+
+
+def test_the_mock_adapter_ignores_the_requested_date() -> None:
+    """Characterization of existing behaviour (unchanged): the fixture adapter
+    returns the same rates whatever the date — it does not model date at all."""
+    adapter = MockWebCargoAdapter()
+    early = adapter.search(build_query(record(), on_date=BASE, resolver=RESOLVER))
+    far = adapter.search(build_query(record(), on_date=date(2099, 12, 31), resolver=RESOLVER))
+
+    assert early.rates == far.rates
 
 
 # --- 8. eligibility filtering ---------------------------------------------------
