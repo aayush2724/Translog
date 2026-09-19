@@ -72,9 +72,9 @@ from translog_quote.pipeline import RateSearchOutcome, RateSearchStage
 
 if TYPE_CHECKING:
     import datetime
-    from collections.abc import Collection, Sequence
+    from collections.abc import Callable, Collection, Sequence
 
-    from translog_quote.config import Settings
+    from translog_quote.config import GmailAccount, Settings
     from translog_quote.domain.clarification import ClarificationMessage
     from translog_quote.domain.conversation import Thread
     from translog_quote.domain.email import RawEmail
@@ -84,6 +84,7 @@ if TYPE_CHECKING:
     from translog_quote.domain.workflow import QuotationRequest
     from translog_quote.interface.jobs import RateSearchJobResult
     from translog_quote.interface.web.demonstration import Demonstration
+    from translog_quote.interface.web.multi_account_session import MultiAccountSession
     from translog_quote.pipeline import QuotationStage
     from translog_quote.pipeline.audit import AuditEvent
     from translog_quote.ports import (
@@ -100,6 +101,19 @@ if TYPE_CHECKING:
 MESSAGE_LIMIT = 10
 
 _log = get_logger("interface.web.live_session")
+
+
+def _namespaced_request_id_for(account_id: str) -> Callable[[RawEmail], str]:
+    """A request-id factory that prefixes ``_request_id_for`` with the account id,
+    so ids are globally unique across the mailboxes and route back to their owner
+    (``account_id`` is a validated slug and never contains ``:``). Single-account
+    sessions keep the unprefixed ``_request_id_for``, so their ids are unchanged.
+    """
+
+    def _new_id(email: RawEmail) -> str:
+        return f"{account_id}:{_request_id_for(email)}"
+
+    return _new_id
 
 
 class LiveSequenceError(Exception):
@@ -286,6 +300,7 @@ class LiveSession:
         self,
         settings: Settings,
         *,
+        account: GmailAccount | None = None,
         source: EmailSource | None = None,
         sink: EmailSink | None = None,
         extractor: ExtractionPort | None = None,
@@ -295,6 +310,17 @@ class LiveSession:
         resolver: LocationResolverPort | None = None,
     ) -> None:
         self._settings = settings
+        # The mailbox this session speaks for, or None in the single-account
+        # deployment. Kept so a later aggregator can tell which account owns a
+        # request; nothing else here branches on it beyond choosing this
+        # account's mailbox, credentials and state directory below.
+        self.account = account
+        account_id = account.account_id if account is not None else None
+        state_dir = (
+            bootstrap.account_state_dir(settings, account.account_id)
+            if account is not None
+            else settings.demo.state_dir
+        )
         # Injectable like every other collaborator, so a test can exercise a
         # provider that cannot identify a particular place without needing a
         # real one. The default is whatever the configured mode calls for.
@@ -306,19 +332,27 @@ class LiveSession:
         self._clock = clock or bootstrap.build_system_clock()
         # Persisted, so a restarted server still shows what happened rather
         # than an empty history for a request that plainly progressed.
-        self.audit: CollectingAudit | JsonFileAuditLog = audit or JsonFileAuditLog(
-            settings.demo.state_dir
-        )
+        self.audit: CollectingAudit | JsonFileAuditLog = audit or JsonFileAuditLog(state_dir)
 
         self._durable = (
-            durable if durable is not None else bootstrap.build_persistent_store(settings)
+            durable
+            if durable is not None
+            else bootstrap.build_persistent_store(settings, account_id=account_id)
         )
         self._working = bootstrap.build_memory_store()
         bootstrap.seed_store(self._working, self._durable)
 
         # Built before anything is read: a broken send credential should stop
         # the session here, not after a client's mail has been processed.
-        self._sink = sink if sink is not None else bootstrap.build_gmail_email_sink(settings)
+        # When there is no account, call the builder exactly as before (no
+        # ``account`` keyword) so existing stubs of it are unaffected; pass the
+        # account only when there is one.
+        if sink is not None:
+            self._sink = sink
+        elif account is None:
+            self._sink = bootstrap.build_gmail_email_sink(settings)
+        else:
+            self._sink = bootstrap.build_gmail_email_sink(settings, account=account)
         self._source = source
         # Built here rather than left to the router so shutdown can reach it.
         # `build_inbound_router` would otherwise construct the real adapter
@@ -332,7 +366,11 @@ class LiveSession:
 
         self._router = bootstrap.build_inbound_router(
             settings,
-            new_request_id=_request_id_for,
+            new_request_id=(
+                _request_id_for
+                if account is None
+                else _namespaced_request_id_for(account.account_id)
+            ),
             store=self._working,
             extractor=self._extractor,
             audit=self.audit,
@@ -353,7 +391,7 @@ class LiveSession:
         # Which of the mailbox's real messages this presentation is following.
         # Deletes nothing and names nothing: a demonstration is whatever
         # arrived after the presenter pressed Start.
-        self._demonstration = DemonstrationFile(settings.demo.state_dir)
+        self._demonstration = DemonstrationFile(state_dir)
         self.outside_demonstration = 0
         self.skipped_internal = 0
         self.blocked_messages = 0
@@ -759,21 +797,40 @@ class LiveSession:
         the session permanently unable to read mail.
         """
         if self._source is None:
+            # No ``account`` keyword when single-account, so existing stubs of
+            # this builder keep working; account-scoped only when there is one.
             if self.operations_mode:
                 # Operations reads a date-bounded window oldest-first, so the
                 # ceiling is the larger per-poll fetch budget, the overlap lets
                 # the boundary be re-listed safely, and internal approval mail
                 # never spends the client budget.
+                if self.account is None:
+                    self._source = bootstrap.build_gmail_email_source(
+                        self._settings,
+                        max_results=self._settings.gmail.fetch_cap,
+                        overlap_seconds=self._settings.demo.fetch_overlap_minutes * 60.0,
+                        is_internal=_is_internal,
+                        sent_by_us=self._sent_provider_ids,
+                    )
+                else:
+                    self._source = bootstrap.build_gmail_email_source(
+                        self._settings,
+                        account=self.account,
+                        max_results=self._settings.gmail.fetch_cap,
+                        overlap_seconds=self._settings.demo.fetch_overlap_minutes * 60.0,
+                        is_internal=_is_internal,
+                        sent_by_us=self._sent_provider_ids,
+                    )
+            elif self.account is None:
                 self._source = bootstrap.build_gmail_email_source(
-                    self._settings,
-                    max_results=self._settings.gmail.fetch_cap,
-                    overlap_seconds=self._settings.demo.fetch_overlap_minutes * 60.0,
-                    is_internal=_is_internal,
-                    sent_by_us=self._sent_provider_ids,
+                    self._settings, max_results=MESSAGE_LIMIT, sent_by_us=self._sent_provider_ids
                 )
             else:
                 self._source = bootstrap.build_gmail_email_source(
-                    self._settings, max_results=MESSAGE_LIMIT, sent_by_us=self._sent_provider_ids
+                    self._settings,
+                    account=self.account,
+                    max_results=MESSAGE_LIMIT,
+                    sent_by_us=self._sent_provider_ids,
                 )
         return self._source.fetch_new(since=since)
 
@@ -1469,12 +1526,17 @@ def _is_internal(email: RawEmail) -> bool:
     return email.subject.strip().startswith(INTERNAL_SUBJECT_PREFIX)
 
 
-def build_live_session(settings: Settings) -> LiveSession:
+def build_live_session(settings: Settings) -> LiveSession | MultiAccountSession:
     """The session the server serves, or a readable refusal.
 
     Configuration is checked here so a misconfigured demo fails at start-up
     with a sentence a person can act on, rather than as a 500 in front of an
     audience.
+
+    With ``gmail.accounts_dir`` unset this is a single :class:`LiveSession` over
+    the one configured mailbox, exactly as before. With it set, it is a
+    :class:`MultiAccountSession` owning one ``LiveSession`` per configured
+    account and presenting them to the dashboard as one unified session.
 
     **Demonstration mode** starts a fresh demonstration as part of starting the
     server: the cutoff is *now*, so the mailbox's history is out of scope and
@@ -1497,7 +1559,15 @@ def build_live_session(settings: Settings) -> LiveSession:
         raise PermanentFailure(
             "No internal approver address. Set TRANSLOG_GMAIL__APPROVER_ADDRESS in .env."
         )
-    session = LiveSession(settings)
+
+    session: LiveSession | MultiAccountSession
+    if settings.gmail.accounts_dir is None:
+        session = LiveSession(settings)
+    else:
+        from translog_quote.interface.web.multi_account_session import MultiAccountSession
+
+        session = MultiAccountSession.build(settings)
+
     if session.operations_mode:
         session.resume_operations()
     else:

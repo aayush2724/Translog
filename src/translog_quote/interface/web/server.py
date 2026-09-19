@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from translog_quote.config import Settings
+    from translog_quote.interface.web.multi_account_session import MultiAccountSession
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -128,7 +129,7 @@ def _selected(query: str) -> str | None:
     return None
 
 
-def _live_poll(session: LiveSession, body: dict[str, object]) -> None:
+def _live_poll(session: LiveSession | MultiAccountSession, body: dict[str, object]) -> None:
     """Read the mailbox once. Reads and processes; sends nothing.
 
     The same call `LivePoller` makes on its timer, which is what actually
@@ -140,7 +141,9 @@ def _live_poll(session: LiveSession, body: dict[str, object]) -> None:
     session.poll()
 
 
-def _live_approve_clarification(session: LiveSession, body: dict[str, object]) -> None:
+def _live_approve_clarification(
+    session: LiveSession | MultiAccountSession, body: dict[str, object]
+) -> None:
     """Release a held clarification. Requires a named person; no default.
 
     `request_id` says which draft. The page has always sent it and this handler
@@ -153,7 +156,7 @@ def _live_approve_clarification(session: LiveSession, body: dict[str, object]) -
     )
 
 
-def _live_decide(session: LiveSession, body: dict[str, object]) -> None:
+def _live_decide(session: LiveSession | MultiAccountSession, body: dict[str, object]) -> None:
     """Apply one human decision to the quotation gate.
 
     Every value comes from the request body and none has a default. An absent
@@ -172,7 +175,9 @@ def _live_decide(session: LiveSession, body: dict[str, object]) -> None:
     )
 
 
-def _live_decide_goods_type(session: LiveSession, body: dict[str, object]) -> None:
+def _live_decide_goods_type(
+    session: LiveSession | MultiAccountSession, body: dict[str, object]
+) -> None:
     """Record an operator's Goods Type pick for a held request.
 
     Names the request, the chosen catalog label, and — exactly like
@@ -190,7 +195,9 @@ def _live_decide_goods_type(session: LiveSession, body: dict[str, object]) -> No
 
 
 #: Every live action a browser may take. A literal table, like the static one.
-_LIVE_ACTIONS: dict[str, Callable[[LiveSession, dict[str, object]], None]] = {
+_LIVE_ACTIONS: dict[
+    str, Callable[[LiveSession | MultiAccountSession, dict[str, object]], None]
+] = {
     "poll": _live_poll,
     "clarification/approve": _live_approve_clarification,
     "quotation/decide": _live_decide,
@@ -226,7 +233,7 @@ class DemoServer(ThreadingHTTPServer):
         address: tuple[str, int],
         settings: Settings | None = None,
         *,
-        live_session: LiveSession | None = None,
+        live_session: LiveSession | MultiAccountSession | None = None,
         poll_interval_seconds: float | None = None,
     ) -> None:
         super().__init__(address, DemoRequestHandler)

@@ -32,6 +32,7 @@ from translog_quote.observability import get_logger
 
 if TYPE_CHECKING:
     from translog_quote.interface.web.live_session import LiveSession
+    from translog_quote.interface.web.multi_account_session import MultiAccountSession
 
 _log = get_logger("interface.web.live_poller")
 
@@ -71,7 +72,7 @@ class LivePoller:
 
     def __init__(
         self,
-        session: LiveSession,
+        session: LiveSession | MultiAccountSession,
         *,
         lock: threading.Lock,
         interval_seconds: float,

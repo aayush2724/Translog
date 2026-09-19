@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Collection
     from pathlib import Path
 
+    from translog_quote.config import GmailAccount
     from translog_quote.domain.conversation import CorrelationPolicy
     from translog_quote.domain.email import RawEmail
     from translog_quote.pipeline import (
@@ -100,17 +101,24 @@ def build_fixture_email_source(settings: Settings, scenario: str) -> EmailSource
 def build_gmail_email_source(
     settings: Settings,
     *,
+    account: GmailAccount | None = None,
     max_results: int | None = None,
     overlap_seconds: float = 0.0,
     is_internal: Callable[[RawEmail], bool] | None = None,
     sent_by_us: Callable[[], Collection[str]] | None = None,
 ) -> EmailSource:
-    """An `EmailSource` over the configured Gmail **test** mailbox (Phase 10.3).
+    """An `EmailSource` over one Gmail mailbox (Phase 10.3).
 
     Receive-only, and never built implicitly: the fixture source stays the
     default everywhere, and only the explicit Gmail commands ask for this one.
-    Refuses to build without a configured test address, and the transport
+    Refuses to build without a configured mailbox address, and the transport
     refuses without the git-ignored OAuth token file.
+
+    ``account`` selects which mailbox to read: given, it uses that account's
+    address, read token and query; omitted, it uses the single-account
+    ``settings.gmail.*`` fields exactly as before. The transport tuning
+    (timeouts, retries) is global either way — the per-account model carries only
+    what differs between mailboxes.
 
     `max_results` raises the configured one-message ceiling for a caller that
     genuinely needs a conversation rather than a message — reading an enquiry
@@ -121,22 +129,29 @@ def build_gmail_email_source(
     from translog_quote.errors import PermanentFailure
 
     gmail = settings.gmail
-    if not gmail.test_address:
+    address = gmail.test_address if account is None else account.address
+    read_token_path = gmail.token_path if account is None else account.read_token_path
+    query = gmail.query if account is None else account.query
+    if not address:
+        if account is None:
+            raise PermanentFailure(
+                "No Gmail test mailbox configured. Set TRANSLOG_GMAIL__TEST_ADDRESS "
+                "in .env (see .env.example)."
+            )
         raise PermanentFailure(
-            "No Gmail test mailbox configured. Set TRANSLOG_GMAIL__TEST_ADDRESS "
-            "in .env (see .env.example)."
+            f"Gmail account {account.account_id!r} has no address; cannot read its mailbox."
         )
 
     transport = HttpxGmailTransport(
-        token_path=gmail.token_path,
+        token_path=read_token_path,
         timeout_seconds=gmail.timeout_seconds,
         max_retries=gmail.max_retries,
         backoff_seconds=gmail.retry_backoff_seconds,
     )
     return GmailEmailSource(
         transport,
-        mailbox_address=gmail.test_address,
-        query=gmail.query,
+        mailbox_address=address,
+        query=query,
         max_results=gmail.max_results if max_results is None else max_results,
         overlap_seconds=overlap_seconds,
         # Approval mail we sent ourselves must not spend the client fetch budget.
@@ -352,23 +367,24 @@ def build_outbox_sink(directory: Path | None = None) -> EmailSink:
     return FileOutboxSink(directory) if directory is not None else CollectingEmailSink()
 
 
-def build_gmail_email_sink(settings: Settings) -> EmailSink:
+def build_gmail_email_sink(settings: Settings, *, account: GmailAccount | None = None) -> EmailSink:
     """The **sending** `EmailSink`, over the send-scoped Gmail credential.
 
     Three independent things must be true before this returns a sink that can
     reach a real inbox, and each is checked here rather than at first send:
 
     1. `TRANSLOG_GMAIL__SEND_ENABLED` is on. Off is the default, so a token
-       file lying around is not enough to make anything send.
+       file lying around is not enough to make anything send. This master switch
+       stays **global** — one setting arms or disarms outbound for every account.
     2. A sender address is known. It becomes the `From` header, which Gmail
        validates against the authenticated account.
     3. The send token file exists — enforced by the transport's constructor.
 
-    The sender address falls back to the configured test mailbox because in
-    this demo Translog reads and sends from one account. The fallback lives
-    here, in the composition root, rather than in the settings model: it is a
-    wiring decision, and `GmailSettings` has no business knowing that its two
-    address fields usually name the same mailbox.
+    ``account`` selects which mailbox sends: given, it uses that account's send
+    token and its ``effective_sender`` (``sender_address`` or ``address``);
+    omitted, it uses the single-account ``settings.gmail`` send fields, with the
+    sender falling back to the test mailbox exactly as before. That fallback is a
+    wiring decision and lives here, not in the settings model.
     """
     from translog_quote.adapters.email import GmailEmailSink, HttpxGmailSendTransport
     from translog_quote.errors import PermanentFailure
@@ -380,15 +396,24 @@ def build_gmail_email_sink(settings: Settings) -> EmailSink:
             "to allow this process to send real email."
         )
 
-    sender = gmail.sender_address or gmail.test_address
+    if account is None:
+        sender = gmail.sender_address or gmail.test_address
+        send_token_path = gmail.send_token_path
+    else:
+        sender = account.effective_sender
+        send_token_path = account.send_token_path
     if not sender:
+        if account is None:
+            raise PermanentFailure(
+                "No Gmail sender address configured. Set TRANSLOG_GMAIL__SENDER_ADDRESS "
+                "(or TRANSLOG_GMAIL__TEST_ADDRESS) in .env (see .env.example)."
+            )
         raise PermanentFailure(
-            "No Gmail sender address configured. Set TRANSLOG_GMAIL__SENDER_ADDRESS "
-            "(or TRANSLOG_GMAIL__TEST_ADDRESS) in .env (see .env.example)."
+            f"Gmail account {account.account_id!r} has no sender address."
         )
 
     transport = HttpxGmailSendTransport(
-        token_path=gmail.send_token_path,
+        token_path=send_token_path,
         timeout_seconds=gmail.timeout_seconds,
         max_retries=gmail.max_retries,
         backoff_seconds=gmail.retry_backoff_seconds,

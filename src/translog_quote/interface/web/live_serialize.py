@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from translog_quote.domain.quotation import ReviewPacket
     from translog_quote.domain.rates import Rate
     from translog_quote.interface.web.live_session import LiveRequest, LiveSession
+    from translog_quote.interface.web.multi_account_session import MultiAccountSession
     from translog_quote.pipeline import RateSearchOutcome
     from translog_quote.pipeline.audit import AuditEvent
 
@@ -706,8 +707,12 @@ def request_detail(session: LiveSession, request: LiveRequest) -> Json:
     }
 
 
-def snapshot(session: LiveSession, *, selected: str | None = None) -> Json:
+def snapshot(session: LiveSession | MultiAccountSession, *, selected: str | None = None) -> Json:
     """Everything the browser may know, in one shape.
+
+    A :class:`MultiAccountSession` is rendered by :func:`_multi_snapshot`, which
+    walks the owning session of each request so per-account approver,
+    demonstration and audit are correct, and tags every row with its account.
 
     Only the requests this demonstration is following, and only the ones still
     in play. Not a display filter: the session drops out-of-focus work when a
@@ -722,6 +727,11 @@ def snapshot(session: LiveSession, *, selected: str | None = None) -> Json:
     an operator reading the confirmation of what they just sent must not have
     it disappear from under them; it leaves the *desk*, not the record.
     """
+    from translog_quote.interface.web.multi_account_session import MultiAccountSession
+
+    if isinstance(session, MultiAccountSession):
+        return _multi_snapshot(session, selected=selected)
+
     # Operations mode follows the store, not the demonstration's request_ids
     # (a past restart may have reset them): every restored request is in view,
     # terminal ones as history. Demonstration mode keeps the focuses filter.
@@ -779,5 +789,94 @@ def snapshot(session: LiveSession, *, selected: str | None = None) -> Json:
             # running", and the error is a class name — never provider detail.
             "last_checked_at": session.last_poll_at.isoformat() if session.last_poll_at else None,
             "error": session.last_poll_error,
+        },
+    }
+
+
+def _multi_snapshot(session: MultiAccountSession, *, selected: str | None = None) -> Json:
+    """The unified snapshot across every account's session.
+
+    Each request is rendered by its OWNING session, so its approver,
+    demonstration membership and audit timeline are that account's, and each row
+    is tagged with its ``account``. The top-level blocks aggregate across
+    accounts; the audit is the merged, time-ordered trail."""
+    active_rows: list[Json] = []
+    history_rows: list[Json] = []
+    for account_id, sess in session.sessions.items():
+        if sess.operations_mode:
+            followed = list(sess.requests.values())
+        else:
+            followed = [r for r in sess.requests.values() if sess.in_demonstration(r.request_id)]
+        for request in followed:
+            if request.history:
+                row = request_summary(sess, request)
+                row["account"] = account_id
+                history_rows.append(row)
+            elif not request.is_settled:
+                row = request_summary(sess, request)
+                row["account"] = account_id
+                active_rows.append(row)
+
+    chosen_detail: Json | None = None
+    if selected:
+        for account_id, sess in session.sessions.items():
+            chosen = sess.requests.get(selected)
+            if chosen is not None:
+                chosen_detail = request_detail(sess, chosen)
+                chosen_detail["account"] = account_id
+                break
+
+    started_ats = [
+        s.demonstration.started_at
+        for s in session.sessions.values()
+        if s.demonstration.started_at is not None
+    ]
+    watermarks = [
+        s.demonstration.last_poll_watermark
+        for s in session.sessions.values()
+        if s.demonstration.last_poll_watermark is not None
+    ]
+    started_at = min(started_ats) if started_ats else None
+    watermark = min(watermarks) if watermarks else None
+    poll_error = next(
+        (s.last_poll_error for s in session.sessions.values() if s.last_poll_error),
+        session.last_poll_error,
+    )
+
+    return {
+        "demonstration": {
+            "active": any(s.demonstration.is_active for s in session.sessions.values()),
+            "startup_mode": "operations" if session.operations_mode else "demonstration",
+            "started_at": started_at.isoformat() if started_at else None,
+            "last_poll_watermark": watermark.isoformat() if watermark else None,
+            "following": len(active_rows),
+            "history": len(history_rows),
+            "outside_messages": session.outside_demonstration,
+        },
+        "mode": {
+            "badge": "LIVE — REAL GMAIL",
+            "banner": SIMULATED_BANNER,
+            "notes": {
+                "inbound": "Real Gmail, read-only credential",
+                "outbound": "Real Gmail, separate send-only credential",
+                "extraction": "Live model call",
+                "validation": "Real — deterministic business rules",
+                "rates": f"{SIMULATED_BANNER} — no provider is contacted",
+                "approval": "Human — explicit, named, no default and no timeout",
+            },
+            "approver_address": session.approver_address,
+        },
+        "requests": active_rows,
+        "history": history_rows,
+        "selected": chosen_detail,
+        "audit": audit_json(session.audit.events),
+        "poll": {
+            "new_messages": session.last_poll_new,
+            "skipped_internal": session.skipped_internal,
+            "deferred": session.blocked_messages,
+            "enquiries": sum(1 for row in active_rows if row["is_enquiry"]),
+            "unrecognised": sum(1 for row in active_rows if not row["is_enquiry"]),
+            "last_checked_at": session.last_poll_at.isoformat() if session.last_poll_at else None,
+            "error": poll_error,
         },
     }
