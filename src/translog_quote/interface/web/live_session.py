@@ -1213,15 +1213,30 @@ class LiveSession:
             subject=request.subject,
             in_reply_to=request.last_message_id or "",
         )
-        if draft is None:  # pragma: no cover - unresolved is non-empty here
-            return
-        # The working store now holds the cleared record + NEEDS_INFO; mirror it
-        # so `request.record`/`validation` match what a reply will merge against.
+        # The working store now holds either the cleared record + NEEDS_INFO (a
+        # fresh draft) or MANUAL_REVIEW (the clarification budget was spent);
+        # mirror it either way so `request` matches what the reply will merge
+        # against, or shows the hand-over.
         stored = self._working.get_request(request.request_id)
         if stored is not None:
             request.record = stored.record
             request.validation = validate_shipment(stored.record)
             request.state = stored.state
+        if draft is None:
+            # Over-budget: the place never resolved, so the router handed the
+            # request to a person rather than asking again. Surface the reason and
+            # clear the pending/rate-search state so the desk sees a plain hold,
+            # never a silent MANUAL_REVIEW.
+            if request.state is RequestState.MANUAL_REVIEW:
+                named = ", ".join(p.stated for p in unresolved) or "the stated place"
+                request.manual_review_notes = (
+                    f"The place(s) {named} could not be resolved to an airport "
+                    "after repeated clarification. Handed to a person.",
+                )
+                request.clarification = None
+                request.rate_failure = None
+                request.rate_job_id = None
+            return
         request.clarification = draft
         request.rate_failure = None
         request.rate_job_id = None

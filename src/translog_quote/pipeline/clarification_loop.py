@@ -157,17 +157,16 @@ class ClarificationWorkflow:
         state = existing.state if existing else RequestState.RECEIVED
 
         # A thread that has not converged after this many asks will not converge
-        # by asking again. Decided here, before the turn advances, because the
-        # approved table allows CLARIFICATION_SENT -> MANUAL_REVIEW but not
-        # EXTRACTED -> MANUAL_REVIEW: handing over has to happen from the state
-        # the thread is actually in. The message is still extracted and recorded
-        # below, so whoever takes over can see what it said.
-        abandoned = (
+        # by asking *again* — but the reply in hand might be the one that finally
+        # completes the shipment. So the budget is only *measured* here; the
+        # hand-over is decided after this reply is merged and validated (below),
+        # so a final reply that resolves everything continues to VALIDATED rather
+        # than being abandoned on the doorstep. Over-budget blocks only the
+        # drafting of the *next* question, never a reply that resolves the record.
+        over_budget = (
             state is RequestState.CLARIFICATION_SENT
             and self._rounds.get(request_id, 0) >= self._max_rounds
         )
-        if abandoned:
-            state = self._advance(request_id, state, RequestState.MANUAL_REVIEW)
 
         # --- the model's only involvement -------------------------------------
         extraction = self._extractor.extract_shipment(email.body_text)
@@ -198,7 +197,7 @@ class ClarificationWorkflow:
         # EXTRACTED.
         futile: tuple[str, ...] = ()
         notes: list[str] = []
-        if not abandoned and state is RequestState.CLARIFICATION_SENT:
+        if state is RequestState.CLARIFICATION_SENT:
             still_missing = validate_shipment(merge.record).missing_fields
             futile = tuple(
                 field.value
@@ -236,7 +235,7 @@ class ClarificationWorkflow:
                 AuditEventType.MANUAL_REVIEW_ESCALATED,
                 {"fields": list(futile), "notes": notes},
             )
-        elif not abandoned:
+        else:
             state = self._advance(request_id, state, RequestState.EXTRACTED)
         self._emit(
             request_id,
@@ -278,7 +277,7 @@ class ClarificationWorkflow:
         # silently at EXTRACTED — the dead-end this replaces — which is why the
         # table now carries an EXTRACTED -> MANUAL_REVIEW edge. MSDS never reaches
         # here: an explicit "no MSDS" is an answer (fix 1), so it validates.
-        if not abandoned and not futile and analysis.is_stuck:
+        if not futile and analysis.is_stuck:
             notes = [_denial_note(analysis.blocked_by_denial)]
             state = self._advance(request_id, state, RequestState.MANUAL_REVIEW)
             self._emit(
@@ -292,8 +291,27 @@ class ClarificationWorkflow:
             )
 
         clarification: ClarificationMessage | None = None
-        if not abandoned and not futile and not analysis.is_stuck:
-            state, clarification = self._decide(request_id, state, email, analysis)
+        if not futile and not analysis.is_stuck:
+            if over_budget and analysis.needs_clarification:
+                # The reply did not complete the shipment and the clarification
+                # budget is spent. Hand over — but name what is still open, so the
+                # operator never sees a silent MANUAL_REVIEW. (Previously the
+                # thread was abandoned before this reply was even read, and with
+                # no note at all — a valid final reply was discarded and an
+                # exhausted one gave the desk no reason.)
+                notes = [_abandoned_note(analysis, self._rounds.get(request_id, 0))]
+                state = self._advance(request_id, state, RequestState.MANUAL_REVIEW)
+                self._emit(
+                    request_id,
+                    AuditEventType.MANUAL_REVIEW_ESCALATED,
+                    {
+                        "fields": [u.field.value for u in analysis.unresolved],
+                        "notes": notes,
+                        "reason": "clarification_budget_exhausted",
+                    },
+                )
+            else:
+                state, clarification = self._decide(request_id, state, email, analysis)
 
         self._store.save_request(
             QuotationRequest(
@@ -406,6 +424,27 @@ class ClarificationWorkflow:
         stored = self._store.get_request(request_id)
         if stored is None:  # pragma: no cover - a validated request is always stored
             raise IllegalTransition(f"no request {request_id} to clarify against")
+
+        # The same budget the ordinary loop honours: a place asked for the maximum
+        # number of times without ever resolving to an airport will not resolve by
+        # asking again. Rather than re-draft round N+1, hand it to a person — with
+        # a reason — from the state it is actually in (VALIDATED here). Previously
+        # this cap was enforced only when the *reply* arrived, in ``handle``; now
+        # the ordinary and location loops both cap at the point of re-drafting.
+        if self._rounds.get(request_id, 0) >= self._max_rounds:
+            note = _abandoned_note_places(unresolved, self._rounds.get(request_id, 0))
+            state = self._advance(request_id, stored.state, RequestState.MANUAL_REVIEW)
+            self._store.save_request(stored.model_copy(update={"state": state}))
+            self._emit(
+                request_id,
+                AuditEventType.MANUAL_REVIEW_ESCALATED,
+                {
+                    "fields": [p.field.value for p in unresolved],
+                    "notes": [note],
+                    "reason": "location_unresolvable_budget_exhausted",
+                },
+            )
+            return None
 
         fields = tuple(
             UnresolvedField(
@@ -571,6 +610,30 @@ def _denial_note(fields: Sequence[FieldName]) -> str:
     return (
         f"The client stated they cannot supply: {named}. Asking again will not "
         "resolve it — a person must decide whether to proceed."
+    )
+
+
+def _abandoned_note(analysis: UnresolvedAnalysis, rounds: int) -> str:
+    """Operator-facing reason when the clarification budget is exhausted and the
+    shipment is still incomplete. Names what is still open, like the other
+    hand-over notes, so a MANUAL_REVIEW reached this way is never silent."""
+    fields = [u.field.value for u in analysis.unresolved]
+    named = ", ".join(fields) or "the outstanding details"
+    return (
+        f"After {rounds} clarification rounds the shipment still needs: {named}. "
+        "Automated clarification has stopped; a person must decide how to proceed."
+    )
+
+
+def _abandoned_note_places(places: Sequence[UnresolvedPlace], rounds: int) -> str:
+    """Operator-facing reason when a stated place cannot be resolved to an airport
+    after the clarification budget is spent. Names the client's own wording, never
+    a code — the same discipline as the other hand-over notes."""
+    named = ", ".join(place.stated for place in places) or "the stated place"
+    return (
+        f"After {rounds} clarification rounds these place(s) still could not be "
+        f"resolved to an airport: {named}. Automated clarification has stopped; a "
+        "person must decide how to proceed."
     )
 
 

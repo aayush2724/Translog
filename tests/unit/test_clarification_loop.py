@@ -506,6 +506,63 @@ def test_a_thread_that_will_not_converge_goes_to_a_person() -> None:
     assert len(sink.sent) == 2, "no further asking after the cap"
 
 
+def test_reply_after_the_cap_that_resolves_everything_reaches_validated() -> None:
+    """Regression (production A test bug): the round-limit guard must not abandon
+    a reply that *completes* the shipment. A client who finally answers on the
+    reply to the last clarification is validated and proceeds to rate search —
+    not handed to a person. Previously the guard ran before this reply was read,
+    so a valid final answer was discarded into MANUAL_REVIEW."""
+    sparse = complete(pcs=ExtractedValue[int].not_stated())
+    wf, sink = workflow(sparse, sparse, complete(), max_rounds=2)
+
+    wf.handle(REQ, email("a", n=1))
+    approve(wf)
+    wf.handle(REQ, email("b", n=2))
+    approve(wf)
+    third = wf.handle(REQ, email("the piece count is 15", n=3))
+
+    assert third.state is RequestState.VALIDATED
+    assert not third.needs_a_person
+    assert third.clarification is None
+    assert third.validation.is_valid
+    assert len(sink.sent) == 2, "no further asking; the reply resolved it"
+
+
+def test_reply_after_the_cap_still_unresolved_is_handed_over_with_a_reason() -> None:
+    """Regression: when the budget is spent and the reply still does not complete
+    the shipment, it goes to MANUAL_REVIEW — but with an operator-visible reason
+    and audit event, never the old silent hand-over."""
+    sparse = complete(pcs=ExtractedValue[int].not_stated())
+    audit = _RecordingAudit()
+    sink = CollectingEmailSink()
+    wf = ClarificationWorkflow(
+        extractor=ScriptedExtractor(sparse, sparse, sparse),
+        sink=sink,
+        store=InMemoryStore(),
+        clock=FixedClock(),
+        audit=audit,
+        max_rounds=2,
+    )
+
+    wf.handle(REQ, email("a", n=1))
+    approve(wf)
+    wf.handle(REQ, email("b", n=2))
+    approve(wf)
+    third = wf.handle(REQ, email("still nothing usable", n=3))
+
+    assert third.state is RequestState.MANUAL_REVIEW
+    assert third.needs_a_person
+    assert third.clarification is None
+    assert len(sink.sent) == 2, "no further asking after the cap"
+    assert third.escalation_notes, "abandoned hand-over must carry a reason"
+    assert FieldName.PCS.value in " ".join(third.escalation_notes)
+    escalated = [
+        e for e in audit.events if e.event is AuditEventType.MANUAL_REVIEW_ESCALATED
+    ]
+    assert escalated, "an escalation event must be recorded"
+    assert escalated[-1].detail.get("reason") == "clarification_budget_exhausted"
+
+
 def test_the_clarification_body_contains_no_internal_vocabulary() -> None:
     wf, sink = workflow(complete(pcs=ExtractedValue[int].not_stated()))
 

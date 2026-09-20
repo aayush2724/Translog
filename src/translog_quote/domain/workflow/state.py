@@ -83,6 +83,11 @@ TRANSITIONS: dict[RequestState, frozenset[RequestState]] = {
             # guessing is only discovered after validation, in the rate-search
             # step — so a validated request can still need a client clarification.
             RequestState.NEEDS_INFO,
+            # ...and if that location clarification is asked the maximum number of
+            # times without ever resolving to an airport, the request is handed to
+            # a person from here (the cap now bites at the re-draft, not on the
+            # reply), so a validated-but-unresolvable place is not asked forever.
+            RequestState.MANUAL_REVIEW,
         }
     ),
     RequestState.RATE_SELECTED: frozenset({RequestState.PENDING_APPROVAL}),
