@@ -72,6 +72,17 @@ EXIT_NEEDS_LOGIN = 78
 #: worker after `RestartSec`. It never writes `needs_login`.
 EXIT_UNREACHABLE = 75
 
+#: The worker refuses to start on a SIMULATED WebCargo mode (mock/demo) unless the
+#: operator explicitly opts in with ``TRANSLOG_ALLOW_SIMULATED_WORKER=1``. This
+#: keeps a production browser-queue worker from silently returning invented rates
+#: for real queued jobs. It reuses EX_CONFIG (78) — a configuration the process
+#: cannot fix itself — so ``RestartPreventExitStatus=78`` leaves it stopped rather
+#: than restart-looping; the fix is to set the mode (or the opt-in) and start it.
+EXIT_SIMULATED_REFUSED = 78
+
+#: Explicit opt-in to run the worker on simulated rates (local/testing only).
+ALLOW_SIMULATED_WORKER_VAR = "TRANSLOG_ALLOW_SIMULATED_WORKER"
+
 #: The startup auth probe is retried a few times to absorb a cold-start race:
 #: the persistent browser/profile may not have rendered the authenticated form
 #: within one navigation timeout, which would otherwise read as a false session
@@ -115,6 +126,41 @@ def build_provider(settings: Settings) -> RateSearchPort:
     if settings.webcargo.mode is WebCargoMode.BROWSER:
         return bootstrap.build_browser_rate_provider(settings)
     return bootstrap.build_rate_provider(settings)
+
+
+def _simulated_worker_opt_in() -> bool:
+    """Whether the operator has explicitly allowed a simulated (mock/demo) worker."""
+    return os.environ.get(ALLOW_SIMULATED_WORKER_VAR, "").strip() == "1"
+
+
+def _refuse_simulated_worker(settings: Settings) -> int | None:
+    """Guard: a non-browser worker serves SIMULATED rates. Refuse to start unless
+    the operator explicitly opts in, so a production browser-queue worker can never
+    silently return invented rates for real queued jobs.
+
+    Returns an exit code to stop with, or ``None`` to proceed. Browser mode always
+    proceeds and is completely unaffected.
+    """
+    mode = settings.webcargo.mode
+    if mode is WebCargoMode.BROWSER:
+        return None
+    if _simulated_worker_opt_in():
+        _log.warning(
+            "worker: running on SIMULATED rates (mode=%s, %s=1) — local/testing only, "
+            "never production.",
+            mode.value,
+            ALLOW_SIMULATED_WORKER_VAR,
+        )
+        return None
+    _log.error(
+        "Refusing to start the worker in WebCargo mode '%s': a browser-queue worker "
+        "on simulated rates would return invented rates for real queued jobs. Set "
+        "TRANSLOG_WEBCARGO__MODE=browser for production, or set %s=1 to explicitly "
+        "allow a simulated worker (local/testing only).",
+        mode.value,
+        ALLOW_SIMULATED_WORKER_VAR,
+    )
+    return EXIT_SIMULATED_REFUSED
 
 
 class _LockRefreshingWorker(SimpleWorker):
@@ -266,6 +312,13 @@ def run_worker(settings: Settings, *, interactive_login: bool = False) -> int:
     the same way. A live session at startup clears any stale ``needs_login``.
     """
     from translog_quote.errors import WebCargoSessionLost, WebCargoUnreachable
+
+    # Fail closed before touching Redis or the browser: a simulated-mode worker on
+    # the browser queue would serve invented rates for real jobs. Browser mode
+    # passes straight through; mock/demo needs an explicit opt-in.
+    refusal = _refuse_simulated_worker(settings)
+    if refusal is not None:
+        return refusal
 
     lock = acquire_worker_lock(settings)
     heartbeat: LockHeartbeat | None = None

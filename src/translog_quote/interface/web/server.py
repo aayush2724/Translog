@@ -796,12 +796,35 @@ def run(
         )
         return 2
 
+    # A public bind must be the real workflow, never the scripted POC — which runs
+    # on simulated data end to end. Loopback stays open for the local demo.
+    if _binds_publicly(host) and not live:
+        print(
+            f"Refusing to serve the scripted demonstration on a non-loopback address "
+            f"({host}): it runs on simulated data. A public bind must run --live; bind "
+            "to 127.0.0.1 for the local demo."
+        )
+        return 2
+
     live_session = None
     interval: float | None = None
     if live:
-        from translog_quote.config import load_settings
+        from translog_quote.config import WebCargoMode, load_settings
 
         live_settings = settings or load_settings()
+        # A public (production) live bind must run the real WebCargo browser worker,
+        # never a simulated provider in-process. Without this guard an unset or
+        # mistaken TRANSLOG_WEBCARGO__MODE would silently serve invented rates to
+        # real clients — the default mode is `mock`. Loopback binds may still use
+        # simulated modes for local development.
+        if _binds_publicly(host) and live_settings.webcargo.mode is not WebCargoMode.BROWSER:
+            print(
+                f"Refusing to serve a live dashboard on a non-loopback address ({host}) "
+                f"with WebCargo mode '{live_settings.webcargo.mode.value}': it would search "
+                "simulated rates in-process. Set TRANSLOG_WEBCARGO__MODE=browser so real "
+                "WebCargo runs in the browser worker."
+            )
+            return 2
         try:
             live_session = build_live_session(live_settings)
         except TranslogError as exc:
@@ -823,7 +846,10 @@ def run(
             print(f"Translog LIVE — http://{host}:{port}/")
             print("  Inbound:  real Gmail (read-only credential)")
             print("  Outbound: real Gmail (separate send-only credential)")
-            print("  Rates:    SIMULATED WEBCARGO DATA — DEMO ONLY")
+            if live_settings.webcargo.mode is WebCargoMode.BROWSER:
+                print("  Rates:    real WebCargo (browser worker via the Redis queue)")
+            else:
+                print("  Rates:    SIMULATED WEBCARGO DATA — DEMO ONLY")
             print(f"  Approver: {live_session.approver_address}")
             print(
                 "  Access:   sign-in required (session cookie)"

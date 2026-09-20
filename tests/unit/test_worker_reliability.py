@@ -14,6 +14,7 @@ import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
+from translog_quote.config import WebCargoMode
 from translog_quote.interface.jobs import queue
 from translog_quote.interface.jobs.queue import (
     WORKER_STATUS_NEEDS_LOGIN,
@@ -220,7 +221,9 @@ def test_startup_session_loss_degrades_to_exit_78(monkeypatch: pytest.MonkeyPatc
     code = worker_main.run_worker(
         SimpleNamespace(
             queue=SimpleNamespace(worker_lock_ttl_seconds=120),
-            webcargo=SimpleNamespace(startup_unreachable_max_wait_seconds=120.0),
+            webcargo=SimpleNamespace(
+                startup_unreachable_max_wait_seconds=120.0, mode=WebCargoMode.BROWSER
+            ),
         )
     )
 
@@ -597,7 +600,9 @@ def test_startup_unreachable_exits_75_and_never_writes_needs_login(
     code = worker_main.run_worker(
         SimpleNamespace(
             queue=SimpleNamespace(worker_lock_ttl_seconds=120),
-            webcargo=SimpleNamespace(startup_unreachable_max_wait_seconds=120.0),
+            webcargo=SimpleNamespace(
+                startup_unreachable_max_wait_seconds=120.0, mode=WebCargoMode.BROWSER
+            ),
         )
     )
 
@@ -661,3 +666,67 @@ def test_is_authenticated_propagates_unreachable_from_a_failed_goto() -> None:
 
     with pytest.raises(WebCargoUnreachable):
         pages.is_authenticated(_Driver(), base_url="https://x.invalid/app/", timeout_seconds=1)
+
+
+# --- simulated-worker guard (recommendation #1) ------------------------------
+
+
+def _webcargo_settings(mode: WebCargoMode) -> Any:
+    """Minimal settings the guard reads: just the WebCargo mode."""
+    return SimpleNamespace(webcargo=SimpleNamespace(mode=mode))
+
+
+def test_browser_worker_is_never_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Browser mode is completely unaffected — the guard passes it straight through."""
+    from translog_quote.interface.worker import main as worker_main
+
+    monkeypatch.delenv(worker_main.ALLOW_SIMULATED_WORKER_VAR, raising=False)
+
+    assert worker_main._refuse_simulated_worker(_webcargo_settings(WebCargoMode.BROWSER)) is None
+
+
+@pytest.mark.parametrize("mode", [WebCargoMode.MOCK, WebCargoMode.DEMO])
+def test_simulated_worker_refuses_without_opt_in(
+    mode: WebCargoMode, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mock/demo worker refuses to start by default (no silent fake rates)."""
+    from translog_quote.interface.worker import main as worker_main
+
+    monkeypatch.delenv(worker_main.ALLOW_SIMULATED_WORKER_VAR, raising=False)
+
+    assert (
+        worker_main._refuse_simulated_worker(_webcargo_settings(mode))
+        == worker_main.EXIT_SIMULATED_REFUSED
+    )
+
+
+@pytest.mark.parametrize("mode", [WebCargoMode.MOCK, WebCargoMode.DEMO])
+def test_simulated_worker_starts_with_explicit_opt_in(
+    mode: WebCargoMode, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With TRANSLOG_ALLOW_SIMULATED_WORKER=1 the guard allows a simulated worker."""
+    from translog_quote.interface.worker import main as worker_main
+
+    monkeypatch.setenv(worker_main.ALLOW_SIMULATED_WORKER_VAR, "1")
+
+    assert worker_main._refuse_simulated_worker(_webcargo_settings(mode)) is None
+
+
+def test_run_worker_refuses_simulated_mode_before_touching_redis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard runs first: a mock worker without opt-in returns the refusal code
+    without acquiring the lock or building a provider."""
+    from translog_quote.interface.worker import main as worker_main
+
+    monkeypatch.delenv(worker_main.ALLOW_SIMULATED_WORKER_VAR, raising=False)
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise AssertionError("must not run: the guard should refuse first")
+
+    monkeypatch.setattr(worker_main, "acquire_worker_lock", _boom)
+    monkeypatch.setattr(worker_main, "build_provider", _boom)
+
+    code = worker_main.run_worker(_webcargo_settings(WebCargoMode.MOCK))
+
+    assert code == worker_main.EXIT_SIMULATED_REFUSED
