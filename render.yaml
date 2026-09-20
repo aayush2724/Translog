@@ -21,7 +21,16 @@ services:
     runtime: python
     plan: starter
     buildCommand: "pip install '.[api]'"
-    startCommand: python -m translog_quote.interface.web --live
+    # Multi-account: stage the two account configs from Secret Files onto the
+    # dedicated dir on the persistent disk BEFORE starting, so ACCOUNTS_DIR globs
+    # only these two files (never the token JSONs in /etc/secrets). The rm makes
+    # the dir deterministic across redeploys; exec keeps Python as PID 1.
+    startCommand: >-
+      bash -c 'set -e;
+      mkdir -p /var/lib/translog/accounts-config;
+      rm -f /var/lib/translog/accounts-config/*.json;
+      cp /etc/secrets/account-a.json /etc/secrets/account-b.json /var/lib/translog/accounts-config/;
+      exec python -m translog_quote.interface.web --live'
     # Liveness only — never /health/ready. /health returns immediately and
     # touches nothing external; /health/ready pings Upstash Redis (browser mode)
     # and can take seconds when the broker is slow, so pointing the platform
@@ -77,6 +86,11 @@ services:
         value: 'in:inbox -subject:"[TRANSLOG INTERNAL]"'
       - key: TRANSLOG_GMAIL__MAX_RESULTS
         value: "5"
+      # Multi-account mode: build one LiveSession per *.json in this dir. The
+      # startCommand stages account-a.json/account-b.json here from Secret Files.
+      # UNSET this (and revert startCommand) to return to single-account mode.
+      - key: TRANSLOG_GMAIL__ACCOUNTS_DIR
+        value: /var/lib/translog/accounts-config
       # The shared managed Redis (Upstash, TLS, DB 0) that joins this dashboard
       # to the single Fedora browser worker when MODE is browser. Unused in demo
       # mode. The value is a secret set in the Render dashboard (a rediss://…/0
