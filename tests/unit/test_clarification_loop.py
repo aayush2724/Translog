@@ -9,7 +9,7 @@ Scenario letters match the Phase 6 brief.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -24,6 +24,10 @@ from translog_quote.domain.workflow import RequestState
 from translog_quote.errors import IllegalTransition
 from translog_quote.pipeline import ClarificationWorkflow
 from translog_quote.pipeline.audit import AuditEvent, AuditEventType
+from translog_quote.pipeline.clarification_loop import (
+    FOLLOWUP_WINDOW,
+    FOLLOWUP_WINDOW_EXPIRED_NOTE,
+)
 
 REQ = "R-TEST"
 
@@ -803,3 +807,210 @@ def test_validation_and_wording_are_unchanged_by_the_gate() -> None:
     assert not outcome.validation.is_valid
     assert outcome.validation.missing_fields == (FieldName.PCS,)
     assert "The number of pieces" in outcome.clarification.body_text
+
+
+# --- the 30-minute follow-up window for a reply that answers nothing -------------
+#
+# A client who replies "still checking, will send shortly" has answered nothing
+# the record can take — but has not refused either. Rather than hand the thread
+# straight to a person, one reminder goes out and the request is held open for
+# thirty minutes. Only a window that lapses with nothing usable escalates. The
+# deadline lives on the stored record, so it survives a restart and a poll on a
+# fresh process can still escalate it.
+
+
+class _AdvancingClock:
+    """A clock a test can push forward, for the 30-minute follow-up window."""
+
+    def __init__(self, start: datetime | None = None) -> None:
+        self._now = start or datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+
+    def now(self) -> datetime:
+        return self._now
+
+    def advance(self, delta: timedelta) -> None:
+        self._now += delta
+
+
+def _followup_workflow(
+    *results: ExtractionResult,
+    clock: object | None = None,
+    store: InMemoryStore | None = None,
+    audit: _RecordingAudit | None = None,
+):  # type: ignore[no-untyped-def]
+    """A workflow whose store, clock and audit a test can hold and inspect."""
+    the_store = store or InMemoryStore()
+    sink = CollectingEmailSink()
+    wf = ClarificationWorkflow(
+        extractor=ScriptedExtractor(*results),
+        sink=sink,
+        store=the_store,
+        clock=clock or FixedClock(),  # type: ignore[arg-type]
+        audit=audit,
+    )
+    return wf, sink, the_store
+
+
+def _drive_to_non_answer(wf: ClarificationWorkflow, sink: CollectingEmailSink) -> None:
+    """Enquiry missing pcs -> clarification approved & sent -> a non-answer reply.
+
+    Leaves the request at CLARIFICATION_SENT with one follow-up sent. The scripted
+    extractor must yield: enquiry (missing pcs), then an empty result (the reply
+    that states nothing)."""
+    wf.handle(REQ, email("no piece count", n=1))
+    approve(wf)
+    assert len(sink.sent) == 1, "the clarification question went out"
+    wf.handle(REQ, email("still checking, will send shortly", n=2))
+
+
+def test_a_non_answer_sends_exactly_one_followup_and_keeps_waiting() -> None:
+    """Non-answer -> exactly one 30-minute follow-up, request stays waiting."""
+    initial = complete(pcs=ExtractedValue[int].not_stated())
+    wf, sink, store = _followup_workflow(initial, ExtractionResult())
+
+    wf.handle(REQ, email("no piece count", n=1))
+    approve(wf)
+    outcome = wf.handle(REQ, email("still checking, will send shortly", n=2))
+
+    assert outcome.state is RequestState.CLARIFICATION_SENT, "held open, not escalated"
+    assert not outcome.needs_a_person
+    assert outcome.clarification is None, "no new question was drafted"
+    assert len(sink.sent) == 2, "the clarification, then exactly one follow-up"
+    follow_up = sink.sent[1]
+    assert "remain open for the next 30 minutes" in follow_up.body_text
+    assert follow_up.to_address == "buyer@clientco.example"
+    stored = store.get_request(REQ)
+    assert stored is not None
+    assert stored.clarification_followup_sent_at is not None, "deadline persisted"
+
+
+def test_a_further_non_answer_inside_the_window_sends_no_second_reminder() -> None:
+    """Repeated non-answer must not send unlimited reminders."""
+    initial = complete(pcs=ExtractedValue[int].not_stated())
+    clock = _AdvancingClock()
+    wf, sink, _ = _followup_workflow(
+        initial, ExtractionResult(), ExtractionResult(), clock=clock
+    )
+    _drive_to_non_answer(wf, sink)
+    assert len(sink.sent) == 2
+
+    clock.advance(timedelta(minutes=10))  # still inside the window
+    outcome = wf.handle(REQ, email("sorry, one moment more", n=3))
+
+    assert outcome.state is RequestState.CLARIFICATION_SENT
+    assert not outcome.needs_a_person
+    assert len(sink.sent) == 2, "no second reminder for a second non-answer"
+
+
+def test_the_window_lapses_to_manual_review_via_the_sweep() -> None:
+    """No useful reply after 30 minutes -> MANUAL_REVIEW with a visible reason,
+    escalated by the time-triggered sweep (the client sent nothing further)."""
+    initial = complete(pcs=ExtractedValue[int].not_stated())
+    clock = _AdvancingClock()
+    audit = _RecordingAudit()
+    wf, sink, store = _followup_workflow(
+        initial, ExtractionResult(), clock=clock, audit=audit
+    )
+    _drive_to_non_answer(wf, sink)
+
+    assert wf.sweep_followup_deadlines() == (), "not yet expired"
+    assert store.get_request(REQ).state is RequestState.CLARIFICATION_SENT  # type: ignore[union-attr]
+
+    clock.advance(FOLLOWUP_WINDOW + timedelta(seconds=1))
+    escalated = wf.sweep_followup_deadlines()
+
+    assert escalated == (REQ,)
+    assert store.get_request(REQ).state is RequestState.MANUAL_REVIEW  # type: ignore[union-attr]
+    assert len(sink.sent) == 2, "the sweep sends no mail"
+    events = [e for e in audit.events if e.event is AuditEventType.MANUAL_REVIEW_ESCALATED]
+    assert events, "an escalation was audited"
+    assert events[-1].detail["reason"] == "followup_window_expired"
+    assert events[-1].detail["notes"] == [FOLLOWUP_WINDOW_EXPIRED_NOTE]
+
+
+def test_a_non_answer_after_the_window_escalates_in_handle() -> None:
+    """A late non-answer arriving after the deadline escalates on the reply, with
+    the visible reason and no further reminder."""
+    initial = complete(pcs=ExtractedValue[int].not_stated())
+    clock = _AdvancingClock()
+    wf, sink, _ = _followup_workflow(
+        initial, ExtractionResult(), ExtractionResult(), clock=clock
+    )
+    _drive_to_non_answer(wf, sink)
+
+    clock.advance(FOLLOWUP_WINDOW + timedelta(seconds=1))
+    outcome = wf.handle(REQ, email("still nothing, sorry", n=3))
+
+    assert outcome.state is RequestState.MANUAL_REVIEW
+    assert outcome.needs_a_person
+    assert FOLLOWUP_WINDOW_EXPIRED_NOTE in outcome.escalation_notes
+    assert len(sink.sent) == 2, "no second reminder; the window is over"
+
+
+def test_a_useful_reply_inside_the_window_proceeds_and_sends_no_reminder() -> None:
+    """Useful reply within 30 minutes -> normal validation/rate-search flow."""
+    initial = complete(pcs=ExtractedValue[int].not_stated())
+    good = ExtractionResult(pcs=ExtractedValue[int].stated(15))
+    clock = _AdvancingClock()
+    wf, sink, store = _followup_workflow(
+        initial, ExtractionResult(), good, clock=clock
+    )
+    _drive_to_non_answer(wf, sink)
+
+    clock.advance(timedelta(minutes=10))  # still inside the window
+    outcome = wf.handle(REQ, email("the piece count is 15", n=3))
+
+    assert outcome.is_complete
+    assert outcome.state is RequestState.VALIDATED
+    assert not outcome.needs_a_person
+    assert len(sink.sent) == 2, "the answer needs no further mail"
+    stored = store.get_request(REQ)
+    assert stored is not None
+    assert stored.clarification_followup_sent_at is None, "the deadline is cleared on progress"
+
+
+def test_the_followup_deadline_survives_a_restart() -> None:
+    """The 30-minute window is decided from persisted state, not a process timer:
+    a brand-new workflow over the same store escalates an expired window."""
+    initial = complete(pcs=ExtractedValue[int].not_stated())
+    clock = _AdvancingClock()
+    store = InMemoryStore()
+    wf, sink, _ = _followup_workflow(initial, ExtractionResult(), clock=clock, store=store)
+    _drive_to_non_answer(wf, sink)
+    assert store.get_request(REQ).clarification_followup_sent_at is not None  # type: ignore[union-attr]
+
+    # A fresh process: new workflow, empty in-memory rounds/pending, same store.
+    clock.advance(FOLLOWUP_WINDOW + timedelta(seconds=1))
+    restarted = ClarificationWorkflow(
+        extractor=ScriptedExtractor(),
+        sink=CollectingEmailSink(),
+        store=store,
+        clock=clock,  # type: ignore[arg-type]
+    )
+
+    assert restarted.sweep_followup_deadlines() == (REQ,)
+    assert store.get_request(REQ).state is RequestState.MANUAL_REVIEW  # type: ignore[union-attr]
+
+
+def test_each_account_sends_its_followup_through_its_own_sink() -> None:
+    """Account A's follow-up leaves A's mailbox, B's leaves B's. The multi-account
+    session builds one workflow (and one sink) per mailbox, so a follow-up sent on
+    the request's own workflow is sent from the account that received the reply."""
+
+    def account():  # type: ignore[no-untyped-def]
+        wf, sink, _ = _followup_workflow(
+            complete(pcs=ExtractedValue[int].not_stated()), ExtractionResult()
+        )
+        return wf, sink
+
+    wf_a, sink_a = account()
+    wf_b, sink_b = account()
+    _drive_to_non_answer(wf_a, sink_a)
+    _drive_to_non_answer(wf_b, sink_b)
+
+    for sink in (sink_a, sink_b):
+        assert len(sink.sent) == 2
+        assert "remain open for the next 30 minutes" in sink.sent[1].body_text
+    # Each follow-up went out on its own account's sink and nowhere else.
+    assert all("30 minutes" in m.body_text for m in sink_a.sent[1:])
+    assert all("30 minutes" in m.body_text for m in sink_b.sent[1:])

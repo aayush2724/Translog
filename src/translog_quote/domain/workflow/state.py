@@ -7,6 +7,7 @@ lives here because states are domain language, not orchestration detail.
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
@@ -135,3 +136,16 @@ class QuotationRequest(BaseModel):
     operator_goods_type_by: str | None = None
     """The operator who picked, persisted so the enqueue audit still names them
     after a restart. Optional/``None`` for the same backward-load reason."""
+
+    clarification_followup_sent_at: datetime | None = None
+    """When the single "we'll hold your request open for 30 minutes" follow-up
+    was auto-sent, after a client reply to a clarification that answered nothing.
+
+    ``None`` means no follow-up is outstanding: either none was ever sent, or the
+    request has since made progress (the field is reset on any advancing turn).
+    Set *only* while the request is ``CLARIFICATION_SENT`` and waiting; the
+    30-minute deadline is ``this + FOLLOWUP_WINDOW``. Persisted here — not in a
+    process-local timer — so the deadline survives a web/worker/dashboard restart
+    and the poll sweep can escalate an expired window on any process that resumes
+    the request. Optional with a ``None`` default so a request written before this
+    field existed loads unchanged."""

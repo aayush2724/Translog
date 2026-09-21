@@ -19,6 +19,7 @@ about completeness, and none can be — the only port this class calls is
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from translog_quote.domain.clarification import (
@@ -59,6 +60,35 @@ DEFAULT_MAX_ROUNDS = 3
 SILENT_REPLY_NOTE = (
     "The client replied to the clarification, but the reply stated nothing that "
     "answers it. Asking the same question again will not resolve it."
+)
+
+#: How long a request is held open after a client reply that answered nothing.
+#: A single reminder goes out, and if nothing usable arrives inside this window
+#: the request is handed to a person. Kept as a module constant, not a config
+#: knob, because it is a business rule the stakeholder chose, like the wording.
+FOLLOWUP_WINDOW = timedelta(minutes=30)
+
+#: Operator-facing reason when the follow-up window lapses with no usable reply.
+#: Deterministic, like every other hand-over note: the model reported nothing, so
+#: there is nothing of its to quote.
+FOLLOWUP_WINDOW_EXPIRED_NOTE = (
+    "Client did not provide the required shipment details within the 30-minute "
+    "response window."
+)
+
+#: The single follow-up sent after a non-answer. Fixed wording — customer-facing
+#: copy is composed deterministically and never written by a model (BR: outbound
+#: copy is reviewable and identical across runs).
+FOLLOWUP_SUBJECT = "Your quotation request"
+FOLLOWUP_BODY = (
+    "Thank you for your response.\n\n"
+    "We still need the requested shipment details to proceed with your "
+    "quotation.\n\n"
+    "Your request will remain open for the next 30 minutes. Please provide the "
+    "remaining details within this time so we can continue processing your "
+    "enquiry.\n\n"
+    "Kind regards,\n"
+    "Translog Express"
 )
 
 
@@ -220,14 +250,32 @@ class ClarificationWorkflow:
             # *nothing* — not merely too little — the merge must have changed
             # nothing, and something required must still be missing. A reply
             # that moved any field at all is progress and stays in the loop.
+            #
+            # Such a non-answer no longer goes *straight* to a person. A client
+            # who writes "still checking, will send shortly" has not refused —
+            # they need time. So the first non-answer sends ONE reminder, keeps
+            # the request waiting at CLARIFICATION_SENT, and persists the moment
+            # it went out (`clarification_followup_sent_at`) so a 30-minute
+            # deadline can be judged after any restart. Escalation happens only
+            # once that window lapses with nothing usable — decided here for a
+            # late non-answer, and by `sweep_followup_deadlines` for a client who
+            # went silent entirely. A further non-answer *inside* the window is
+            # left waiting: exactly one reminder, never a loop of them.
             if (
                 not futile
                 and still_missing
                 and not merge.changed
                 and not extraction.fields_by_status(FieldStatus.STATED)
             ):
-                futile = tuple(field.value for field in still_missing)
-                notes = [SILENT_REPLY_NOTE]
+                followup_at = existing.clarification_followup_sent_at if existing else None
+                now = self._clock.now()
+                if followup_at is None:
+                    return self._send_followup(request_id, email, merge, extraction, now)
+                if now - followup_at >= FOLLOWUP_WINDOW:
+                    futile = tuple(field.value for field in still_missing)
+                    notes = [FOLLOWUP_WINDOW_EXPIRED_NOTE]
+                else:
+                    return self._still_waiting(request_id, merge, extraction)
         if futile:
             state = self._advance(request_id, state, RequestState.MANUAL_REVIEW)
             self._emit(
@@ -334,6 +382,44 @@ class ClarificationWorkflow:
             round_number=self._rounds.get(request_id, 0),
             escalation_notes=tuple(notes),
         )
+
+    def sweep_followup_deadlines(self) -> tuple[str, ...]:
+        """Hand over every request whose follow-up window has lapsed unanswered.
+
+        Time-triggered rather than reply-triggered: a client who sent one
+        non-answer and then went silent never produces another message, so
+        nothing in ``handle`` would ever fire for them. The poll calls this each
+        cycle. It reads the *persisted* deadline
+        (``clarification_followup_sent_at``), so it behaves identically on the
+        process that sent the reminder and on one that restarted after it — the
+        30-minute window is honoured across a restart, not lost with a timer.
+
+        Idempotent and cheap to call repeatedly: only a ``CLARIFICATION_SENT``
+        request whose deadline has passed is touched, and touching it moves it
+        out of that set. Returns the ids escalated so the caller can mirror the
+        hand-over into its own view and commit it durably.
+        """
+        now = self._clock.now()
+        escalated: list[str] = []
+        for stored in self._store.all_requests():
+            if stored.state is not RequestState.CLARIFICATION_SENT:
+                continue
+            sent_at = stored.clarification_followup_sent_at
+            if sent_at is None or now - sent_at < FOLLOWUP_WINDOW:
+                continue
+            state = self._advance(stored.request_id, stored.state, RequestState.MANUAL_REVIEW)
+            self._store.save_request(stored.model_copy(update={"state": state}))
+            self._emit(
+                stored.request_id,
+                AuditEventType.MANUAL_REVIEW_ESCALATED,
+                {
+                    "fields": [f.value for f in validate_shipment(stored.record).missing_fields],
+                    "notes": [FOLLOWUP_WINDOW_EXPIRED_NOTE],
+                    "reason": "followup_window_expired",
+                },
+            )
+            escalated.append(stored.request_id)
+        return tuple(escalated)
 
     # ------------------------------------------------------------- decision --
 
@@ -556,6 +642,84 @@ class ClarificationWorkflow:
         return approval
 
     # -------------------------------------------------------------- helpers --
+
+    def _send_followup(
+        self,
+        request_id: str,
+        email: RawEmail,
+        merge: MergeResult,
+        extraction: ExtractionResult,
+        now: datetime,
+    ) -> TurnOutcome:
+        """Send the one reminder a non-answer earns, and hold the request open.
+
+        The reminder is a courtesy, not a question: it re-asks nothing, so it
+        does not spend a clarification round and needs no human approval — the
+        same shape as the "no eligible rate" notice, which the interface also
+        sends without a gate. It leaves on ``self._sink``, which in a
+        multi-account run is the sink bound to the mailbox this request arrived
+        on, so the follow-up always goes out from the account that received the
+        reply.
+
+        The send is irreversible and happens before the deadline is written; a
+        crash strictly between the two re-sends one reminder on the next run
+        (at-least-once, the benign window the no-rates notice accepts too).
+        """
+        self._sink.send(
+            OutboundMessage(
+                to_address=email.from_address,
+                subject=_reply_subject(email.subject, FOLLOWUP_SUBJECT),
+                body_text=FOLLOWUP_BODY,
+                in_reply_to=email.message_id,
+            )
+        )
+        self._emit(
+            request_id,
+            AuditEventType.CLARIFICATION_FOLLOWUP_SENT,
+            {"window_minutes": int(FOLLOWUP_WINDOW.total_seconds() // 60)},
+        )
+        self._store.save_request(
+            QuotationRequest(
+                request_id=request_id,
+                state=RequestState.CLARIFICATION_SENT,
+                record=merge.record,
+                client_address=email.from_address,
+                clarification_followup_sent_at=now,
+            )
+        )
+        return self._waiting_outcome(request_id, merge, extraction)
+
+    def _still_waiting(
+        self, request_id: str, merge: MergeResult, extraction: ExtractionResult
+    ) -> TurnOutcome:
+        """A further non-answer arrived while the window is still open.
+
+        Nothing to do, and doing nothing is the point: the one reminder already
+        went out and its deadline still stands on the stored record, so a second
+        reminder is exactly the loop this feature exists to avoid. No state and
+        no deadline are rewritten; the router still records the message so it is
+        not re-read, and the persisted deadline decides the eventual hand-over.
+        """
+        return self._waiting_outcome(request_id, merge, extraction)
+
+    def _waiting_outcome(
+        self, request_id: str, merge: MergeResult, extraction: ExtractionResult
+    ) -> TurnOutcome:
+        """A ``TurnOutcome`` for a request left waiting at ``CLARIFICATION_SENT``
+        after a non-answer: no new draft, no escalation, nothing merged."""
+        validation = validate_shipment(merge.record)
+        analysis = identify_unresolved(validation, extraction, merge.conflicts)
+        return TurnOutcome(
+            request_id=request_id,
+            state=RequestState.CLARIFICATION_SENT,
+            record=merge.record,
+            extraction=extraction,
+            merge=merge,
+            validation=validation,
+            analysis=analysis,
+            clarification=None,
+            round_number=self._rounds.get(request_id, 0),
+        )
 
     def _advance(
         self, request_id: str, current: RequestState, target: RequestState

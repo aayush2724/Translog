@@ -148,6 +148,15 @@ class InboundRouter:
             in_reply_to=in_reply_to,
         )
 
+    def sweep_followup_deadlines(self) -> tuple[str, ...]:
+        """Escalate any request whose 30-minute follow-up window has lapsed.
+
+        A pass-through to the workflow, like the others: the router owns no
+        decision here, it only saves the caller reaching into the workflow. The
+        caller (the poll) uses the returned ids to mirror each hand-over into its
+        own view and commit it durably."""
+        return self._workflow.sweep_followup_deadlines()
+
     def approve(self, request_id: str, *, by: str) -> Approved:
         """Release a held draft on a named person's authority.
 

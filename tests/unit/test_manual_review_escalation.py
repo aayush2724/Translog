@@ -25,7 +25,7 @@ still proceeds to rate search untouched.
 from __future__ import annotations
 
 import tempfile
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -40,7 +40,11 @@ from translog_quote.domain.shipment import CargoDimensions, DeliveryType
 from translog_quote.domain.workflow import RequestState
 from translog_quote.interface.web.live_serialize import request_detail, request_summary
 from translog_quote.interface.web.live_session import LiveSession
-from translog_quote.pipeline.clarification_loop import SILENT_REPLY_NOTE
+from translog_quote.pipeline.clarification_loop import (
+    FOLLOWUP_WINDOW,
+    FOLLOWUP_WINDOW_EXPIRED_NOTE,
+    SILENT_REPLY_NOTE,
+)
 
 APPROVER = "A. Operator"
 
@@ -406,25 +410,95 @@ def to_client(sink: CollectingEmailSink) -> list[object]:
     return [m for m in sink.sent if m.to_address == "client@example.com"]
 
 
-def test_a_reply_that_states_nothing_escalates_instead_of_re_asking(
+class _AdvancingClock:
+    """A clock a test can push forward, for the 30-minute follow-up window."""
+
+    def __init__(self, start: datetime) -> None:
+        self._now = start
+
+    def now(self) -> datetime:
+        return self._now
+
+    def advance(self, delta: timedelta) -> None:
+        self._now += delta
+
+
+def test_a_reply_that_states_nothing_gets_one_followup_not_escalation(
     settings: Settings,
 ) -> None:
-    """1. The regression: no third question, and no fourth."""
+    """1. The new behaviour: a non-answer no longer escalates on arrival. One
+    follow-up goes out, the request stays open (CLARIFICATION_SENT), and no
+    further question is drafted."""
     sink = CollectingEmailSink()
     session = session_after(settings, sink, BARE_YES, ExtractionResult())
     request = only(session)
 
-    assert request.state is RequestState.MANUAL_REVIEW  # type: ignore[attr-defined]
+    assert request.state is RequestState.CLARIFICATION_SENT  # type: ignore[attr-defined]
     assert request.clarification is None, "no further question was drafted"  # type: ignore[attr-defined]
-    assert len(to_client(sink)) == 1, "only the first clarification ever reached the client"
+    client = to_client(sink)
+    assert len(client) == 2, "the clarification, then exactly one follow-up"
+    assert "remain open for the next 30 minutes" in client[1].body_text  # type: ignore[attr-defined]
 
 
-def test_the_operator_is_told_why_a_silent_reply_escalated(settings: Settings) -> None:
-    """The model had no opinion to quote — it reported nothing — so the reason
-    is stated deterministically rather than left blank."""
+def test_the_followup_deadline_is_persisted_for_a_restart(settings: Settings) -> None:
+    """The 30-minute deadline is written to the durable store, not held in a
+    process timer, so a restart can still judge the window."""
     session = session_after(settings, CollectingEmailSink(), BARE_YES, ExtractionResult())
+    request_id = only(session).request_id  # type: ignore[attr-defined]
 
-    assert only(session).manual_review_notes == (SILENT_REPLY_NOTE,)  # type: ignore[attr-defined]
+    stored = session._durable.get_request(request_id)
+    assert stored is not None
+    assert stored.state is RequestState.CLARIFICATION_SENT
+    assert stored.clarification_followup_sent_at is not None
+
+
+def test_a_duplicate_inbound_reply_sends_no_duplicate_followup(settings: Settings) -> None:
+    """Duplicate inbound email does not send duplicate follow-ups: the same
+    message arriving again is already recorded and is not reprocessed."""
+    sink = CollectingEmailSink()
+    session = session_after(settings, sink, BARE_YES, ExtractionResult())
+    assert len(to_client(sink)) == 2  # clarification + one follow-up
+
+    session.poll()  # the same BARE_YES is still in the mailbox
+    session.poll()
+
+    assert len(to_client(sink)) == 2, "no second follow-up for the same reply"
+    assert only(session).state is RequestState.CLARIFICATION_SENT  # type: ignore[attr-defined]
+
+
+def test_a_silent_reply_left_unanswered_escalates_after_the_window(
+    settings: Settings,
+) -> None:
+    """No useful reply after 30 minutes -> MANUAL_REVIEW with a visible reason,
+    driven by the poll sweep (the client sent nothing further)."""
+    clock = _AdvancingClock(datetime(2026, 9, 1, 8, 0, tzinfo=UTC))
+    sink = CollectingEmailSink()
+    session = LiveSession(
+        settings,
+        source=StubSource(ENQUIRY),  # type: ignore[arg-type]
+        sink=sink,
+        extractor=ScriptedExtractor(enquiry_extraction(), ExtractionResult()),  # type: ignore[arg-type]
+        resolver=StatedLocationResolver(),
+        clock=clock,  # type: ignore[arg-type]
+    )
+    session.poll()
+    request = next(iter(session.requests.values()))
+    session.approve_clarification(by=APPROVER, request_id=request.request_id)
+    session._source = StubSource(ENQUIRY, BARE_YES)  # type: ignore[assignment,arg-type]
+    session.poll()
+    assert only(session).state is RequestState.CLARIFICATION_SENT  # type: ignore[attr-defined]
+    assert len(to_client(sink)) == 2  # clarification + follow-up
+
+    clock.advance(FOLLOWUP_WINDOW + timedelta(minutes=1))
+    session.poll()
+
+    request = only(session)
+    assert request.state is RequestState.MANUAL_REVIEW  # type: ignore[attr-defined]
+    assert request.manual_review_notes == (FOLLOWUP_WINDOW_EXPIRED_NOTE,)  # type: ignore[attr-defined]
+    assert len(to_client(sink)) == 2, "no further mail after the window"
+    persisted = session._durable.get_request(request.request_id)  # type: ignore[attr-defined]
+    assert persisted is not None
+    assert persisted.state is RequestState.MANUAL_REVIEW
 
 
 def test_an_ambiguous_reply_still_escalates_with_the_models_own_note(
