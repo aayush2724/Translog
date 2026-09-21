@@ -496,6 +496,12 @@ class LiveSession:
             else:
                 self._routed.add(email.message_id)
 
+        # Hand over any request whose 30-minute follow-up window has lapsed with
+        # no usable reply. Time-triggered, so it catches a client who sent one
+        # non-answer and then went silent — no further mail would ever reach the
+        # clarification loop for them. Runs every poll, before rate search, so an
+        # expired request is escalated rather than left waiting.
+        self._escalate_expired_followups()
         self._search_rates_for_validated()
         # Refresh the browser-worker liveness here, on the poll path, so the
         # frequent render path (GET /api/live/state) reads a cached value and
@@ -1093,6 +1099,27 @@ class LiveSession:
             )
         elif outcome.state is RequestState.NO_ELIGIBLE_RATE:
             self._notify_no_rates(request)
+
+    def _escalate_expired_followups(self) -> None:
+        """Move any request past its 30-minute follow-up deadline to a person.
+
+        The decision and the durable write live in the clarification workflow
+        (``sweep_followup_deadlines``, driven through the router, against this
+        session's own store and clock — so in a multi-account run each mailbox
+        sweeps only its own requests). This mirrors each hand-over into the
+        interface's view and commits it to the durable store, the same two-step
+        the no-rates notice uses, so the escalation survives a restart and shows
+        the operator why.
+        """
+        from translog_quote.pipeline.clarification_loop import FOLLOWUP_WINDOW_EXPIRED_NOTE
+
+        for request_id in self._router.sweep_followup_deadlines():
+            live = self.requests.get(request_id)
+            if live is not None:
+                live.state = RequestState.MANUAL_REVIEW
+                live.clarification = None
+                live.manual_review_notes = (FOLLOWUP_WINDOW_EXPIRED_NOTE,)
+            bootstrap.commit_request(self._working, self._durable, request_id)
 
     def _notify_no_rates(self, request: LiveRequest) -> None:
         """Email the client that no rate could be sourced, and close the request.
