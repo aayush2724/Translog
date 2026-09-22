@@ -23,9 +23,17 @@ After=default.target
 # A worker whose WebCargo session needs an operator sign-in now exits cleanly
 # with code 78 (EX_CONFIG); RestartPreventExitStatus=78 below stops systemd
 # restarting it, so it lands in a visible stopped state rather than thrashing.
-# The burst cap stays as a backstop for any other repeated failure.
-StartLimitIntervalSec=900
-StartLimitBurst=5
+#
+# StartLimitIntervalSec=0 disables the start-rate limiter, so a prolonged
+# transient Upstash/DNS outage can no longer latch the unit into a permanent
+# `failed` state that needs manual `reset-failed`. Restart=always + RestartSec
+# keep retrying every ~130s until Redis resolves again, at which point startup
+# succeeds normally. This is safe because the only conditions that loop are
+# transient/retryable (a startup Redis ConnectionError exits 1; WebCargo
+# unreachable exits 75); the genuinely unrecoverable states (needs-login,
+# simulated-refused) exit 78 and are held stopped by RestartPreventExitStatus=78
+# below, so they still never loop.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
