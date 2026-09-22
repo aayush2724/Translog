@@ -712,3 +712,40 @@ def test_a_restart_does_not_let_the_malformed_email_poison_again(settings: Setti
     assert [r for r in session2._durable.all_requests() if r.state is RequestState.MANUAL_REVIEW], (
         "the malformed request is still MANUAL_REVIEW after restart"
     )
+
+
+def test_a_malformed_email_sends_the_client_exactly_one_failure_notice(settings: Settings) -> None:
+    """The UX layer: a contract violation still lands in MANUAL_REVIEW, and the
+    client is told once, through the ordinary outbound sink, that we could not
+    read their message. Repeated polls send no duplicate."""
+    sink = CollectingEmailSink()
+    extractor = PoisonExtractor(MALFORMED.body_text, enquiry_extraction())
+    session = _poison_session(settings, sink, extractor)
+
+    session.poll()
+    session.poll()  # a second cycle must not resend
+
+    to_malformed_client = [m for m in sink.sent if m.to_address == MALFORMED.from_address]
+    assert len(to_malformed_client) == 1, "exactly one failure notice reached the client"
+    assert "unable to read the shipment details" in to_malformed_client[0].body_text  # type: ignore[attr-defined]
+    assert _malformed(session).state is RequestState.MANUAL_REVIEW  # type: ignore[attr-defined]
+
+
+def test_the_client_failure_notice_survives_a_restart(settings: Settings) -> None:
+    """The notice is deduped on persisted state, so a fresh process over the same
+    durable store does not send a second one."""
+    first_sink = CollectingEmailSink()
+    _poison_session(
+        settings, first_sink, PoisonExtractor(MALFORMED.body_text, enquiry_extraction())
+    ).poll()
+    assert len([m for m in first_sink.sent if m.to_address == MALFORMED.from_address]) == 1
+
+    # New process: same settings (same durable store), fresh sink.
+    second_sink = CollectingEmailSink()
+    _poison_session(
+        settings, second_sink, PoisonExtractor(MALFORMED.body_text, enquiry_extraction())
+    ).poll()
+
+    assert [m for m in second_sink.sent if m.to_address == MALFORMED.from_address] == [], (
+        "the failure notice already went out before the restart"
+    )

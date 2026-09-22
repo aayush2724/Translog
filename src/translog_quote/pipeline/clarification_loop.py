@@ -71,6 +71,23 @@ EXTRACTION_FAILED_NOTE = (
     "malformed or invalid result. A person must review the original email."
 )
 
+#: The single client-facing notice sent when a message could not be read into a
+#: shipment. Fixed wording — customer-facing copy is composed deterministically
+#: and never written by a model, like every other outbound message. It does not
+#: quote the client's own values back (we could not read them) and it invites a
+#: corrected resend rather than promising a specific outcome.
+FAILURE_NOTICE_SUBJECT = "Your quotation request"
+FAILURE_NOTICE_BODY = (
+    "Thank you for your enquiry.\n\n"
+    "We were unable to read the shipment details in your message, so we could "
+    "not prepare a quotation from it automatically. Our team has been notified "
+    "and will review your enquiry.\n\n"
+    "If any details were entered incorrectly, please reply with the corrected "
+    "shipment information and we will be glad to continue.\n\n"
+    "Kind regards,\n"
+    "Translog Express"
+)
+
 #: How long a request is held open after a client reply that answered nothing.
 #: A single reminder goes out, and if nothing usable arrives inside this window
 #: the request is handed to a person. Kept as a module constant, not a config
@@ -225,7 +242,7 @@ class ClarificationWorkflow:
             # failure (a network blip, a provider outage) is a different error
             # class and is deliberately NOT caught here, so it still propagates
             # and retries rather than being quarantined against a person.
-            return self._extraction_failed(request_id, email, state, record)
+            return self._extraction_failed(request_id, email, state, record, existing)
         self._emit(
             request_id,
             AuditEventType.EXTRACTION_CALLED,
@@ -675,8 +692,10 @@ class ClarificationWorkflow:
         email: RawEmail,
         state: RequestState,
         record: ShipmentRecord,
+        existing: QuotationRequest | None,
     ) -> TurnOutcome:
-        """Hand one message that could not be extracted to a person, visibly.
+        """Hand one message that could not be extracted to a person, visibly, and
+        tell the client once that we could not read it.
 
         Called only for a ``ContractViolation`` from extraction. It records the
         request in ``MANUAL_REVIEW`` with an operator-visible reason and returns
@@ -691,7 +710,28 @@ class ClarificationWorkflow:
         (a reply to a closed thread) stays put — ``_advance`` is a no-op when the
         state cannot legally move — and is still recorded, so it is never
         re-fetched and re-raised.
+
+        On top of that, a single client-facing failure notice is sent — on the
+        request's own ``self._sink``, so it leaves from the account that received
+        the message — the same way the no-rates notice tells a client no rate was
+        found. It is deduplicated on the persisted ``failure_notice_sent_at``:
+        set once and never reset, so a second malformed message on the same
+        request, or a restart, never sends a second notice. (The send precedes
+        the persist, so a crash strictly between them can resend once on the next
+        run — the same at-least-once window the no-rates notice accepts.)
         """
+        notice_at = existing.failure_notice_sent_at if existing else None
+        if notice_at is None:
+            self._sink.send(
+                OutboundMessage(
+                    to_address=email.from_address,
+                    subject=_reply_subject(email.subject, FAILURE_NOTICE_SUBJECT),
+                    body_text=FAILURE_NOTICE_BODY,
+                    in_reply_to=email.message_id,
+                )
+            )
+            notice_at = self._clock.now()
+            self._emit(request_id, AuditEventType.FAILURE_NOTICE_SENT, {})
         if state is not RequestState.MANUAL_REVIEW and self._machine.can_transition(
             state, RequestState.MANUAL_REVIEW
         ):
@@ -707,6 +747,7 @@ class ClarificationWorkflow:
                 state=state,
                 record=record,
                 client_address=email.from_address,
+                failure_notice_sent_at=notice_at,
             )
         )
         empty = ExtractionResult()

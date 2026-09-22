@@ -148,6 +148,18 @@ class QuotationRequest(BaseModel):
     """The operator who picked, persisted so the enqueue audit still names them
     after a restart. Optional/``None`` for the same backward-load reason."""
 
+    failure_notice_sent_at: datetime | None = None
+    """When the single client-facing "we could not process your enquiry" notice
+    was sent, after a message whose extraction violated the contract (malformed
+    or impossible values) was handed to a person.
+
+    ``None`` until one is sent; set once and never reset, so exactly one failure
+    notice ever leaves for a given request even if further malformed messages
+    correlate to it or the process restarts. Persisted here — not in a
+    process-local set — so the dedup survives a web/worker/dashboard restart.
+    Optional with a ``None`` default so a request written before this field
+    existed loads unchanged."""
+
     clarification_followup_sent_at: datetime | None = None
     """When the single "we'll hold your request open for 30 minutes" follow-up
     was auto-sent, after a client reply to a clarification that answered nothing.

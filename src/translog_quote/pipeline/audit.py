@@ -25,6 +25,7 @@ class AuditEventType(StrEnum):
     CLARIFICATION_APPROVED = "clarification_approved"
     CLARIFICATION_SENT = "clarification_sent"
     CLARIFICATION_FOLLOWUP_SENT = "clarification_followup_sent"
+    FAILURE_NOTICE_SENT = "failure_notice_sent"
     LOCATION_UNRESOLVED = "location_unresolved"
     CONFLICT_DETECTED = "conflict_detected"
     MSDS_UNAVAILABLE = "msds_unavailable"

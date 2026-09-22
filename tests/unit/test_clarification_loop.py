@@ -1038,10 +1038,15 @@ def test_a_malformed_extraction_is_handed_over_not_raised() -> None:
     assert outcome.needs_a_person
     assert outcome.clarification is None
     assert EXTRACTION_FAILED_NOTE in outcome.escalation_notes
-    assert sink.sent == [], "a malformed enquiry mails the client nothing"
+    # A single client-facing failure notice goes out (the operator hand-over is
+    # not the client's concern); no clarification question is drafted.
+    assert len(sink.sent) == 1
+    assert sink.sent[0].to_address == "buyer@clientco.example"
+    assert "unable to read the shipment details" in sink.sent[0].body_text
     stored = store.get_request(REQ)
     assert stored is not None
     assert stored.state is RequestState.MANUAL_REVIEW, "the hand-over is persisted"
+    assert stored.failure_notice_sent_at is not None, "the notice is deduped on persisted state"
 
 
 def test_a_malformed_extraction_is_audited_with_a_reason() -> None:
@@ -1069,15 +1074,64 @@ def test_a_malformed_extraction_is_audited_with_a_reason() -> None:
     assert AuditEventType.EXTRACTION_CALLED not in events
 
 
+def test_the_failure_notice_is_sent_exactly_once_per_request() -> None:
+    """A second malformed message on the same request sends no second notice —
+    the notice is deduped on the persisted ``failure_notice_sent_at``."""
+    audit = _RecordingAudit()
+    sink = CollectingEmailSink()
+    store = InMemoryStore()
+    wf = ClarificationWorkflow(
+        extractor=_RaisingExtractor(),  # type: ignore[arg-type]
+        sink=sink,
+        store=store,
+        clock=FixedClock(),
+        audit=audit,
+    )
+
+    wf.handle(REQ, email("first garbage", n=1))
+    wf.handle(REQ, email("more garbage", n=2))  # same request, still malformed
+
+    assert len(sink.sent) == 1, "exactly one failure notice, not one per malformed message"
+    notices = [e for e in audit.events if e.event is AuditEventType.FAILURE_NOTICE_SENT]
+    assert len(notices) == 1
+
+
+def test_the_failure_notice_is_not_resent_after_a_restart() -> None:
+    """The dedup lives on the persisted request, so a fresh workflow over the
+    same store (a restart) does not resend the notice."""
+    store = InMemoryStore()
+    first = CollectingEmailSink()
+    ClarificationWorkflow(
+        extractor=_RaisingExtractor(),  # type: ignore[arg-type]
+        sink=first,
+        store=store,
+        clock=FixedClock(),
+    ).handle(REQ, email("garbage", n=1))
+    assert len(first.sent) == 1
+    assert store.get_request(REQ).failure_notice_sent_at is not None  # type: ignore[union-attr]
+
+    # A new process: fresh workflow and sink, the same durable store.
+    reborn = CollectingEmailSink()
+    ClarificationWorkflow(
+        extractor=_RaisingExtractor(),  # type: ignore[arg-type]
+        sink=reborn,
+        store=store,
+        clock=FixedClock(),
+    ).handle(REQ, email("garbage again", n=2))
+
+    assert reborn.sent == [], "the notice already went out before the restart"
+
+
 def test_a_valid_extraction_after_a_contract_violation_is_unaffected() -> None:
     """The guard changes nothing for a well-formed extraction: a normal enquiry
-    on the same workflow still clarifies as before."""
+    on the same workflow still clarifies as before, and mails the client nothing."""
     wf, sink = workflow(complete(pcs=ExtractedValue[int].not_stated()))
 
     outcome = wf.handle(REQ, email("no piece count"))
 
     assert outcome.awaiting_approval
     assert outcome.clarification is not None
+    assert sink.sent == [], "normal missing-info clarification sends no failure notice"
     assert outcome.state is RequestState.NEEDS_INFO
 
 
