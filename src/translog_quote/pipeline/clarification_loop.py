@@ -79,11 +79,13 @@ EXTRACTION_FAILED_NOTE = (
 FAILURE_NOTICE_SUBJECT = "Your quotation request"
 FAILURE_NOTICE_BODY = (
     "Thank you for your enquiry.\n\n"
-    "We were unable to read the shipment details in your message, so we could "
-    "not prepare a quotation from it automatically. Our team has been notified "
-    "and will review your enquiry.\n\n"
-    "If any details were entered incorrectly, please reply with the corrected "
-    "shipment information and we will be glad to continue.\n\n"
+    "We were unable to process the shipment details in your message, so we could "
+    "not prepare a quotation automatically. Our team has been notified and will "
+    "review the enquiry.\n\n"
+    "If any shipment details were entered incorrectly, please send a new "
+    "quotation request with the corrected shipment details so that we can "
+    "process it.\n\n"
+    "Please do not reply to this email; send a new quotation request instead.\n\n"
     "Kind regards,\n"
     "Translog Express"
 )

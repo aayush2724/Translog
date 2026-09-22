@@ -727,7 +727,7 @@ def test_a_malformed_email_sends_the_client_exactly_one_failure_notice(settings:
 
     to_malformed_client = [m for m in sink.sent if m.to_address == MALFORMED.from_address]
     assert len(to_malformed_client) == 1, "exactly one failure notice reached the client"
-    assert "unable to read the shipment details" in to_malformed_client[0].body_text  # type: ignore[attr-defined]
+    assert "Please do not reply to this email" in to_malformed_client[0].body_text  # type: ignore[attr-defined]
     assert _malformed(session).state is RequestState.MANUAL_REVIEW  # type: ignore[attr-defined]
 
 

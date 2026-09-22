@@ -1042,7 +1042,8 @@ def test_a_malformed_extraction_is_handed_over_not_raised() -> None:
     # not the client's concern); no clarification question is drafted.
     assert len(sink.sent) == 1
     assert sink.sent[0].to_address == "buyer@clientco.example"
-    assert "unable to read the shipment details" in sink.sent[0].body_text
+    assert "unable to process the shipment details" in sink.sent[0].body_text
+    assert "Please do not reply to this email" in sink.sent[0].body_text
     stored = store.get_request(REQ)
     assert stored is not None
     assert stored.state is RequestState.MANUAL_REVIEW, "the hand-over is persisted"
