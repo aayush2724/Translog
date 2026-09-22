@@ -22,6 +22,7 @@ from translog_quote.domain.clarification.model import (
 from translog_quote.domain.clarification.questions import (
     ambiguous_question,
     conflict_question,
+    invalid_question,
     missing_question,
 )
 from translog_quote.domain.extraction import ExtractionResult, FieldStatus
@@ -109,6 +110,22 @@ def identify_unresolved(
                     field=issue.field,
                     reason=UnresolvedReason.AMBIGUOUS,
                     question=ambiguous_question(issue.field),
+                    detail=_ambiguity_detail(extraction, issue.field),
+                )
+            )
+            continue
+
+        if status is FieldStatus.INVALID:
+            # The client stated an out-of-range value (a non-positive weight,
+            # piece count, or dimension). Understood and correctable: ask for a
+            # valid one. Unlike AMBIGUOUS this is never a hand-over — a further
+            # invalid reply just asks again (it is not in the futile set, which
+            # is scoped to AMBIGUOUS).
+            unresolved.append(
+                UnresolvedField(
+                    field=issue.field,
+                    reason=UnresolvedReason.INVALID,
+                    question=invalid_question(issue.field),
                     detail=_ambiguity_detail(extraction, issue.field),
                 )
             )

@@ -149,6 +149,13 @@ class TurnOutcome:
     for each field that sent this request to manual review. Shown to the
     operator — an escalation nobody can see the reason for is just a stall."""
 
+    is_non_enquiry: bool = False
+    """This first-contact message stated no shipment detail at all, so it is not
+    a quotation enquiry — unrelated mail that reached the mailbox. The caller
+    records it as seen and creates no request: no clarification, no rate search,
+    nothing on the dashboard. Never set for a reply (a reply belongs to a known
+    thread) nor for a message that stated any field."""
+
     @property
     def is_complete(self) -> bool:
         return self.state is RequestState.VALIDATED
@@ -245,6 +252,30 @@ class ClarificationWorkflow:
             # class and is deliberately NOT caught here, so it still propagates
             # and retries rather than being quarantined against a person.
             return self._extraction_failed(request_id, email, state, record, existing)
+
+        # A first-contact message that gives no shipment detail at all is not a
+        # quotation enquiry — it is unrelated mail (a newsletter, a receipt, a
+        # notification) that happens to have reached the mailbox. It is recognised
+        # here by *content* — the extraction found nothing a shipment can hold —
+        # not by a subject keyword, so a legitimate enquiry with an unusual
+        # subject is unaffected and an unrelated mail that merely says
+        # "quotation" is not mistaken for one.
+        #
+        # "Gives a shipment detail" means a field the client actually stated: a
+        # STATED value, or an INVALID one — an out-of-range value like -5 pieces
+        # or 0 kg is still the client *stating a shipment field*, so an enquiry
+        # whose only shipment content is invalid is a genuine enquiry that must
+        # be clarified, not discarded. INVALID is only ever produced for a field
+        # the email really stated (the adapter marks a stated impossible value),
+        # so this never turns a stray number in a receipt into an enquiry — those
+        # fields stay NOT_STATED. A reply is exempt: it belongs to a known thread.
+        if (
+            existing is None
+            and not extraction.fields_by_status(FieldStatus.STATED)
+            and not extraction.fields_by_status(FieldStatus.INVALID)
+        ):
+            return self._not_an_enquiry(request_id, record, extraction)
+
         self._emit(
             request_id,
             AuditEventType.EXTRACTION_CALLED,
@@ -311,6 +342,7 @@ class ClarificationWorkflow:
                 and still_missing
                 and not merge.changed
                 and not extraction.fields_by_status(FieldStatus.STATED)
+                and not extraction.fields_by_status(FieldStatus.INVALID)
             ):
                 followup_at = existing.clarification_followup_sent_at if existing else None
                 now = self._clock.now()
@@ -687,6 +719,31 @@ class ClarificationWorkflow:
         return approval
 
     # -------------------------------------------------------------- helpers --
+
+    def _not_an_enquiry(
+        self, request_id: str, record: ShipmentRecord, extraction: ExtractionResult
+    ) -> TurnOutcome:
+        """A first-contact message that stated no shipment detail: not a
+        quotation enquiry. Creates nothing and persists nothing — no request, no
+        clarification, no ``_pending`` draft, no state change — and emits no
+        further audit. Returns a well-formed ``TurnOutcome`` flagged
+        ``is_non_enquiry`` so the router records it as seen and shows nothing.
+        """
+        merge = merge_shipment(record, to_extracted_fields(extraction))
+        validation = validate_shipment(record)
+        analysis = identify_unresolved(validation, extraction, merge.conflicts)
+        return TurnOutcome(
+            request_id=request_id,
+            state=RequestState.RECEIVED,
+            record=record,
+            extraction=extraction,
+            merge=merge,
+            validation=validation,
+            analysis=analysis,
+            clarification=None,
+            round_number=self._rounds.get(request_id, 0),
+            is_non_enquiry=True,
+        )
 
     def _extraction_failed(
         self,

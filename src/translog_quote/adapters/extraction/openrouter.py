@@ -205,6 +205,8 @@ class OpenRouterExtractionAdapter:
                 f"Model returned a JSON {type(payload).__name__}, expected an object"
             )
 
+        _mark_impossible_values_invalid(payload)
+
         try:
             result = ExtractionResult.model_validate(payload)
         except Exception as exc:
@@ -217,6 +219,53 @@ class OpenRouterExtractionAdapter:
             len(result.fields_by_status(FieldStatus.STATED)),
         )
         return result
+
+
+#: Internal notes recorded on a field rewritten to INVALID. Client-facing wording
+#: lives in the clarification layer (``invalid_question``); this is evidence.
+_IMPOSSIBLE_NOTES = {
+    "weight_kg": "stated gross weight is not greater than 0",
+    "pcs": "stated number of pieces is not greater than 0",
+    "dimensions_in": "a stated dimension is not greater than 0",
+}
+
+
+def _is_nonpositive_number(value: object) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool) and value <= 0
+
+
+def _mark_impossible_values_invalid(payload: dict[str, Any]) -> None:
+    """Rewrite a *stated* out-of-range weight/pieces/dimension to an ``INVALID``
+    field, in place, before the contract is validated.
+
+    This is the whole "invalid but understandable" boundary: a value the client
+    clearly stated but that is out of range (``-5`` pieces, ``0`` kg, a ``0``
+    dimension) is understood and correctable, so it becomes an ``INVALID`` field
+    that drives a clarification asking for a valid value. It is *not* a malformed
+    extraction: everything else — bad JSON, a wrong shape, a non-numeric value —
+    is left untouched and still fails ``ContractViolation`` at ``model_validate``,
+    so an extraction that cannot be trusted to name a field still hands over to a
+    person, exactly as before.
+    """
+    for field in ("weight_kg", "pcs"):
+        cell = payload.get(field)
+        if (
+            isinstance(cell, dict)
+            and cell.get("status") == "stated"
+            and _is_nonpositive_number(cell.get("value"))
+        ):
+            payload[field] = {"status": "invalid", "note": _IMPOSSIBLE_NOTES[field]}
+
+    dims = payload.get("dimensions_in")
+    if isinstance(dims, dict) and dims.get("status") == "stated":
+        value = dims.get("value")
+        if isinstance(value, dict) and any(
+            _is_nonpositive_number(value.get(side)) for side in ("length", "width", "height")
+        ):
+            payload["dimensions_in"] = {
+                "status": "invalid",
+                "note": _IMPOSSIBLE_NOTES["dimensions_in"],
+            }
 
 
 def _strip_code_fence(content: str) -> str:

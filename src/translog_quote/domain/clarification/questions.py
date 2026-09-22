@@ -69,6 +69,31 @@ def ambiguous_question(field: FieldName) -> str:
     return AMBIGUOUS_QUESTIONS.get(field, MISSING_QUESTIONS[field])
 
 
+#: What to ask when the client stated an out-of-range value (a non-positive
+#: weight, piece count, or dimension). The value is understood and correctable,
+#: so the wording names the constraint and asks for a valid value — plainly, the
+#: way a freight desk would. Falls back to the plain "missing" wording for any
+#: field without a special phrasing.
+INVALID_QUESTIONS: dict[FieldName, str] = {
+    FieldName.PCS: (
+        "The number of pieces must be greater than 0. "
+        "Please reply with the correct number of pieces."
+    ),
+    FieldName.WEIGHT_KG: (
+        "The gross weight must be greater than 0 kg. "
+        "Please reply with the correct gross weight."
+    ),
+    FieldName.DIMENSIONS_IN: (
+        "Each dimension must be greater than 0. Please reply with the correct dimensions."
+    ),
+}
+
+
+def invalid_question(field: FieldName) -> str:
+    """Ask the client to correct an out-of-range value they stated."""
+    return INVALID_QUESTIONS.get(field, MISSING_QUESTIONS[field])
+
+
 #: What to ask when a stated place cannot be resolved to a single airport without
 #: guessing — discovered at rate-search time, not extraction. It names the place
 #: exactly as the client wrote it. The example code is a fixed, neutral

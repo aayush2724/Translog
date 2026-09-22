@@ -246,14 +246,34 @@ def test_an_invalid_delivery_type_enum_is_rejected() -> None:
         adapter.extract_shipment("body")
 
 
-def test_an_impossible_weight_is_rejected() -> None:
-    """A client email does not say "-500 kg"; a model that produces one has
-    malfunctioned, and that must not reach the shipment record."""
+def test_an_impossible_weight_becomes_an_invalid_field() -> None:
+    """A stated -500 kg is understood and correctable — it is marked INVALID (so
+    it drives a clarification) rather than failing the contract and handing the
+    client to a person. The out-of-range value is dropped, never recorded."""
+    from translog_quote.domain.extraction import FieldStatus
+
     payload = {"weight_kg": {"status": "stated", "value": -500.0}}
     adapter, _ = adapter_for(envelope(json.dumps(payload)))
 
-    with pytest.raises(ContractViolation, match="did not satisfy the extraction contract"):
-        adapter.extract_shipment("body")
+    result = adapter.extract_shipment("body")
+
+    assert result.weight_kg.status is FieldStatus.INVALID
+    assert result.weight_kg.value is None
+
+
+def test_an_impossible_pieces_and_dimension_become_invalid_fields() -> None:
+    from translog_quote.domain.extraction import FieldStatus
+
+    payload = {
+        "pcs": {"status": "stated", "value": -5},
+        "dimensions_in": {"status": "stated", "value": {"length": 0, "width": 30, "height": 30}},
+    }
+    adapter, _ = adapter_for(envelope(json.dumps(payload)))
+
+    result = adapter.extract_shipment("body")
+
+    assert result.pcs.status is FieldStatus.INVALID
+    assert result.dimensions_in.status is FieldStatus.INVALID
 
 
 def test_a_stated_field_with_no_value_is_rejected() -> None:

@@ -36,7 +36,7 @@ def test_non_stated_statuses_must_not_carry_a_value(status: FieldStatus) -> None
 
 def test_ambiguous_requires_a_note() -> None:
     """An ambiguity nobody explained is indistinguishable from a bug."""
-    with pytest.raises(ValidationError, match="requires a note"):
+    with pytest.raises(ValidationError, match="explanatory note"):
         ExtractedValue[str](status=FieldStatus.AMBIGUOUS)
 
 

@@ -658,18 +658,18 @@ DISCORD = noise("Someone mentioned you", "noreply@discord.com")
 NOTHING_STATED = ExtractionResult()
 
 
-def test_a_message_stating_no_shipment_is_not_an_enquiry(
+def test_a_message_stating_no_shipment_is_ignored(
     settings: Settings, sink: CollectingEmailSink
 ) -> None:
-    """The classification comes from extraction's own output, not a subject
-    or sender list anybody has to maintain."""
+    """Recognition is by content, not a subject or sender list: a first-contact
+    message that states no shipment is not a quotation enquiry, so it never
+    becomes a request and appears nowhere on the dashboard."""
     session = session_for(settings, sink, emails=(CHESS,), extractions=(NOTHING_STATED,))
 
     session.poll()
 
-    request = only_request(session)
-    assert request.shipment_field_count == 0  # type: ignore[attr-defined]
-    assert request.looks_like_an_enquiry is False  # type: ignore[attr-defined]
+    assert session.requests == {}, "unrelated mail creates no request"
+    assert sink.sent == []
 
 
 def test_a_message_stating_a_shipment_is_an_enquiry(
@@ -684,9 +684,12 @@ def test_a_message_stating_a_shipment_is_an_enquiry(
     assert request.looks_like_an_enquiry is True  # type: ignore[attr-defined]
 
 
-def test_both_groups_are_listed_and_counted(settings: Settings, sink: CollectingEmailSink) -> None:
-    """Unrecognised messages are shown, not hidden: the operator has to be able
-    to check the classification rather than trust it."""
+def test_only_enquiries_appear_unrelated_mail_is_dropped(
+    settings: Settings, sink: CollectingEmailSink
+) -> None:
+    """Unrelated mail is filtered at the ingestion boundary — the content-noise
+    (CHESS) and the automated sender (DISCORD) both drop out — so only the real
+    enquiry appears, and there is no "unrecognised" group at all."""
     session = session_for(
         settings,
         sink,
@@ -697,22 +700,20 @@ def test_both_groups_are_listed_and_counted(settings: Settings, sink: Collecting
     session.poll()
     snap = live_serialize.snapshot(session)
 
-    assert len(snap["requests"]) == 3  # type: ignore[arg-type]
+    assert len(snap["requests"]) == 1  # type: ignore[arg-type]
     assert snap["poll"]["enquiries"] == 1  # type: ignore[index]
-    assert snap["poll"]["unrecognised"] == 2  # type: ignore[index]
+    assert snap["poll"]["unrecognised"] == 0  # type: ignore[index]
 
 
-def test_an_unrecognised_message_explains_itself(
+def test_an_unrelated_message_is_not_shown_at_all(
     settings: Settings, sink: CollectingEmailSink
 ) -> None:
+    """Unrelated mail is not surfaced as a request to "explain" — it is dropped
+    at the boundary, so the dashboard snapshot has no row for it."""
     session = session_for(settings, sink, emails=(CHESS,), extractions=(NOTHING_STATED,))
     session.poll()
 
-    summary = live_serialize.snapshot(session)["requests"][0]  # type: ignore[index]
-
-    assert summary["is_enquiry"] is False
-    assert summary["shipment_fields"] == 0
-    assert "No shipment details found" in summary["not_enquiry_reason"]
+    assert live_serialize.snapshot(session)["requests"] == []
 
 
 def test_an_enquiry_carries_no_not_enquiry_reason(
@@ -739,17 +740,19 @@ def test_nothing_is_mailed_to_an_unrecognised_sender(
     assert sink.sent == []
 
 
-def test_an_unrecognised_message_leaves_no_request_on_disk(
+def test_an_unrelated_message_leaves_no_request_but_is_seen(
     settings: Settings, sink: CollectingEmailSink
 ) -> None:
-    """Only the thread anchor is committed. A dead NEEDS_INFO row that can
-    neither advance nor be explained never reaches the store."""
+    """Only the thread anchor is committed — so the message is never re-examined
+    and the operations watermark can advance past it — while no request reaches
+    the store and nothing is shown."""
     session = session_for(settings, sink, emails=(CHESS,), extractions=(NOTHING_STATED,))
     session.poll()
 
     store = JsonFileStore(settings.demo.state_dir)
     assert store.all_threads()  # it was seen
-    assert store.get_request(only_request(session).request_id) is None  # type: ignore[attr-defined]
+    assert store.all_requests() == ()  # but no request persisted
+    assert session.requests == {}  # and nothing on the dashboard
 
 
 def test_an_unrecognised_message_is_never_extracted_twice(
@@ -1012,14 +1015,12 @@ def test_the_simulated_rate_disclosure_survives_the_cleanup(
     assert live_serialize.snapshot(session)["mode"]["banner"] == SIMULATED_BANNER  # type: ignore[index]
 
 
-def test_one_held_draft_does_not_block_every_other_message(
+def test_unrelated_mail_does_not_block_the_enquiry_behind_it(
     settings: Settings, sink: CollectingEmailSink
 ) -> None:
-    """Requests are independent, so a block on one must not stop the rest.
-
-    The guard here used to stop the whole loop, which meant a single ordinary
-    inbox message holding a clarification draft hid every message behind it —
-    including the enquiry the demonstration is about.
+    """Unrelated mail is ignored at the boundary, so an enquiry that arrives in
+    the same poll — between two pieces of noise — is still processed and never
+    hidden behind them. Only the enquiry becomes a request.
     """
     session = session_for(
         settings,
@@ -1030,8 +1031,8 @@ def test_one_held_draft_does_not_block_every_other_message(
 
     session.poll()
 
-    assert len(session.requests) == 3
-    assert any(request.looks_like_an_enquiry for request in session.requests.values())
+    assert len(session.requests) == 1
+    assert only_request(session).looks_like_an_enquiry is True  # type: ignore[attr-defined]
 
 
 def test_a_reply_waits_for_its_own_clarification_to_be_sent(

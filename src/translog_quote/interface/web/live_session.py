@@ -850,6 +850,14 @@ class LiveSession:
 
     def _route(self, email: RawEmail) -> None:
         routed = self._router.route(email)
+        if routed.ignored and routed.request_id is not None:
+            # Unrelated mail (bulk/automated sender, or a first-contact message
+            # that stated no shipment detail). The router recorded it as seen;
+            # settle that durably so the operations watermark advances past it
+            # and it is never re-examined — but create no request and show
+            # nothing. This is the whole "only Translog mail enters" guarantee.
+            bootstrap.commit_thread(self._working, self._durable, routed.request_id)
+            return
         if routed.was_refused or routed.outcome is None or routed.request_id is None:
             return
 

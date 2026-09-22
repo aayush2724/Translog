@@ -411,21 +411,15 @@ function renderDashboard() {
     return;
   }
 
-  /* Two groups, decided by what extraction actually found — not by a list of
-     approved subjects or senders anyone has to maintain. A message that stated
-     no shipment is still shown, explaining itself, so the operator can see the
-     classification is right rather than trust it. */
+  /* Only Translog quotation requests and replies to them reach here — unrelated
+     mail is filtered out at the ingestion/routing boundary (see
+     pipeline/inbound.py and clarification_loop.py) and never becomes a request,
+     so there is no "Other messages" group to render. The `is_enquiry` filter is
+     kept as a defensive belt: should anything non-enquiry ever slip through, it
+     is dropped from the view rather than exposed as a raw Gmail message. */
   const enquiries = snap.requests.filter((r) => r.is_enquiry);
-  const others = snap.requests.filter((r) => !r.is_enquiry);
 
   const groups = [el("div", { class: "request-list" }, ...enquiries.map(requestCard))];
-
-  if (others.length) {
-    groups.push(
-      el("h2", { class: "group-head" }, "Other messages"),
-      el("div", { class: "request-list" }, ...others.map(requestCard))
-    );
-  }
 
   if (historySection) {
     groups.push(historySection);

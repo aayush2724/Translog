@@ -30,6 +30,7 @@ class UnresolvedReason(StrEnum):
 
     MISSING = "missing"
     AMBIGUOUS = "ambiguous"
+    INVALID = "invalid"
     CONFLICT = "conflict"
 
 

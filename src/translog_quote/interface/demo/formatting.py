@@ -56,6 +56,8 @@ def render_value(field: str, extracted: ExtractedValue[object]) -> str:
         return "— explicitly none"
     if extracted.status is FieldStatus.AMBIGUOUS:
         return f"— ambiguous ({extracted.note or 'no note'})"
+    if extracted.status is FieldStatus.INVALID:
+        return f"— invalid ({extracted.note or 'no note'})"
 
     value = extracted.value
     if isinstance(value, CargoDimensions):

@@ -55,6 +55,18 @@ class FieldStatus(StrEnum):
     and decline to guess. ``note`` explains what was found.
     """
 
+    INVALID = "invalid"
+    """The email states a value for this field, but it is out of range — a
+    non-positive weight, piece count, or dimension.
+
+    Distinct from ``AMBIGUOUS``: an ambiguous value cannot be represented and
+    re-asking would not help, so it is handed to a person; an invalid value is
+    understood and *correctable*, so it drives a clarification that asks for a
+    valid one and keeps asking on a further invalid reply — never a hand-over.
+    The offending value is dropped (never carried into the record); ``note``
+    records what was seen.
+    """
+
 
 class ExtractedValue[T](BaseModel):
     """One field's worth of extraction, and why it says what it says.
@@ -80,8 +92,8 @@ class ExtractedValue[T](BaseModel):
         elif self.value is not None:
             raise ValueError(f"status={self.status.value} must not carry a value")
 
-        if self.status is FieldStatus.AMBIGUOUS and not self.note:
-            raise ValueError("status=AMBIGUOUS requires a note explaining the ambiguity")
+        if self.status in (FieldStatus.AMBIGUOUS, FieldStatus.INVALID) and not self.note:
+            raise ValueError(f"status={self.status.value} requires an explanatory note")
 
         return self
 
@@ -104,6 +116,10 @@ class ExtractedValue[T](BaseModel):
     @classmethod
     def ambiguous(cls, *, note: str, evidence: str | None = None) -> ExtractedValue[T]:
         return cls(status=FieldStatus.AMBIGUOUS, note=note, evidence=evidence)
+
+    @classmethod
+    def invalid(cls, *, note: str, evidence: str | None = None) -> ExtractedValue[T]:
+        return cls(status=FieldStatus.INVALID, note=note, evidence=evidence)
 
     @property
     def is_stated(self) -> bool:

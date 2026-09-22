@@ -51,6 +51,13 @@ class RoutedMessage:
     reason: str = ""
     """Why a refused message was refused. Empty when it was routed."""
 
+    ignored: bool = False
+    """This message is not a Translog quotation request or a reply to one — an
+    unrelated email (a newsletter, a receipt, an automated notification) that
+    reached the mailbox. It was recorded as *seen* (so it is never re-examined)
+    but produced no request, no extraction beyond recognition, no clarification,
+    no rate search, and appears nowhere on the dashboard."""
+
     @property
     def was_refused(self) -> bool:
         return self.outcome is None
@@ -97,10 +104,41 @@ class InboundRouter:
             )
 
         is_reply = not isinstance(decision, NewRequest)
+
+        # A NEW message from an automated/bulk sender is not a quotation enquiry
+        # and cannot be a reply to one. Recognise it here, before the model is
+        # ever called, so unrelated mail — a no-reply notification, a newsletter,
+        # a receipt — creates no request, runs no extraction, writes no audit; it
+        # is only recorded as *seen* so it is never re-examined. Replies are
+        # exempt: a reply always belongs to a known thread and must continue.
+        if not is_reply and _is_automated_sender(email):
+            request_id = self._new_request_id(email)
+            self._record(request_id, email.message_id)
+            return RoutedMessage(
+                request_id=request_id,
+                is_reply=False,
+                needs_manual_review=False,
+                ignored=True,
+                reason="Ignored: automated/bulk sender, not a quotation enquiry.",
+            )
+
         request_id = self._new_request_id(email) if isinstance(decision, NewRequest) else decision
 
         outcome = self._workflow.handle(request_id, email)
         self._record(request_id, email.message_id)
+
+        # A first-contact message that stated no shipment detail at all is
+        # unrelated mail, recognised by content in the workflow. It is recorded
+        # as seen (above) but produces no request and appears nowhere.
+        if outcome.is_non_enquiry:
+            return RoutedMessage(
+                request_id=request_id,
+                is_reply=is_reply,
+                needs_manual_review=False,
+                outcome=outcome,
+                ignored=True,
+                reason="Ignored: stated no shipment detail, not a quotation enquiry.",
+            )
 
         return RoutedMessage(
             request_id=request_id,
@@ -179,3 +217,37 @@ class InboundRouter:
         if message_id in known:
             return  # the same message processed twice adds no new anchor
         self._store.save_thread(Thread(request_id=request_id, message_ids=(*known, message_id)))
+
+
+#: Local parts that only ever belong to automated or bulk senders — never a
+#: person sending a shipment enquiry. Deliberately conservative: a real client
+#: address is never mistaken for one, and anything this misses is still caught by
+#: the content check (a first-contact message stating no shipment is not an
+#: enquiry). The recognition is by sender, not by subject, so an unusual subject
+#: never hides a real enquiry and the word "quotation" never conjures one.
+_AUTOMATED_LOCAL_PARTS = frozenset(
+    {
+        "no-reply", "noreply", "no_reply", "donotreply", "do-not-reply", "do_not_reply",
+        "notify", "notification", "notifications", "alert", "alerts",
+        "mailer", "mailer-daemon", "postmaster", "bounce", "bounces",
+        "newsletter", "news", "updates",
+    }
+)
+
+#: Substrings that mark an automated local part even inside a composite one
+#: (e.g. "noreply.paytm", "paytm-notifications", "do-not-reply+promo").
+_AUTOMATED_MARKERS = ("noreply", "donotreply", "notification", "mailerdaemon")
+
+
+def _is_automated_sender(email: RawEmail) -> bool:
+    """Whether the sender is an automated/bulk address that never sends a
+    quotation enquiry. Matched on the address's local part, case-insensitively,
+    both as a whole and with separators collapsed, so ``no-reply@…``,
+    ``notifications@…`` and ``do-not-reply+x@…`` are recognised while an ordinary
+    client address is not."""
+    address = email.from_address.strip().lower()
+    local = address.split("@", 1)[0] if "@" in address else address
+    if local in _AUTOMATED_LOCAL_PARTS:
+        return True
+    collapsed = local.replace("-", "").replace("_", "").replace(".", "")
+    return any(marker in collapsed for marker in _AUTOMATED_MARKERS)

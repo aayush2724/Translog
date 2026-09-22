@@ -425,21 +425,22 @@ check("the dashboard shows only this session's requests, with no counters", () =
   eq(bandHeadings(t.holderFor("dashboard-list")).length, 0, "no subheading for a single band");
 });
 
-check("a message that stated no shipment gets its own quiet band", () => {
-  /* Still shown, never hidden: the operator has to be able to check the
-     classification rather than trust it. */
+check("a non-enquiry is never rendered — unrelated mail is filtered upstream", () => {
+  /* Unrelated mail is dropped at the ingestion/routing boundary and never
+     becomes a request, so there is no "Other messages" band. Even if a
+     non-enquiry ever reached the snapshot, the view drops it rather than
+     exposing a raw Gmail message. */
   const t = load();
   t.ui.snap = snapshotWith(
     [request({ request_id: "R-1" }), request({ request_id: "R-2", is_enquiry: false })],
     { active: true, following: 2 }
   );
   t.renderDashboard();
+  const text = t.holderFor("dashboard-list").textContent;
 
-  eq(
-    bandHeadings(t.holderFor("dashboard-list")).join(","),
-    "Other messages",
-    "one quiet subheading"
-  );
+  eq(bandHeadings(t.holderFor("dashboard-list")).length, 0, "no 'Other messages' band");
+  eq(/R-1/.test(text), true, "the enquiry is shown");
+  eq(/R-2/.test(text), false, "the non-enquiry is not exposed");
 });
 
 check("the empty state waits for an enquiry and says nothing technical", () => {
