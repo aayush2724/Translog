@@ -542,3 +542,96 @@ def test_internal_mail_does_not_consume_the_operations_budget() -> None:
     emails = source.fetch_new(since=datetime(2026, 8, 20, tzinfo=UTC))
 
     assert [e.message_id for e in emails] == ["<m1@x>", "<m3@x>"]
+
+
+# --- operations mode: an already-handled message is skipped, not starving (Req A) ---
+
+
+def test_a_seen_message_does_not_consume_the_operations_budget() -> None:
+    """A message already handled this run is skipped without spending a client
+    slot, exactly like internal mail — so the budget still yields the intended
+    number of *unhandled* client messages rather than being burned re-reading
+    settled ones."""
+    bodies = {
+        "messages/m1": dated("m1", "Mon, 24 Aug 2026 09:00:00 +0000", "<m1@x>"),
+        "messages/m2": dated("m2", "Tue, 25 Aug 2026 09:00:00 +0000", "<m2@x>"),
+        "messages/m3": dated("m3", "Wed, 26 Aug 2026 09:00:00 +0000", "<m3@x>"),
+    }
+    transport = PagingTransport([(["m3", "m2", "m1"], None)], bodies)
+    seen = {"<m1@x>"}
+    source = GmailEmailSource(
+        transport,
+        mailbox_address=MAILBOX,
+        max_results=2,
+        overlap_seconds=0.0,
+        seen=lambda mid: mid in seen,
+    )
+
+    emails = source.fetch_new(since=datetime(2026, 8, 20, tzinfo=UTC))
+
+    # m1 was skipped as already-handled; the budget of 2 reached m2 and m3.
+    assert [e.message_id for e in emails] == ["<m2@x>", "<m3@x>"]
+
+
+def test_a_backlog_of_seen_drafts_does_not_starve_a_newer_message() -> None:
+    """The starvation fix, at the fetch. Several old unresolved drafts sit at the
+    front of the oldest-first window; once handled they are ``seen``, so a small
+    per-poll budget is no longer spent re-reading them and reaches the newer
+    first-contact message that would otherwise never be fetched."""
+    bodies = {
+        "messages/d1": dated("d1", "Mon, 24 Aug 2026 09:00:00 +0000", "<d1@x>"),
+        "messages/d2": dated("d2", "Tue, 25 Aug 2026 09:00:00 +0000", "<d2@x>"),
+        "messages/d3": dated("d3", "Wed, 26 Aug 2026 09:00:00 +0000", "<d3@x>"),
+        "messages/new": dated("new", "Thu, 27 Aug 2026 09:00:00 +0000", "<new@x>"),
+    }
+    # Gmail lists newest-first; reversed to oldest-first the drafts come before
+    # the newer message, and a budget of 2 would stop before it.
+    transport = PagingTransport([(["new", "d3", "d2", "d1"], None)], bodies)
+    seen = {"<d1@x>", "<d2@x>", "<d3@x>"}
+    source = GmailEmailSource(
+        transport,
+        mailbox_address=MAILBOX,
+        max_results=2,
+        overlap_seconds=0.0,
+        seen=lambda mid: mid in seen,
+    )
+
+    emails = source.fetch_new(since=datetime(2026, 8, 20, tzinfo=UTC))
+
+    assert [e.message_id for e in emails] == ["<new@x>"]
+
+
+def test_a_reply_to_a_seen_thread_is_still_fetched() -> None:
+    """The reply carries a new Message-ID, so it is not ``seen`` even though the
+    enquiry it answers is — a clarification reply to an old draft is fetched and
+    processed, never mistaken for the settled enquiry beneath it."""
+    bodies = {
+        "messages/enq": dated("enq", "Mon, 24 Aug 2026 09:00:00 +0000", "<enq@x>"),
+        "messages/rep": dated("rep", "Tue, 25 Aug 2026 09:00:00 +0000", "<rep@x>"),
+    }
+    transport = PagingTransport([(["rep", "enq"], None)], bodies)
+    seen = {"<enq@x>"}  # the enquiry is handled; the reply is not
+    source = GmailEmailSource(
+        transport,
+        mailbox_address=MAILBOX,
+        max_results=1,
+        overlap_seconds=0.0,
+        seen=lambda mid: mid in seen,
+    )
+
+    emails = source.fetch_new(since=datetime(2026, 8, 20, tzinfo=UTC))
+
+    assert [e.message_id for e in emails] == ["<rep@x>"]
+
+
+def test_the_seen_filter_does_not_apply_to_the_demonstration_newest_slice() -> None:
+    """``seen`` is an operations-path skip only. The demonstration newest-first
+    read (``since is None``) ignores it, so nothing about the button-driven demo
+    changes."""
+    seen = {"<enquiry-1@mail.example.com>"}
+    source, _ = source_over(inbox_with(message()), max_results=1)
+    source._seen = lambda mid: mid in seen  # type: ignore[attr-defined]
+
+    emails = source.fetch_new()  # since is None -> newest slice
+
+    assert [e.message_id for e in emails] == ["<enquiry-1@mail.example.com>"]

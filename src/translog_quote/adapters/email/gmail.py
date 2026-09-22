@@ -601,6 +601,7 @@ class GmailEmailSource:
         overlap_seconds: float = 0.0,
         is_internal: Callable[[RawEmail], bool] | None = None,
         sent_by_us: Callable[[], Collection[str]] | None = None,
+        seen: Callable[[str], bool] | None = None,
     ) -> None:
         if not mailbox_address:
             raise PermanentFailure(
@@ -613,6 +614,13 @@ class GmailEmailSource:
         self._overlap_seconds = max(0.0, overlap_seconds)
         self._is_internal = is_internal
         self._sent_by_us_ids = sent_by_us
+        # Whether a client message has already been handled (durably committed
+        # or handled earlier in this run). Asked as a callable, like sent_by_us,
+        # because the set grows as the poll progresses. On the date-bounded
+        # operations read it lets an already-handled message be skipped without
+        # spending the per-poll client budget, so an old unresolved draft that
+        # pins the watermark cannot indefinitely starve newer mail behind it.
+        self._seen = seen
         self._metadata: dict[str, GmailMessageMetadata] = {}
 
     def close(self) -> None:
@@ -681,7 +689,7 @@ class GmailEmailSource:
                 # The per-poll client budget is spent; the rest waits for the
                 # next poll, by which point the watermark has moved forward.
                 break
-            self._ingest(gmail_id, emails)
+            self._ingest(gmail_id, emails, skip_seen=True)
         return tuple(emails)
 
     def _list_ids(self, query: str) -> list[str]:
@@ -706,10 +714,11 @@ class GmailEmailSource:
             page_token = token
         return ids
 
-    def _ingest(self, gmail_id: str, emails: list[RawEmail]) -> None:
+    def _ingest(self, gmail_id: str, emails: list[RawEmail], *, skip_seen: bool = False) -> None:
         """Fully fetch one listed id and append it to ``emails`` if it is a
         client message. Skips (without spending the budget) deleted, own
-        outbound, self-sent, and internal/approver mail."""
+        outbound, self-sent, and internal/approver mail — and, when
+        ``skip_seen`` is set, mail already handled (see ``seen``)."""
         try:
             full = self._transport.get_json(f"messages/{gmail_id}", {"format": "full"})
         except _NotFound:
@@ -729,6 +738,12 @@ class GmailEmailSource:
             return
 
         raw = parse_gmail_message(full)
+        if skip_seen and self._seen is not None and self._seen(raw.message_id):
+            # Already handled this run or durably committed. Skipped so the
+            # oldest-first per-poll budget advances past it to newer mail; the
+            # watermark is held behind unresolved work by the caller, not here.
+            _log.info("Gmail message %s was already handled; skipped", gmail_id)
+            return
         if self._is_internal is not None and self._is_internal(raw):
             # Approval mail we sent ourselves. Excluded so it never spends the
             # client fetch budget, on top of the query's own subject exclusion.

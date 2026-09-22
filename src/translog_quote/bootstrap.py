@@ -106,6 +106,7 @@ def build_gmail_email_source(
     overlap_seconds: float = 0.0,
     is_internal: Callable[[RawEmail], bool] | None = None,
     sent_by_us: Callable[[], Collection[str]] | None = None,
+    seen: Callable[[str], bool] | None = None,
 ) -> EmailSource:
     """An `EmailSource` over one Gmail mailbox (Phase 10.3).
 
@@ -159,6 +160,10 @@ def build_gmail_email_source(
         # What this run has already sent, so a mailbox that both reads and
         # sends does not feed Translog its own words back as a client's.
         sent_by_us=sent_by_us,
+        # What this run has already handled, so an old unresolved clarification
+        # draft cannot keep spending the oldest-first fetch budget and starve
+        # newer mail behind it. Operations path only; None elsewhere.
+        seen=seen,
     )
 
 

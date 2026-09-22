@@ -535,12 +535,26 @@ class LiveSession:
         deferred reply commit nothing, so they stay uncommitted and the cutoff
         must not pass them — a restart re-reads and re-derives them. When
         everything handled this poll is settled the cutoff advances to the newest
-        handled; otherwise it holds at the oldest uncommitted message."""
+        handled; otherwise it holds at the oldest uncommitted message.
+
+        An unresolved NEEDS_INFO draft is now *skipped* by the fetch once it has
+        been handled this run (so it stops starving newer mail), which means it
+        is no longer in ``in_scope`` to pin the cutoff on its own. Its enquiry is
+        added back to the uncommitted set here, from the live requests, so the
+        watermark still never advances past it — the invariant is preserved by
+        holding at the request, not by re-reading it every poll."""
         if not in_scope:
             return
         previous = self._demonstration.current.last_poll_watermark
         committed = {mid for thread in self._durable.all_threads() for mid in thread.message_ids}
         uncommitted = [e.received_at for e in in_scope if e.message_id not in committed]
+        uncommitted += [
+            request.enquiry.received_at
+            for request in self.requests.values()
+            if request.state is RequestState.NEEDS_INFO
+            and request.enquiry is not None
+            and request.enquiry.message_id not in committed
+        ]
         if uncommitted:
             watermark = min(uncommitted)
         else:
@@ -815,6 +829,7 @@ class LiveSession:
                         overlap_seconds=self._settings.demo.fetch_overlap_minutes * 60.0,
                         is_internal=_is_internal,
                         sent_by_us=self._sent_provider_ids,
+                        seen=self._seen_message,
                     )
                 else:
                     self._source = bootstrap.build_gmail_email_source(
@@ -824,6 +839,7 @@ class LiveSession:
                         overlap_seconds=self._settings.demo.fetch_overlap_minutes * 60.0,
                         is_internal=_is_internal,
                         sent_by_us=self._sent_provider_ids,
+                        seen=self._seen_message,
                     )
             elif self.account is None:
                 self._source = bootstrap.build_gmail_email_source(
@@ -847,6 +863,18 @@ class LiveSession:
         """
         ids = getattr(self._sink, "sent_provider_ids", None)
         return ids if isinstance(ids, set | frozenset | tuple | list) else ()
+
+    def _seen_message(self, message_id: str) -> bool:
+        """Whether this session has already handled a message.
+
+        Two sources, matching the poll's own freshness test above: durably
+        committed (survives a restart) or routed earlier this run. Used by the
+        operations fetch to skip an already-handled message so the oldest-first
+        budget reaches newer mail. Skipping it there is safe precisely because
+        an unresolved draft is still pinned by ``_advance_watermark`` — the
+        message stops being *re-fetched*, not stops being *waited for*.
+        """
+        return message_id in self._routed or self._router.already_processed(message_id)
 
     def _route(self, email: RawEmail) -> None:
         routed = self._router.route(email)
