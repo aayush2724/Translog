@@ -34,11 +34,14 @@ from translog_quote.errors import (
     UnresolvedLocation,
     WebCargoSessionLost,
 )
+from translog_quote.observability import get_logger
 
 if TYPE_CHECKING:
     from datetime import date
 
     from translog_quote.domain.rates import RateQuery
+
+_log = get_logger("adapters.webcargo.browser.pages")
 
 # --- where things are -------------------------------------------------------------
 
@@ -233,6 +236,39 @@ _JS_RESULTS_STATE = """
   };
 }
 """
+
+#: Evidence collected ONLY when `_await_results` gives up at the timeout — never
+#: on the happy path, and it decides nothing. Its whole job is to make the three
+#: indistinguishable settle-timeout causes tellable apart after the fact:
+#:
+#:   - the app never reached the results route  -> `hash` is not dynamic-results
+#:     and `hasResultsCollapse` is false;
+#:   - a genuine zero-rate result               -> `hasEmptyResultsPanel` is true
+#:     (the criteria-level empty wording, on the results surface);
+#:   - our own detection misfired               -> e.g. `openDropdowns > 0`, i.e.
+#:     the "No results found" text is a lingering autocomplete placeholder, not
+#:     the results surface at all.
+#:
+#: `bodyTextSample` is capped in the browser so what crosses the boundary is
+#: already bounded; the Python side caps again before it reaches a log line.
+_SETTLE_DIAGNOSTIC_BODY_CHARS = 1500
+_JS_SETTLE_DIAGNOSTICS = """
+() => {
+  const cap = (s, n) => (typeof s === 'string' ? s.slice(0, n) : '');
+  const body = document.body ? document.body.innerText : '';
+  const sample = cap(body, __BODY_CHARS__);
+  return {
+    hash: location.hash,
+    hasResultsCollapse: !!document.querySelector('.ant-collapse > .ant-collapse-item'),
+    openDropdowns: document.querySelectorAll(
+      '.ant-select-dropdown:not(.ant-select-dropdown-hidden)'
+    ).length,
+    hasEmptyResultsPanel:
+      /No results found for your search criteria|There may be no results/i.test(sample),
+    bodyTextSample: sample,
+  };
+}
+""".replace("__BODY_CHARS__", str(_SETTLE_DIAGNOSTIC_BODY_CHARS))
 
 #: Switch to Full list via the Ant Design view-toggle radio group. Idempotent:
 #: if the results accordion is already present we are in Full list. Verified
@@ -886,12 +922,64 @@ def _require_ok(state: object, *, expect_unit: str, what: str) -> None:
         )
 
 
+def _bounded(value: object, limit: int) -> str:
+    """One-line, length-capped text for a log/exception field.
+
+    Collapses whitespace (so a multi-line page sample stays one line) and
+    truncates with an ellipsis. Diagnostics must be safe to drop into a log line
+    and an exception message, whatever the page happened to contain."""
+    text = " ".join(str(value if value is not None else "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _settle_timeout_diagnostics(driver: BrowserDriver) -> str:
+    """Best-effort, bounded evidence for a results-settle timeout. Never raises.
+
+    Called only on the ``_await_results`` timeout path. Every probe is guarded
+    so a failing or unsupported driver degrades a field to ``<unavailable>``
+    rather than masking or replacing the ``ContractViolation`` the caller is
+    already raising. The ``screenshot`` capability is optional and duck-typed
+    (like the transport's ``close``): a driver without one simply contributes no
+    image, and no test fake has to grow a method it does not need."""
+    parts: list[str] = []
+    try:
+        snapshot = driver.evaluate(_JS_SETTLE_DIAGNOSTICS)
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must never raise
+        snapshot = None
+        parts.append(f"snapshot=<unavailable: {type(exc).__name__}>")
+    if isinstance(snapshot, dict):
+        parts.append(f"hash={_bounded(snapshot.get('hash'), 120)}")
+        parts.append(f"hasResultsCollapse={snapshot.get('hasResultsCollapse')}")
+        parts.append(f"openDropdowns={snapshot.get('openDropdowns')}")
+        parts.append(f"hasEmptyResultsPanel={snapshot.get('hasEmptyResultsPanel')}")
+        parts.append(f"bodyText={_bounded(snapshot.get('bodyTextSample'), 600)!r}")
+
+    screenshot = getattr(driver, "screenshot", None)
+    if callable(screenshot):
+        try:
+            path = screenshot()
+        except Exception as exc:  # noqa: BLE001 - never mask the real failure
+            parts.append(f"screenshot=<unavailable: {type(exc).__name__}>")
+        else:
+            parts.append(f"screenshot={_bounded(path, 300)}" if path else "screenshot=<none>")
+
+    summary = " | ".join(parts)
+    _log.warning("WebCargo results surface did not settle; diagnostics: %s", summary)
+    return summary
+
+
 def _await_results(
     driver: BrowserDriver, *, timeout_seconds: float, poll_interval_seconds: float
 ) -> bool:
     """Wait for the results surface to settle. ``True`` when the provider has
     a result set to read, ``False`` when it states it found nothing. A page
-    that never settles is an error — never silently treated as empty."""
+    that never settles is an error — never silently treated as empty.
+
+    The timeout is unchanged and no retry is added: it still fails once, loudly.
+    What is new is that the failure now carries bounded evidence
+    (``_settle_timeout_diagnostics``) so a settle-timeout can be triaged —
+    never-reached-results vs genuine-empty vs a detection miss — instead of
+    leaving only the opaque state flags."""
     deadline = time.monotonic() + timeout_seconds
     while True:
         state = driver.evaluate(_JS_RESULTS_STATE)
@@ -903,7 +991,7 @@ def _await_results(
         if time.monotonic() >= deadline:
             raise ContractViolation(
                 f"the results surface did not settle within {timeout_seconds}s "
-                f"(last state: {state!r})"
+                f"(last state: {state!r}); diagnostics: {_settle_timeout_diagnostics(driver)}"
             )
         time.sleep(poll_interval_seconds)
 

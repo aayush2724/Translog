@@ -750,6 +750,7 @@ class FakeDriver:
         dimension_unit: str = "IN",
         weight_unit: str = "KG",
         never_settles: bool = False,
+        settle_diag: dict[str, object] | None = None,
     ) -> None:
         self.rows = rows if rows is not None else []
         count = stated_count if stated_count is not None else len(self.rows)
@@ -766,6 +767,17 @@ class FakeDriver:
         self.dimension_unit = dimension_unit
         self.weight_unit = weight_unit
         self.never_settles = never_settles
+        # What `_JS_SETTLE_DIAGNOSTICS` "sees" on the timeout path. The default is
+        # a plausible still-loading results surface; tests override it to model
+        # the three distinguishable causes (never-reached / genuine-empty / a
+        # placeholder false positive).
+        self.settle_diag: dict[str, object] = settle_diag or {
+            "hash": "#ebookings/dynamic-results",
+            "hasResultsCollapse": False,
+            "openDropdowns": 0,
+            "hasEmptyResultsPanel": False,
+            "bodyTextSample": "Your results are loading",
+        }
         self.calls: list[tuple[str, str]] = []
         self._pending_options: list[str] = []
         # DatePicker model: readonly display starts on a default; typing into
@@ -835,6 +847,8 @@ class FakeDriver:
                 "totalMode": False,
                 "reason": f"weight not in Total KG mode ({self.weight_unit})",
             }
+        if "bodyTextSample" in script:  # _JS_SETTLE_DIAGNOSTICS (timeout-only)
+            return dict(self.settle_diag)
         if "settled" in script:  # _JS_RESULTS_STATE (wait-for-settle)
             if self.never_settles:
                 return {"onResults": True, "settled": False, "loading": True, "empty": False}
@@ -1035,6 +1049,121 @@ def test_a_results_page_that_never_settles_fails_loudly() -> None:
 
     with pytest.raises(ContractViolation, match="did not settle"):
         search_with(driver)
+
+
+# --- the settle-timeout carries bounded evidence (diagnostic-only) -----------------
+
+
+def test_settle_timeout_captures_route_and_surface_evidence() -> None:
+    """The never-reached-results shape: the app is still on the search route and
+    the "No results found" text is a lingering autocomplete placeholder, not the
+    results surface. The timeout now records exactly that, so the cause is
+    tellable apart from a genuine empty."""
+    driver = FakeDriver(
+        never_settles=True,
+        settle_diag={
+            "hash": "#ebookings/search-and-book",
+            "hasResultsCollapse": False,
+            "openDropdowns": 1,
+            "hasEmptyResultsPanel": False,
+            "bodyTextSample": "London Heathrow No results found",
+        },
+    )
+
+    with pytest.raises(ContractViolation) as exc_info:
+        search_with(driver)
+
+    message = str(exc_info.value)
+    assert "did not settle" in message  # the original signal is preserved
+    assert "hash=#ebookings/search-and-book" in message
+    assert "hasResultsCollapse=False" in message
+    assert "openDropdowns=1" in message
+    assert "hasEmptyResultsPanel=False" in message
+    assert "No results found" in message  # the captured body sample
+
+
+def test_settle_timeout_flags_a_genuine_empty_results_panel() -> None:
+    """The genuine-zero-rate shape: on the results surface, the criteria-level
+    empty panel is showing. The diagnostic marks it, so this reads as a real
+    empty a fix could return cleanly — not the same thing as never landing."""
+    driver = FakeDriver(
+        never_settles=True,
+        settle_diag={
+            "hash": "#ebookings/dynamic-results",
+            "hasResultsCollapse": False,
+            "openDropdowns": 0,
+            "hasEmptyResultsPanel": True,
+            "bodyTextSample": "No results found for your search criteria. There may be no results",
+        },
+    )
+
+    with pytest.raises(ContractViolation) as exc_info:
+        search_with(driver)
+
+    assert "hasEmptyResultsPanel=True" in str(exc_info.value)
+
+
+class _CanScreenshot(FakeDriver):
+    """A driver that supports the optional, duck-typed screenshot capability."""
+
+    def screenshot(self) -> str:
+        return "/tmp/webcargo-settle-abc123.png"  # noqa: S108 - synthetic path in a test
+
+
+def test_settle_timeout_includes_a_screenshot_path_when_available() -> None:
+    driver = _CanScreenshot(never_settles=True)
+
+    with pytest.raises(ContractViolation) as exc_info:
+        search_with(driver)
+
+    assert "screenshot=/tmp/webcargo-settle-abc123.png" in str(exc_info.value)
+
+
+class _DiagnosticsBlowUp(FakeDriver):
+    """Both diagnostic probes fail — the worst case for the capture path."""
+
+    def evaluate(self, script: str, argument: object = None) -> object:
+        if "bodyTextSample" in script:
+            raise RuntimeError("evaluate exploded")
+        return super().evaluate(script, argument)
+
+    def screenshot(self) -> str:
+        raise RuntimeError("screenshot exploded")
+
+
+def test_settle_diagnostics_degrade_without_masking_the_contract_violation() -> None:
+    """A diagnostic must never raise a second error over the first. When every
+    probe fails, the original ``did not settle`` ContractViolation still stands
+    and each field simply reads ``<unavailable>``."""
+    driver = _DiagnosticsBlowUp(never_settles=True)
+
+    with pytest.raises(ContractViolation, match="did not settle") as exc_info:
+        search_with(driver)
+
+    message = str(exc_info.value)
+    assert "snapshot=<unavailable: RuntimeError>" in message
+    assert "screenshot=<unavailable: RuntimeError>" in message
+
+
+def test_settle_diagnostics_are_length_bounded() -> None:
+    """A pathological page cannot produce an unbounded log/exception line."""
+    driver = FakeDriver(
+        never_settles=True,
+        settle_diag={
+            "hash": "#ebookings/dynamic-results",
+            "hasResultsCollapse": False,
+            "openDropdowns": 0,
+            "hasEmptyResultsPanel": False,
+            "bodyTextSample": "x" * 5000,
+        },
+    )
+
+    with pytest.raises(ContractViolation) as exc_info:
+        search_with(driver)
+
+    message = str(exc_info.value)
+    assert "…" in message  # the body sample was truncated
+    assert "x" * 5000 not in message  # never the whole thing
 
 
 # --- the authenticated-shell probe (read-only; never a login) ----------------------

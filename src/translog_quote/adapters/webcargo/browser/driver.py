@@ -80,6 +80,27 @@ class PlaywrightWebCargoDriver:
             return self._page.evaluate(script)
         return self._page.evaluate(script, argument)
 
+    def screenshot(self) -> str | None:
+        """A best-effort PNG of the current page, for a diagnostic capture only.
+
+        Optional by design — it is not on the ``BrowserDriver`` protocol, so the
+        search flow reaches it duck-typed and the scripted test fakes need not
+        implement it. Returns the written path, or ``None`` if the page cannot be
+        captured: a diagnostic taken while the flow is already failing must never
+        raise a second error over the first. The file lands in the OS temp dir
+        under a recognisable prefix; cleaning it up is the operator's, not a
+        rate search's, concern."""
+        import os
+        import tempfile
+
+        try:
+            handle, path = tempfile.mkstemp(prefix="webcargo-settle-", suffix=".png")
+            os.close(handle)
+            self._page.screenshot(path=path)
+        except Exception:  # noqa: BLE001 - a failed diagnostic must not mask the real error
+            return None
+        return path
+
 
 class PlaywrightHandle:
     """One persistent Chromium context, shaped as a `BrowserHandle`.
