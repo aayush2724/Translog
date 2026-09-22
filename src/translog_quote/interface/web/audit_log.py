@@ -28,21 +28,31 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from translog_quote.config import Settings
+    from translog_quote.interface.web.redis_state import RedisAuditLog
 
 _log = get_logger("interface.web.audit_log")
 
 AUDIT_FILE = "audit.jsonl"
 
 
-def build_audit_log(settings: Settings, *, account_id: str | None = None) -> JsonFileAuditLog:
+def build_audit_log(
+    settings: Settings, *, account_id: str | None = None
+) -> JsonFileAuditLog | RedisAuditLog:
     """The durable audit log for a live run, optionally per account.
 
-    Rooted like the durable store: ``demo.state_dir`` when ``account_id`` is
+    ``redis`` backend (production): the audit trail is a Redis list, so it
+    survives a restart with no disk. ``filesystem`` (default — local/demo/tests):
+    rooted like the durable store, ``demo.state_dir`` when ``account_id`` is
     omitted (today's single-account layout), the account's own directory when
     given. Kept here beside the class rather than in the composition root, which
     may not import ``interface``.
     """
     from translog_quote import bootstrap
+
+    if settings.demo.durable_backend == "redis":
+        from translog_quote.interface.web.redis_state import RedisAuditLog
+
+        return RedisAuditLog(bootstrap.build_redis_client(settings), account_id=account_id)
 
     directory = (
         settings.demo.state_dir

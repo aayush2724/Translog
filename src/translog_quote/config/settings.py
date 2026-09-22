@@ -425,6 +425,20 @@ class DemoSettings(BaseModel):
     as long as a room will watch a dashboard before believing it is broken.
     """
 
+    durable_backend: Literal["filesystem", "redis"] = "filesystem"
+    """Where operations-mode durable state lives.
+
+    ``filesystem`` (the default — local, demo and the test suite): the JSON-file
+    request store, the watermark file and the audit file under ``state_dir``,
+    behaviour unchanged.
+
+    ``redis`` (the Render deployment): requests, threads/dedup, the operations
+    watermark and the audit trail are persisted in the Upstash Redis already used
+    for the rate-search queue, so operations state survives a restart even with no
+    persistent disk. Reuses ``queue.redis_url`` — set that when selecting
+    ``redis``. Chosen explicitly rather than inferred from the Redis URL, so a
+    local run that happens to have a Redis URL does not silently change stores."""
+
     startup_mode: Literal["demonstration", "operations"] = "demonstration"
     """What a process restart means.
 

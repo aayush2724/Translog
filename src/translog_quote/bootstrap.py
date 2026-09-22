@@ -12,7 +12,7 @@ name — or accidentally depend on — the implementation behind it.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from translog_quote.config import Settings, load_settings
 from translog_quote.config.settings import is_valid_account_id
@@ -288,9 +288,50 @@ def build_persistent_store(settings: Settings, *, account_id: str | None = None)
     With ``account_id`` given, the store is rooted in that account's per-account
     directory; omitted, it uses ``demo.state_dir`` exactly as before.
     """
+    if settings.demo.durable_backend == "redis":
+        from translog_quote.adapters.store.redis import RedisStore
+
+        return RedisStore(build_redis_client(settings), account_id=account_id)
+
     from translog_quote.adapters.store import JsonFileStore
 
     return JsonFileStore(_state_dir_for(settings, account_id))
+
+
+#: Redis client tuning, shared by the rate-search queue and the durable store so
+#: they use one connection pattern (see ``build_redis_client``).
+_REDIS_SOCKET_TIMEOUT_SECONDS = 5
+_REDIS_HEALTH_CHECK_INTERVAL_SECONDS = 30
+
+
+def build_redis_client(settings: Settings) -> Any:
+    """The one resilient Redis client — for the rate-search queue AND (when
+    ``demo.durable_backend == "redis"``) the durable store, watermark and audit.
+
+    Kept in the composition root because it is the single place both the
+    ``adapters`` store (via injection here) and the ``interface`` queue (which
+    delegates to this) may reach without crossing the layering rule, and because
+    it reads exactly one config — ``queue.redis_url`` — so there is never a second
+    Redis configuration mechanism. ``redis`` is imported lazily so filesystem and
+    demo runs never need it."""
+    import socket
+
+    from redis import Redis
+
+    keepalive_options: dict[int, int] = {}
+    for name, value in (("TCP_KEEPIDLE", 60), ("TCP_KEEPINTVL", 30), ("TCP_KEEPCNT", 3)):
+        option = getattr(socket, name, None)
+        if option is not None:
+            keepalive_options[option] = value
+
+    return Redis.from_url(
+        settings.queue.redis_url,
+        socket_connect_timeout=_REDIS_SOCKET_TIMEOUT_SECONDS,
+        socket_timeout=_REDIS_SOCKET_TIMEOUT_SECONDS,
+        health_check_interval=_REDIS_HEALTH_CHECK_INTERVAL_SECONDS,
+        socket_keepalive=True,
+        socket_keepalive_options=keepalive_options or None,
+    )
 
 
 def persistent_state_files() -> tuple[str, ...]:
@@ -352,9 +393,18 @@ def commit_request(source: StorePort, target: StorePort, request_id: str) -> Non
     later process.
     """
     request = source.get_request(request_id)
+    thread = next((t for t in source.all_threads() if t.request_id == request_id), None)
+    # A durable store may offer an atomic request+thread commit (the Redis store
+    # does, via MULTI/EXEC) so a crash cannot leave a request without its dedup
+    # thread. Used when present; otherwise the two independent saves below keep
+    # the filesystem/in-memory stores behaving exactly as before. StorePort is
+    # unchanged — this is an optional capability, discovered by attribute.
+    atomic = getattr(target, "commit_request_and_thread", None)
+    if request is not None and atomic is not None:
+        atomic(request, thread)
+        return
     if request is not None:
         target.save_request(request)
-    thread = next((t for t in source.all_threads() if t.request_id == request_id), None)
     if thread is not None:
         target.save_thread(thread)
 

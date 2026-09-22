@@ -40,16 +40,6 @@ _T = TypeVar("_T")
 #: The function RQ executes, as a dotted path (see module docstring).
 RATE_SEARCH_JOB = "translog_quote.interface.worker.jobs.run_rate_search"
 
-#: Redis client tuning for a hosted broker (Upstash) that drops idle
-#: connections. Short timeouts bound a stall — we measured a 26s readiness hang
-#: — so a dead socket fails fast into a retry rather than blocking a request or
-#: the worker. A 30s health check PINGs a connection idle longer than that
-#: before reusing it, so a silently-dropped connection is detected and replaced
-#: instead of handed to a command. TCP keepalive lets the OS notice a dead peer
-#: behind NAT and idle timeouts.
-_SOCKET_TIMEOUT_SECONDS = 5
-_HEALTH_CHECK_INTERVAL_SECONDS = 30
-
 #: A single, bounded retry layer for transient drops (see `_with_retry`). Small
 #: on purpose: one "Connection closed by server" is absorbed; a real outage
 #: still surfaces quickly rather than hanging the page or the worker. Redis-py's
@@ -62,27 +52,16 @@ _RETRY_BACKOFF_SECONDS = 0.2
 def build_redis(settings: Settings) -> Any:
     """One resilient Redis client, shared by this module and the browser worker.
 
-    Carries connection-health settings only; retry policy lives in the single
-    `_with_retry` wrapper, never on the client.
+    The implementation lives in the composition root (``bootstrap.build_redis_client``)
+    so the queue and the durable store share one client pattern and one config —
+    never a competing mechanism — while respecting the layering rule (the store
+    is an adapter the queue may not import directly). Delegated lazily to avoid an
+    import cycle; behaviour and the returned client are unchanged. Retry policy
+    still lives only in ``_with_retry``, never on the client.
     """
-    import socket
+    from translog_quote import bootstrap
 
-    from redis import Redis
-
-    keepalive_options: dict[int, int] = {}
-    for name, value in (("TCP_KEEPIDLE", 60), ("TCP_KEEPINTVL", 30), ("TCP_KEEPCNT", 3)):
-        option = getattr(socket, name, None)
-        if option is not None:
-            keepalive_options[option] = value
-
-    return Redis.from_url(
-        settings.queue.redis_url,
-        socket_connect_timeout=_SOCKET_TIMEOUT_SECONDS,
-        socket_timeout=_SOCKET_TIMEOUT_SECONDS,
-        health_check_interval=_HEALTH_CHECK_INTERVAL_SECONDS,
-        socket_keepalive=True,
-        socket_keepalive_options=keepalive_options or None,
-    )
+    return bootstrap.build_redis_client(settings)
 
 
 def _with_retry(

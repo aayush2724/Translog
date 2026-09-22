@@ -65,8 +65,8 @@ from translog_quote.interface.jobs import (
     fetch_job_status,
     worker_liveness,
 )
-from translog_quote.interface.web.audit_log import JsonFileAuditLog
-from translog_quote.interface.web.demonstration import DemonstrationFile
+from translog_quote.interface.web.audit_log import JsonFileAuditLog, build_audit_log
+from translog_quote.interface.web.demonstration import build_demonstration
 from translog_quote.observability import get_logger
 from translog_quote.pipeline import RateSearchOutcome, RateSearchStage
 
@@ -85,6 +85,7 @@ if TYPE_CHECKING:
     from translog_quote.interface.jobs import RateSearchJobResult
     from translog_quote.interface.web.demonstration import Demonstration
     from translog_quote.interface.web.multi_account_session import MultiAccountSession
+    from translog_quote.interface.web.redis_state import RedisAuditLog
     from translog_quote.pipeline import QuotationStage
     from translog_quote.pipeline.audit import AuditEvent
     from translog_quote.ports import (
@@ -316,11 +317,6 @@ class LiveSession:
         # account's mailbox, credentials and state directory below.
         self.account = account
         account_id = account.account_id if account is not None else None
-        state_dir = (
-            bootstrap.account_state_dir(settings, account.account_id)
-            if account is not None
-            else settings.demo.state_dir
-        )
         # Injectable like every other collaborator, so a test can exercise a
         # provider that cannot identify a particular place without needing a
         # real one. The default is whatever the configured mode calls for.
@@ -332,7 +328,9 @@ class LiveSession:
         self._clock = clock or bootstrap.build_system_clock()
         # Persisted, so a restarted server still shows what happened rather
         # than an empty history for a request that plainly progressed.
-        self.audit: CollectingAudit | JsonFileAuditLog = audit or JsonFileAuditLog(state_dir)
+        self.audit: CollectingAudit | JsonFileAuditLog | RedisAuditLog = (
+            audit or build_audit_log(settings, account_id=account_id)
+        )
 
         self._durable = (
             durable
@@ -391,7 +389,7 @@ class LiveSession:
         # Which of the mailbox's real messages this presentation is following.
         # Deletes nothing and names nothing: a demonstration is whatever
         # arrived after the presenter pressed Start.
-        self._demonstration = DemonstrationFile(state_dir)
+        self._demonstration = build_demonstration(settings, account_id=account_id)
         self.outside_demonstration = 0
         self.skipped_internal = 0
         self.blocked_messages = 0

@@ -37,22 +37,34 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from translog_quote.config import Settings
+    from translog_quote.interface.web.redis_state import RedisDemonstrationStore
 
 _log = get_logger("interface.web.demonstration")
 
 DEMONSTRATION_FILE = "demonstration.json"
 
 
-def build_demonstration(settings: Settings, *, account_id: str | None = None) -> DemonstrationFile:
-    """The demonstration/watermark file for a live run, optionally per account.
+def build_demonstration(
+    settings: Settings, *, account_id: str | None = None
+) -> DemonstrationFile | RedisDemonstrationStore:
+    """The demonstration/watermark store for a live run, optionally per account.
 
-    Rooted like the store and the audit log: ``demo.state_dir`` when
+    ``redis`` backend (production): the watermark lives in a Redis key, so it
+    survives a restart with no disk. ``filesystem`` (default — local/demo/tests):
+    rooted like the store and the audit log, ``demo.state_dir`` when
     ``account_id`` is omitted (today's single-account layout), the account's own
     directory when given, so each account's watermark is isolated. Kept beside
     the class rather than in the composition root, which may not import
     ``interface``.
     """
     from translog_quote import bootstrap
+
+    if settings.demo.durable_backend == "redis":
+        from translog_quote.interface.web.redis_state import RedisDemonstrationStore
+
+        return RedisDemonstrationStore(
+            bootstrap.build_redis_client(settings), account_id=account_id
+        )
 
     directory = (
         settings.demo.state_dir
