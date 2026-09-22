@@ -21,10 +21,11 @@ from translog_quote.domain.email import RawEmail
 from translog_quote.domain.extraction import ExtractedValue, ExtractionResult
 from translog_quote.domain.shipment import CargoDimensions, DeliveryType, FieldName
 from translog_quote.domain.workflow import RequestState
-from translog_quote.errors import IllegalTransition
+from translog_quote.errors import ContractViolation, IllegalTransition
 from translog_quote.pipeline import ClarificationWorkflow
 from translog_quote.pipeline.audit import AuditEvent, AuditEventType
 from translog_quote.pipeline.clarification_loop import (
+    EXTRACTION_FAILED_NOTE,
     FOLLOWUP_WINDOW,
     FOLLOWUP_WINDOW_EXPIRED_NOTE,
 )
@@ -990,6 +991,94 @@ def test_the_followup_deadline_survives_a_restart() -> None:
 
     assert restarted.sweep_followup_deadlines() == (REQ,)
     assert store.get_request(REQ).state is RequestState.MANUAL_REVIEW  # type: ignore[union-attr]
+
+
+# --- a malformed extraction is one message's problem, not the mailbox's ---------
+#
+# The production poison-message bug: a first-contact enquiry with impossible values
+# (-5 pieces, 0 kg, 0 dimension) made extraction raise ContractViolation, which
+# escaped `handle`, aborted the whole poll, and — because the message was never
+# recorded — was re-fetched and re-raised on every cycle, blocking every later
+# message. The fix contains the failure to the one message and hands it to a
+# person, without weakening the extraction contract that rejects the value.
+
+
+class _RaisingExtractor:
+    """extract_shipment raises ContractViolation, as a malformed model output or
+    an impossible value the contract rejects would."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def extract_shipment(self, text: str) -> ExtractionResult:
+        self.calls.append(text)
+        raise ContractViolation("extracted pcs must be positive, got -5")
+
+    def read_client_intent(self, text: str):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
+
+def test_a_malformed_extraction_is_handed_over_not_raised() -> None:
+    """A ContractViolation is contained: the request is handed to a person with a
+    reason, no exception escapes, and nothing is sent to the client."""
+    audit = _RecordingAudit()
+    sink = CollectingEmailSink()
+    store = InMemoryStore()
+    wf = ClarificationWorkflow(
+        extractor=_RaisingExtractor(),  # type: ignore[arg-type]
+        sink=sink,
+        store=store,
+        clock=FixedClock(),
+        audit=audit,
+    )
+
+    outcome = wf.handle(REQ, email("-5 pieces, 0 kg, 0 x 30 x 30 inches"))
+
+    assert outcome.state is RequestState.MANUAL_REVIEW
+    assert outcome.needs_a_person
+    assert outcome.clarification is None
+    assert EXTRACTION_FAILED_NOTE in outcome.escalation_notes
+    assert sink.sent == [], "a malformed enquiry mails the client nothing"
+    stored = store.get_request(REQ)
+    assert stored is not None
+    assert stored.state is RequestState.MANUAL_REVIEW, "the hand-over is persisted"
+
+
+def test_a_malformed_extraction_is_audited_with_a_reason() -> None:
+    """The failure is visible on the audit trail, with a reason and an
+    operator-facing note that carries no email content."""
+    audit = _RecordingAudit()
+    wf = ClarificationWorkflow(
+        extractor=_RaisingExtractor(),  # type: ignore[arg-type]
+        sink=CollectingEmailSink(),
+        store=InMemoryStore(),
+        clock=FixedClock(),
+        audit=audit,
+    )
+
+    wf.handle(REQ, email("garbage numbers"))
+
+    escalations = [e for e in audit.events if e.event is AuditEventType.MANUAL_REVIEW_ESCALATED]
+    assert len(escalations) == 1
+    assert escalations[-1].detail["reason"] == "extraction_contract_violation"
+    assert escalations[-1].detail["notes"] == [EXTRACTION_FAILED_NOTE]
+    # An EMAIL_RECEIVED was recorded, but EXTRACTION_CALLED was not — the crash is
+    # before extraction completes, exactly as in production.
+    events = [e.event for e in audit.events]
+    assert AuditEventType.EMAIL_RECEIVED in events
+    assert AuditEventType.EXTRACTION_CALLED not in events
+
+
+def test_a_valid_extraction_after_a_contract_violation_is_unaffected() -> None:
+    """The guard changes nothing for a well-formed extraction: a normal enquiry
+    on the same workflow still clarifies as before."""
+    wf, sink = workflow(complete(pcs=ExtractedValue[int].not_stated()))
+
+    outcome = wf.handle(REQ, email("no piece count"))
+
+    assert outcome.awaiting_approval
+    assert outcome.clarification is not None
+    assert outcome.state is RequestState.NEEDS_INFO
 
 
 def test_each_account_sends_its_followup_through_its_own_sink() -> None:

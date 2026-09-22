@@ -31,12 +31,12 @@ from translog_quote.domain.clarification import (
     location_question,
 )
 from translog_quote.domain.email import OutboundMessage
-from translog_quote.domain.extraction import FieldStatus, to_extracted_fields
+from translog_quote.domain.extraction import ExtractionResult, FieldStatus, to_extracted_fields
 from translog_quote.domain.quotation import Approved
 from translog_quote.domain.shipment import RequestSource, ShipmentRecord, merge_shipment
 from translog_quote.domain.validation import validate_shipment
 from translog_quote.domain.workflow import QuotationRequest, RequestState
-from translog_quote.errors import IllegalTransition
+from translog_quote.errors import ContractViolation, IllegalTransition
 from translog_quote.pipeline.audit import AuditEvent, AuditEventType
 from translog_quote.pipeline.state_machine import StateMachine
 
@@ -45,7 +45,6 @@ if TYPE_CHECKING:
 
     from translog_quote.domain.clarification import ClarificationMessage, UnresolvedPlace
     from translog_quote.domain.email import RawEmail
-    from translog_quote.domain.extraction import ExtractionResult
     from translog_quote.domain.shipment import FieldName, MergeResult
     from translog_quote.domain.validation import ValidationResult
     from translog_quote.pipeline.audit import AuditSink
@@ -60,6 +59,16 @@ DEFAULT_MAX_ROUNDS = 3
 SILENT_REPLY_NOTE = (
     "The client replied to the clarification, but the reply stated nothing that "
     "answers it. Asking the same question again will not resolve it."
+)
+
+#: Operator-facing reason when a message could not be read into the extraction
+#: contract at all — malformed model output, or an impossible value the contract
+#: rejects (e.g. a non-positive weight or piece count). Deliberately generic and
+#: carries no email content: the original message is preserved for the operator
+#: to open, and the audit trail never copies the client's correspondence.
+EXTRACTION_FAILED_NOTE = (
+    "This message could not be read into a shipment: the extraction produced a "
+    "malformed or invalid result. A person must review the original email."
 )
 
 #: How long a request is held open after a client reply that answered nothing.
@@ -199,7 +208,24 @@ class ClarificationWorkflow:
         )
 
         # --- the model's only involvement -------------------------------------
-        extraction = self._extractor.extract_shipment(email.body_text)
+        try:
+            extraction = self._extractor.extract_shipment(email.body_text)
+        except ContractViolation:
+            # The model's output could not be read into the extraction contract —
+            # malformed JSON, or an impossible value the contract rejects (a
+            # non-positive weight or piece count, a zero dimension). That is one
+            # message's problem, not the mailbox's: it is handed to a person here
+            # and returned as a normal (MANUAL_REVIEW) outcome, so the caller
+            # records the thread and moves on. Previously this exception escaped
+            # `handle`, aborted the whole poll, and — because the message was
+            # never recorded — was re-fetched and re-raised on every cycle, a
+            # single bad email wedging the entire mailbox.
+            #
+            # Scoped to ContractViolation on purpose: a *transient* extractor
+            # failure (a network blip, a provider outage) is a different error
+            # class and is deliberately NOT caught here, so it still propagates
+            # and retries rather than being quarantined against a person.
+            return self._extraction_failed(request_id, email, state, record)
         self._emit(
             request_id,
             AuditEventType.EXTRACTION_CALLED,
@@ -642,6 +668,63 @@ class ClarificationWorkflow:
         return approval
 
     # -------------------------------------------------------------- helpers --
+
+    def _extraction_failed(
+        self,
+        request_id: str,
+        email: RawEmail,
+        state: RequestState,
+        record: ShipmentRecord,
+    ) -> TurnOutcome:
+        """Hand one message that could not be extracted to a person, visibly.
+
+        Called only for a ``ContractViolation`` from extraction. It records the
+        request in ``MANUAL_REVIEW`` with an operator-visible reason and returns
+        a well-formed ``TurnOutcome`` (empty extraction, nothing merged) so the
+        ordinary caller path records the thread, commits the request, and moves
+        to the next message — the failure is contained to this one email.
+
+        The hand-over goes through the state machine like every other one. A
+        first-contact enquiry is at ``RECEIVED`` (the new ``RECEIVED ->
+        MANUAL_REVIEW`` edge); a failed reply is at ``CLARIFICATION_SENT`` or
+        later, which already reach ``MANUAL_REVIEW``. A request already terminal
+        (a reply to a closed thread) stays put — ``_advance`` is a no-op when the
+        state cannot legally move — and is still recorded, so it is never
+        re-fetched and re-raised.
+        """
+        if state is not RequestState.MANUAL_REVIEW and self._machine.can_transition(
+            state, RequestState.MANUAL_REVIEW
+        ):
+            state = self._advance(request_id, state, RequestState.MANUAL_REVIEW)
+        self._emit(
+            request_id,
+            AuditEventType.MANUAL_REVIEW_ESCALATED,
+            {"notes": [EXTRACTION_FAILED_NOTE], "reason": "extraction_contract_violation"},
+        )
+        self._store.save_request(
+            QuotationRequest(
+                request_id=request_id,
+                state=state,
+                record=record,
+                client_address=email.from_address,
+            )
+        )
+        empty = ExtractionResult()
+        merge = merge_shipment(record, to_extracted_fields(empty))
+        validation = validate_shipment(record)
+        analysis = identify_unresolved(validation, empty, merge.conflicts)
+        return TurnOutcome(
+            request_id=request_id,
+            state=state,
+            record=record,
+            extraction=empty,
+            merge=merge,
+            validation=validation,
+            analysis=analysis,
+            clarification=None,
+            round_number=self._rounds.get(request_id, 0),
+            escalation_notes=(EXTRACTION_FAILED_NOTE,),
+        )
 
     def _send_followup(
         self,

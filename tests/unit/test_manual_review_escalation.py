@@ -38,9 +38,11 @@ from translog_quote.domain.email import RawEmail
 from translog_quote.domain.extraction import ExtractedValue, ExtractionResult
 from translog_quote.domain.shipment import CargoDimensions, DeliveryType
 from translog_quote.domain.workflow import RequestState
+from translog_quote.errors import ContractViolation
 from translog_quote.interface.web.live_serialize import request_detail, request_summary
 from translog_quote.interface.web.live_session import LiveSession
 from translog_quote.pipeline.clarification_loop import (
+    EXTRACTION_FAILED_NOTE,
     FOLLOWUP_WINDOW,
     FOLLOWUP_WINDOW_EXPIRED_NOTE,
     SILENT_REPLY_NOTE,
@@ -576,3 +578,137 @@ def test_repeated_polls_after_the_escalation_change_nothing(settings: Settings) 
     assert only(session).state is settled  # type: ignore[attr-defined]
     assert sink.sent == sent, "no duplicate email left the mailbox"
     assert len(session.audit.events) == events, "and no duplicate evidence was recorded"
+
+
+# --- a malformed email must not poison the whole poll ---------------------------
+#
+# Edge Test 7, reproduced end to end: a first-contact enquiry with impossible
+# values made extraction raise ContractViolation, which aborted the entire poll
+# cycle and — because the message was never recorded — was re-fetched and
+# re-raised forever, so later valid enquiries never became requests. The fix
+# contains the failure to the one message and keeps the poll going.
+
+MALFORMED = RawEmail(
+    message_id="<malformed-numbers@mail.example.com>",
+    from_address="client@example.com",
+    subject="Air Freight Quote - Mumbai to Dubai",
+    body_text="-5 pieces, 0 kg, 0 x 30 x 30 inches, Mumbai to Dubai",
+    received_at=datetime(2026, 9, 1, 9, 0, tzinfo=UTC),
+)
+#: A valid enquiry that arrives AFTER the malformed one, so a poll that died on
+#: the malformed message would never reach it. Missing only dimensions, so a
+#: clean run leaves it awaiting a clarification.
+VALID_AFTER = RawEmail(
+    message_id="<valid-after-malformed@mail.example.com>",
+    from_address="client2@example.com",
+    subject="Air Freight Quote - Bengaluru to Milan",
+    body_text="Bengaluru to Milan enquiry, details below.",
+    received_at=datetime(2026, 9, 1, 9, 5, tzinfo=UTC),
+)
+
+
+class PoisonExtractor:
+    """Raises ContractViolation for one specific body; scripted for the rest.
+
+    Mirrors the live failure: the model's output for the malformed email cannot
+    be read into the contract, while other emails extract normally."""
+
+    def __init__(self, poison_body: str, *results: ExtractionResult) -> None:
+        self._poison = poison_body
+        self._results = list(results)
+        self.calls: list[str] = []
+
+    def extract_shipment(self, text: str) -> ExtractionResult:
+        self.calls.append(text)
+        if text == self._poison:
+            raise ContractViolation("extracted pcs must be positive, got -5")
+        return self._results.pop(0)
+
+    def read_client_intent(self, text: str):  # type: ignore[no-untyped-def]
+        raise NotImplementedError
+
+
+def _poison_session(settings: Settings, sink: CollectingEmailSink, extractor: PoisonExtractor):  # type: ignore[no-untyped-def]
+    return LiveSession(
+        settings,
+        source=StubSource(MALFORMED, VALID_AFTER),  # type: ignore[arg-type]
+        sink=sink,
+        extractor=extractor,  # type: ignore[arg-type]
+        resolver=StatedLocationResolver(),
+    )
+
+
+def _malformed(session: LiveSession):  # type: ignore[no-untyped-def]
+    return next(r for r in session.requests.values() if r.state is RequestState.MANUAL_REVIEW)
+
+
+def _valid(session: LiveSession):  # type: ignore[no-untyped-def]
+    return next(r for r in session.requests.values() if r.state is RequestState.NEEDS_INFO)
+
+
+def test_one_malformed_email_does_not_abort_the_poll(settings: Settings) -> None:
+    """The poll completes; the malformed enquiry is handed to a person with a
+    reason, and the later valid enquiry is processed in the SAME poll."""
+    sink = CollectingEmailSink()
+    extractor = PoisonExtractor(MALFORMED.body_text, enquiry_extraction())
+    session = _poison_session(settings, sink, extractor)
+
+    session.poll()  # must not raise
+
+    assert len(session.requests) == 2, "both messages became requests"
+    malformed = _malformed(session)
+    assert EXTRACTION_FAILED_NOTE in malformed.manual_review_notes  # type: ignore[attr-defined]
+    valid = _valid(session)
+    assert valid.awaiting_clarification_approval is True, "the valid enquiry ran normally"  # type: ignore[attr-defined]
+
+
+def test_the_malformed_email_is_not_reprocessed(settings: Settings) -> None:
+    """2. It is extracted exactly once, then recorded, so later polls skip it —
+    not re-fetched and re-raised forever as in production."""
+    extractor = PoisonExtractor(MALFORMED.body_text, enquiry_extraction())
+    session = _poison_session(settings, CollectingEmailSink(), extractor)
+
+    session.poll()
+    after_first = extractor.calls.count(MALFORMED.body_text)
+    session.poll()
+    session.poll()
+
+    assert after_first == 1
+    assert extractor.calls.count(MALFORMED.body_text) == 1, "never re-extracted"
+
+
+def test_the_malformed_escalation_is_persisted_and_audited(settings: Settings) -> None:
+    """3 & 4. The hand-over reaches the durable store and the audit trail, so the
+    operator sees why."""
+    session = _poison_session(
+        settings, CollectingEmailSink(), PoisonExtractor(MALFORMED.body_text, enquiry_extraction())
+    )
+    session.poll()
+
+    stored = [r for r in session._durable.all_requests() if r.state is RequestState.MANUAL_REVIEW]
+    assert stored, "the malformed request is committed to the durable store"
+    escalations = [
+        e
+        for e in session.audit.events
+        if e.event.value == "manual_review_escalated"
+        and e.detail.get("reason") == "extraction_contract_violation"
+    ]
+    assert len(escalations) == 1
+
+
+def test_a_restart_does_not_let_the_malformed_email_poison_again(settings: Settings) -> None:
+    """5. A fresh process over the same durable store does not re-extract or
+    re-raise the malformed message — it is already recorded."""
+    first = PoisonExtractor(MALFORMED.body_text, enquiry_extraction())
+    _poison_session(settings, CollectingEmailSink(), first).poll()
+
+    # New process: same settings (same state dir -> same durable store), fresh
+    # extractor and empty in-memory dedupe.
+    reborn = PoisonExtractor(MALFORMED.body_text, enquiry_extraction())
+    session2 = _poison_session(settings, CollectingEmailSink(), reborn)
+    session2.poll()  # must not raise
+
+    assert reborn.calls.count(MALFORMED.body_text) == 0, "not re-extracted after restart"
+    assert [r for r in session2._durable.all_requests() if r.state is RequestState.MANUAL_REVIEW], (
+        "the malformed request is still MANUAL_REVIEW after restart"
+    )

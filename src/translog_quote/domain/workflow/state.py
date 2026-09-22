@@ -56,7 +56,18 @@ TERMINAL_STATES: frozenset[RequestState] = frozenset(
 
 
 TRANSITIONS: dict[RequestState, frozenset[RequestState]] = {
-    RequestState.RECEIVED: frozenset({RequestState.EXTRACTED, RequestState.FAILED}),
+    RequestState.RECEIVED: frozenset(
+        {
+            RequestState.EXTRACTED,
+            RequestState.FAILED,
+            # A first-contact enquiry whose extraction cannot be read into the
+            # contract at all (malformed model output, or an impossible value the
+            # contract rejects) has no shipment to advance and nothing to ask. It
+            # is handed to a person rather than allowed to crash the poll and be
+            # re-fetched forever — the poison-message dead end this edge closes.
+            RequestState.MANUAL_REVIEW,
+        }
+    ),
     RequestState.EXTRACTED: frozenset(
         {
             RequestState.VALIDATED,
