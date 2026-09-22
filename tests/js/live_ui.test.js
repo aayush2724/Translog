@@ -413,7 +413,7 @@ function bandHeadings(holder) {
     .map((n) => n.textContent);
 }
 
-check("the dashboard shows only this session's requests, with no counters", () => {
+check("the dashboard shows this session's requests under a named Active band", () => {
   const t = load();
   t.ui.snap = snapshotWith([request({ request_id: "R-NEW" })], { active: true, following: 1 });
   t.renderDashboard();
@@ -421,8 +421,9 @@ check("the dashboard shows only this session's requests, with no counters", () =
 
   eq(/R-NEW/.test(text), true, "the request is on the page");
   eq(/Earlier enquiries/.test(text), false, "no band of historical work exists any more");
-  eq(/request\(s\)/.test(text), false, "no counter");
-  eq(bandHeadings(t.holderFor("dashboard-list")).length, 0, "no subheading for a single band");
+  eq(/request\(s\)/.test(text), false, "no legacy 'N request(s)' counter");
+  eq(bandHeadings(t.holderFor("dashboard-list")).length, 1, "one band heading: Active");
+  eq(/Active \(1\)/.test(text), true, "the Active band is labelled with its count");
 });
 
 check("a non-enquiry is never rendered — unrelated mail is filtered upstream", () => {
@@ -438,7 +439,8 @@ check("a non-enquiry is never rendered — unrelated mail is filtered upstream",
   t.renderDashboard();
   const text = t.holderFor("dashboard-list").textContent;
 
-  eq(bandHeadings(t.holderFor("dashboard-list")).length, 0, "no 'Other messages' band");
+  eq(bandHeadings(t.holderFor("dashboard-list")).length, 1, "only the Active band — no 'Other messages' band");
+  eq(/Active \(1\)/.test(text), true, "only the one enquiry is counted in the Active band");
   eq(/R-1/.test(text), true, "the enquiry is shown");
   eq(/R-2/.test(text), false, "the non-enquiry is not exposed");
 });

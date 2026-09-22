@@ -17,7 +17,7 @@ import http.client
 import json
 import tempfile
 import threading
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1936,6 +1936,64 @@ def test_a_declined_request_leaves_the_dashboard_too(after_reply: LiveSession) -
     after_reply.decide(request_id, choice="decline", by=APPROVER, reason="not this time")
 
     assert live_serialize.snapshot(after_reply)["requests"] == []
+
+
+def test_a_settled_request_moves_into_history(after_reply: LiveSession) -> None:
+    """Two bands only: a settled request leaves Active and appears in History,
+    still inspectable, rather than vanishing from the desk entirely."""
+    request_id = next(iter(after_reply.requests))
+    after_reply.decide(request_id, choice="approve", by=APPROVER)
+
+    snap = live_serialize.snapshot(after_reply)
+    assert snap["requests"] == []  # gone from Active
+    history = snap["history"]
+    assert isinstance(history, list)
+    assert any(row["request_id"] == request_id for row in history)  # type: ignore[index]
+    demo = snap["demonstration"]
+    assert isinstance(demo, dict)
+    assert demo["history"] == 1
+
+
+def test_active_requests_are_sorted_newest_activity_first(
+    settings: Settings, sink: CollectingEmailSink
+) -> None:
+    """Active leads with the most recent activity, whatever the insertion order —
+    a reply-bumped request rises above an older untouched one."""
+    from translog_quote.domain.email import RawEmail
+    from translog_quote.domain.shipment import RequestSource, ShipmentRecord
+    from translog_quote.domain.validation import validate_shipment
+    from translog_quote.interface.web.live_session import LiveRequest
+
+    session = session_for(settings, sink, emails=(), extractions=())
+
+    def _add_active(rid: str, at: datetime) -> None:
+        record = ShipmentRecord(request_id=rid, source=RequestSource.EMAIL)
+        email = RawEmail(
+            message_id=f"<{rid}@x>",
+            from_address="client@example.com",
+            subject="Rate please",
+            body_text="body",
+            received_at=at,
+        )
+        session.requests[rid] = LiveRequest(
+            request_id=rid,
+            client_address="client@example.com",
+            state=RequestState.NEEDS_INFO,
+            record=record,
+            validation=validate_shipment(record),
+            enquiry=email,
+            latest_email=email,
+        )
+        session._demonstration.include(rid)
+
+    base = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
+    _add_active("R-old", base)
+    _add_active("R-new", base + timedelta(hours=2))
+    _add_active("R-mid", base + timedelta(hours=1))
+
+    reqs = live_serialize.snapshot(session)["requests"]
+    assert isinstance(reqs, list)
+    assert [row["request_id"] for row in reqs] == ["R-new", "R-mid", "R-old"]  # type: ignore[index]
 
 
 def test_a_settled_request_is_still_readable_by_id(after_reply: LiveSession) -> None:

@@ -419,7 +419,13 @@ function renderDashboard() {
      is dropped from the view rather than exposed as a raw Gmail message. */
   const enquiries = snap.requests.filter((r) => r.is_enquiry);
 
-  const groups = [el("div", { class: "request-list" }, ...enquiries.map(requestCard))];
+  /* Two bands, both named: Active (work still in play, newest first — the
+     backend sorts) and History (terminal/completed, collapsed below). */
+  const activeSection = el("section", { class: "active-band" },
+    el("h2", { class: "group-head" }, `Active (${enquiries.length})`),
+    el("div", { class: "request-list" }, ...enquiries.map(requestCard)));
+
+  const groups = [activeSection];
 
   if (historySection) {
     groups.push(historySection);

@@ -12,6 +12,7 @@ weight or a transit time is spelled.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from translog_quote.domain.quotation import SIMULATED_RATE_NOTICE
@@ -707,6 +708,25 @@ def request_detail(session: LiveSession, request: LiveRequest) -> Json:
     }
 
 
+#: A floor for a request that carries no live email (one restored from the store
+#: on startup), so it sorts to the end of the newest-first active list rather than
+#: breaking the comparison against tz-aware email timestamps.
+_OLDEST_ACTIVITY = datetime.min.replace(tzinfo=UTC)
+
+
+def _activity_at(request: LiveRequest) -> datetime:
+    """When this request last did something — the key the active list sorts on.
+
+    The most recent email the desk holds for it (a reply lifts it above an older,
+    untouched enquiry), then its enquiry, and finally the floor for a restored
+    request with no live email. This is display ordering only; it reads state,
+    changes none."""
+    for email in (request.latest_email, request.reply, request.enquiry):
+        if email is not None:
+            return email.received_at
+    return _OLDEST_ACTIVITY
+
+
 def snapshot(session: LiveSession | MultiAccountSession, *, selected: str | None = None) -> Json:
     """Everything the browser may know, in one shape.
 
@@ -739,8 +759,17 @@ def snapshot(session: LiveSession | MultiAccountSession, *, selected: str | None
         followed = list(session.requests.values())
     else:
         followed = [r for r in session.requests.values() if session.in_demonstration(r.request_id)]
-    active = [r for r in followed if not r.is_settled and not r.history]
-    history = [r for r in followed if r.history]
+    # Two groups only: Active (anything still in play, any age) and History
+    # (terminal/completed — a quotation sent, a decline, a no-rates close, or a
+    # request restored from the store already terminal). A live-settled request
+    # therefore moves into History rather than vanishing. Active leads with the
+    # newest activity. No age cutoff: operations follows the whole store.
+    active = sorted(
+        (r for r in followed if not r.is_settled and not r.history),
+        key=_activity_at,
+        reverse=True,
+    )
+    history = [r for r in followed if r.is_settled or r.history]
     chosen = session.requests.get(selected) if selected else None
     demonstration = session.demonstration
     return {
@@ -800,7 +829,7 @@ def _multi_snapshot(session: MultiAccountSession, *, selected: str | None = None
     demonstration membership and audit timeline are that account's, and each row
     is tagged with its ``account``. The top-level blocks aggregate across
     accounts; the audit is the merged, time-ordered trail."""
-    active_rows: list[Json] = []
+    active_pairs: list[tuple[datetime, Json]] = []
     history_rows: list[Json] = []
     for account_id, sess in session.sessions.items():
         if sess.operations_mode:
@@ -808,14 +837,17 @@ def _multi_snapshot(session: MultiAccountSession, *, selected: str | None = None
         else:
             followed = [r for r in sess.requests.values() if sess.in_demonstration(r.request_id)]
         for request in followed:
-            if request.history:
-                row = request_summary(sess, request)
-                row["account"] = account_id
+            row = request_summary(sess, request)
+            row["account"] = account_id
+            # Two groups only: History is terminal/completed (settled, or restored
+            # already terminal); Active is everything else, any age. A live-settled
+            # request moves to History rather than vanishing.
+            if request.history or request.is_settled:
                 history_rows.append(row)
-            elif not request.is_settled:
-                row = request_summary(sess, request)
-                row["account"] = account_id
-                active_rows.append(row)
+            else:
+                active_pairs.append((_activity_at(request), row))
+    # Newest activity first, across all accounts.
+    active_rows = [row for _, row in sorted(active_pairs, key=lambda pair: pair[0], reverse=True)]
 
     chosen_detail: Json | None = None
     if selected:
