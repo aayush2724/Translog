@@ -753,6 +753,7 @@ class FakeDriver:
         settle_diag: dict[str, object] | None = None,
         iata_needs_selection: bool = False,
         iata_options: list[str] | None = None,
+        marketing_overlay: bool = False,
     ) -> None:
         self.rows = rows if rows is not None else []
         count = stated_count if stated_count is not None else len(self.rows)
@@ -773,6 +774,11 @@ class FakeDriver:
         # Default False so ordinary searches treat the IATA step as a no-op.
         self._iata_needs = iata_needs_selection
         self.iata_options = list(iata_options or [])
+        # HubSpot marketing overlay model: when present it intercepts pointer
+        # events, so a click on the origin field raises (as Playwright's
+        # actionability check would time out). The dismissal script removes it.
+        self._marketing_overlay = marketing_overlay
+        self.marketing_overlay_removed = False
         # What `_JS_SETTLE_DIAGNOSTICS` "sees" on the timeout path. The default is
         # a plausible still-loading results surface; tests override it to model
         # the three distinguishable causes (never-reached / genuine-empty / a
@@ -802,6 +808,10 @@ class FakeDriver:
         self.calls.append(("goto", url))
 
     def click(self, selector: str) -> None:
+        if selector == pages.ORIGIN_INPUT and self._marketing_overlay:
+            # The overlay scrim intercepts pointer events: Playwright's click
+            # actionability never succeeds and times out. Model that as a raise.
+            raise RuntimeError("origin click intercepted by the marketing overlay")
         self.calls.append(("click", selector))
         if selector == pages.COMMODITY_CONTROL:
             self._commodity_open = True  # opening the select reveals its search field
@@ -875,6 +885,11 @@ class FakeDriver:
             return self.phrase
         if "captureLegs" in script:  # _JS_EXTRACT_ALL
             return self.rows
+        if "hs-web-interactives" in script:  # _JS_DISMISS_MARKETING_OVERLAY
+            present = self._marketing_overlay
+            self._marketing_overlay = False  # removing the anchor clears the scrim
+            self.marketing_overlay_removed = present
+            return present
         raise AssertionError(f"unexpected script: {script[:60]}")
 
 
@@ -887,6 +902,37 @@ def search_with(driver: FakeDriver, query: RateQuery = QUERY) -> object:
         navigation_timeout_seconds=1,
         poll_interval_seconds=0.001,
     )
+
+
+# --- HubSpot marketing overlay is cleared before the first origin interaction ------
+
+
+def test_a_marketing_overlay_is_removed_so_the_origin_click_can_proceed() -> None:
+    """HubSpot's popup overlay intercepts pointer events, so with it present the
+    origin click would time out (modelled here as a raise). The search flow now
+    removes HubSpot's injected anchor before touching the form, so the origin
+    interaction proceeds and the search completes normally."""
+    driver = FakeDriver(rows=rows_payload(5, tabs=1), marketing_overlay=True)
+
+    result = search_with(driver)  # would raise on the origin click if not cleared
+
+    assert driver.marketing_overlay_removed is True  # the anchor was present and removed
+    # The origin field was actually interacted with (the click did not raise),
+    # and it happened after the overlay was cleared.
+    assert ("click", pages.ORIGIN_INPUT) in driver.calls
+    assert len(result.records) == 5  # type: ignore[attr-defined]
+
+
+def test_no_marketing_overlay_leaves_the_normal_flow_unchanged() -> None:
+    """When the popup is absent the dismissal is a no-op: nothing is removed and
+    the ordinary search proceeds exactly as before."""
+    driver = FakeDriver(rows=rows_payload(5, tabs=1))  # no overlay
+
+    result = search_with(driver)
+
+    assert driver.marketing_overlay_removed is False  # nothing to remove
+    assert ("click", pages.ORIGIN_INPUT) in driver.calls
+    assert len(result.records) == 5  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize("count", [0, 1, 5, 50, 200, 237])

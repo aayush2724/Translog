@@ -151,6 +151,26 @@ _JS_LOGIN_CHECK = """
 })
 """
 
+#: HubSpot injects a marketing "web interactives" popup into WebCargo on an
+#: intermittent targeting schedule. When it fires, an overlay scrim
+#: (``#hs-interactives-modal-overlay``) sits over the form and intercepts pointer
+#: events, so the very first origin-field click times out — a 30s Playwright
+#: actionability failure that fails the whole rate search. This removes HubSpot's
+#: own injected container by its STABLE id (``#hs-web-interactives-top-anchor``),
+#: taking the overlay child with it, and returns whether anything was removed so
+#: the flow can log it. Idempotent: a no-op when the popup is absent. It anchors
+#: only on the stable id (never a build-volatile generated class) and touches
+#: only the third-party marketing element — never a WebCargo field, control,
+#: consent, or authentication surface.
+_JS_DISMISS_MARKETING_OVERLAY = """
+() => {
+  const anchor = document.getElementById('hs-web-interactives-top-anchor');
+  if (!anchor) return false;
+  anchor.remove();
+  return true;
+}
+"""
+
 _JS_SET_DIMENSION_UNIT = """
 async () => {
   const fire = (el) => {
@@ -887,6 +907,21 @@ def verify_authenticated(driver: BrowserDriver, *, base_url: str, timeout_second
     )
 
 
+def _dismiss_marketing_overlay(driver: BrowserDriver) -> None:
+    """Clear HubSpot's intermittent marketing popup before touching the form.
+
+    When HubSpot's targeting fires, its popup drops a full-viewport overlay that
+    intercepts pointer events, so the first origin-field click times out (a 30s
+    Playwright actionability failure that fails the whole search). Run once
+    before the first field interaction, this removes HubSpot's own injected
+    anchor — and the overlay with it — when present, and is a no-op otherwise.
+    Read-through the existing ``evaluate`` seam; never touches a WebCargo field,
+    control, consent, or authentication surface, only the third-party overlay.
+    """
+    if driver.evaluate(_JS_DISMISS_MARKETING_OVERLAY):
+        _log.info("Removed an intercepting HubSpot marketing overlay before the search form")
+
+
 def run_rate_search(
     driver: BrowserDriver,
     query: RateQuery,
@@ -918,6 +953,11 @@ def run_rate_search(
         )
 
     verify_authenticated(driver, base_url=base_url, timeout_seconds=navigation_timeout_seconds)
+
+    # HubSpot's marketing popup, when its targeting fires, drops a full-viewport
+    # overlay that intercepts pointer events and would time out the first origin
+    # click. Clear it (if present) before touching the form; a no-op otherwise.
+    _dismiss_marketing_overlay(driver)
 
     _fill_location(
         driver, ORIGIN_INPUT, query.origin.display, timeout_seconds=navigation_timeout_seconds
