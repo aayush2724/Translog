@@ -85,6 +85,15 @@ HEIGHT_INPUT = 'input[placeholder="Height"]'
 WEIGHT_INPUT = "#weight-0"
 SEARCH_BUTTON = "button.searchFlights"
 
+#: The "Additional Information" IATA-code select. It has no stable id and its
+#: "IATA code" text lives in the field LABEL (above) and a validation message
+#: (below) — NOT in the select's own placeholder — so ``_JS_IATA_STATE`` locates
+#: the control at runtime via its label and tags it with this data attribute.
+#: Playwright then opens exactly that control by a stable marker rather than a
+#: CSS-module hash or placeholder text. No IATA code or company name is
+#: hardcoded — the value is read from the live dropdown.
+IATA_SELECT = "[data-translog-iata-target]"
+
 #: Location/commodity suggestions render into AntD dropdowns.
 #
 # The `:not(...-disabled)` is load-bearing: the origin/destination lookup is
@@ -629,6 +638,93 @@ def _selected_goods_type(driver: BrowserDriver) -> str:
     return str(value).strip() if value else ""
 
 
+#: Whether the IATA select is currently EMPTY and prompting for a choice, and —
+#: when so — TAGS that control (``data-translog-iata-target``) so Playwright can
+#: open exactly it via ``IATA_SELECT``.
+#:
+#: The control is located by its field LABEL ("IATA code"), because that is where
+#: the text lives — the select's own placeholder is blank, and the "Please select
+#: an IATA code" string is a separate validation message. From the label it walks
+#: to the nearest ``.ant-select`` and reads whether a value is committed (AntD
+#: v3 ``…selection-selected-value`` / v4 ``…selection-item``, matching
+#: ``_JS_GOODS_TYPE_SELECTED``). Empty -> tag + ``needsSelection: true``; a
+#: populated select (India origin that auto-filled the agent code) -> ``false``,
+#: left untouched. No IATA code or company name is referenced.
+_JS_IATA_STATE = """
+() => {
+  const norm = t => (t || '').replace(/\\s+/g, ' ').trim();
+  const low = t => norm(t).toLowerCase();
+  const isLabel = el =>
+    low(el.textContent).startsWith('iata code') && norm(el.textContent).length <= 24;
+  const labels = [...document.querySelectorAll('label, span, div, p')].filter(isLabel);
+  for (const lbl of labels) {
+    let node = lbl.closest('.ant-form-item, .ant-row') || lbl.parentElement;
+    let sel = null;
+    for (let i = 0; i < 4 && node; i++) {
+      sel = node.querySelector('.ant-select');
+      if (sel) break;
+      node = node.parentElement;
+    }
+    if (!sel) continue;
+    const chosen = sel.querySelector(
+      '.ant-select-selection-selected-value, .ant-select-selection-item'
+    );
+    if (chosen && norm(chosen.textContent)) return { needsSelection: false };
+    sel.setAttribute('data-translog-iata-target', '1');
+    return { needsSelection: true };
+  }
+  return { needsSelection: false };
+}
+"""
+
+
+def _iata_needs_selection(driver: BrowserDriver) -> bool:
+    state = driver.evaluate(_JS_IATA_STATE)
+    return bool(isinstance(state, dict) and state.get("needsSelection"))
+
+
+def _select_iata_if_required(driver: BrowserDriver, *, timeout_seconds: float) -> str | None:
+    """Satisfy WebCargo's IATA-code field when a foreign origin left it empty.
+
+    India-origin searches auto-populate the agent IATA code and the field is
+    left exactly as WebCargo set it (``None`` returned, nothing touched). A
+    foreign origin (e.g. LHR) can leave the field empty, and WebCargo then blocks
+    Search & Book until an IATA code is chosen from its dropdown.
+
+    Per the reviewed interim policy, any valid option is acceptable, so this
+    opens the empty select and takes the **first enabled** option the provider
+    offers — deterministic, and with NO specific code or company name hardcoded
+    (the value comes from the live dropdown). It fails closed with a
+    ``ContractViolation`` if the field is empty but the provider offers no
+    selectable option, or if the click does not register — never leaving an
+    unconfirmed IATA to silently hang the search. Returns the chosen option text.
+    """
+    if not _iata_needs_selection(driver):
+        return None  # already populated (India origin) or no IATA field — leave unchanged
+
+    driver.click(IATA_SELECT)
+    if not driver.wait_visible(DROPDOWN_OPTION, timeout_seconds=timeout_seconds):
+        raise ContractViolation(
+            "WebCargo requires an IATA selection for this origin but its dropdown "
+            "offered no selectable option"
+        )
+    options = [text.strip() for text in driver.option_texts(DROPDOWN_OPTION) if text.strip()]
+    if not options:
+        raise ContractViolation(
+            "WebCargo requires an IATA selection for this origin but no valid IATA "
+            "option was available to choose"
+        )
+    chosen = options[0]
+    driver.click_option(DROPDOWN_OPTION, chosen)
+    if _iata_needs_selection(driver):
+        raise ContractViolation(
+            f"the IATA selection {chosen!r} did not register; the search will not "
+            "run without a confirmed IATA code"
+        )
+    _log.info("WebCargo IATA field was empty; selected first available option %r", chosen)
+    return chosen
+
+
 def _goods_type_query(label: str) -> str:
     """The autocomplete *filter query* for a Goods Type ``label``.
 
@@ -848,6 +944,10 @@ def run_rate_search(
     weight_state = driver.evaluate(_JS_SET_WEIGHT_TOTAL_KG)
     _require_ok(weight_state, expect_unit="KG", what="weight unit")
     driver.fill(WEIGHT_INPUT, _figure(query.weight_kg))
+
+    # Foreign origins (e.g. LHR) can leave the required IATA field empty, which
+    # blocks Search & Book; India origins auto-populate it and are left untouched.
+    _select_iata_if_required(driver, timeout_seconds=navigation_timeout_seconds)
 
     driver.click(SEARCH_BUTTON)
 

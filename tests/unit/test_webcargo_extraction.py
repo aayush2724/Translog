@@ -751,6 +751,8 @@ class FakeDriver:
         weight_unit: str = "KG",
         never_settles: bool = False,
         settle_diag: dict[str, object] | None = None,
+        iata_needs_selection: bool = False,
+        iata_options: list[str] | None = None,
     ) -> None:
         self.rows = rows if rows is not None else []
         count = stated_count if stated_count is not None else len(self.rows)
@@ -767,6 +769,10 @@ class FakeDriver:
         self.dimension_unit = dimension_unit
         self.weight_unit = weight_unit
         self.never_settles = never_settles
+        # IATA select model: empty (needs a choice) only for a foreign origin.
+        # Default False so ordinary searches treat the IATA step as a no-op.
+        self._iata_needs = iata_needs_selection
+        self.iata_options = list(iata_options or [])
         # What `_JS_SETTLE_DIAGNOSTICS` "sees" on the timeout path. The default is
         # a plausible still-loading results surface; tests override it to model
         # the three distinguishable causes (never-reached / genuine-empty / a
@@ -799,6 +805,8 @@ class FakeDriver:
         self.calls.append(("click", selector))
         if selector == pages.COMMODITY_CONTROL:
             self._commodity_open = True  # opening the select reveals its search field
+        if selector == pages.IATA_SELECT:
+            self._pending_options = list(self.iata_options)  # opening reveals its options
 
     def fill(self, selector: str, text: str) -> None:
         self.calls.append(("fill", f"{selector}={text}"))
@@ -827,6 +835,8 @@ class FakeDriver:
     def click_option(self, selector: str, text: str) -> None:
         self.calls.append(("option", text))
         self._goods_type_selected = text  # the AntD selected item commits
+        if text in self.iata_options:
+            self._iata_needs = False  # the IATA choice registered
 
     def evaluate(self, script: str, argument: object = None) -> object:
         if "departureDate" in script:  # _date_input_value read
@@ -847,6 +857,8 @@ class FakeDriver:
                 "totalMode": False,
                 "reason": f"weight not in Total KG mode ({self.weight_unit})",
             }
+        if "needsSelection" in script:  # _JS_IATA_STATE
+            return {"needsSelection": self._iata_needs}
         if "bodyTextSample" in script:  # _JS_SETTLE_DIAGNOSTICS (timeout-only)
             return dict(self.settle_diag)
         if "settled" in script:  # _JS_RESULTS_STATE (wait-for-settle)
@@ -1164,6 +1176,67 @@ def test_settle_diagnostics_are_length_bounded() -> None:
     message = str(exc_info.value)
     assert "…" in message  # the body sample was truncated
     assert "x" * 5000 not in message  # never the whole thing
+
+
+# --- IATA selection for foreign origins (empty field) ------------------------------
+
+LHR_IATA_OPTIONS = [
+    "1431005/0016",
+    "1431005/0005 (India / Translog Express Pvt. Ltd. - Mumbai)",
+]
+
+
+def test_a_populated_iata_field_is_left_untouched() -> None:
+    """India origins auto-populate the IATA field: nothing is opened or clicked."""
+    driver = FakeDriver(iata_needs_selection=False)
+
+    result = pages._select_iata_if_required(driver, timeout_seconds=1)
+
+    assert result is None
+    assert ("click", pages.IATA_SELECT) not in driver.calls
+
+
+def test_an_empty_iata_field_selects_the_first_available_option() -> None:
+    """A foreign origin leaves it empty; the first enabled option is chosen and
+    the exact value comes from the live dropdown (never hardcoded)."""
+    driver = FakeDriver(iata_needs_selection=True, iata_options=LHR_IATA_OPTIONS)
+
+    result = pages._select_iata_if_required(driver, timeout_seconds=1)
+
+    assert result == "1431005/0016"
+    assert ("click", pages.IATA_SELECT) in driver.calls
+    assert ("option", "1431005/0016") in driver.calls
+
+
+def test_multiple_iata_options_pick_the_deterministic_first() -> None:
+    driver = FakeDriver(
+        iata_needs_selection=True, iata_options=["AAA/1", "BBB/2", "CCC/3"]
+    )
+
+    assert pages._select_iata_if_required(driver, timeout_seconds=1) == "AAA/1"
+
+
+def test_an_empty_iata_field_with_no_options_fails_closed() -> None:
+    driver = FakeDriver(iata_needs_selection=True, iata_options=[])
+
+    with pytest.raises(ContractViolation, match="IATA"):
+        pages._select_iata_if_required(driver, timeout_seconds=0.01)
+
+
+class _IataClickDoesNotRegister(FakeDriver):
+    """Clicking an option never commits the IATA value — the search must refuse."""
+
+    def click_option(self, selector: str, text: str) -> None:
+        self.calls.append(("option", text))  # recorded, but _iata_needs stays True
+
+
+def test_an_iata_selection_that_does_not_register_fails_closed() -> None:
+    driver = _IataClickDoesNotRegister(
+        iata_needs_selection=True, iata_options=LHR_IATA_OPTIONS
+    )
+
+    with pytest.raises(ContractViolation, match="did not register"):
+        pages._select_iata_if_required(driver, timeout_seconds=1)
 
 
 # --- the authenticated-shell probe (read-only; never a login) ----------------------
