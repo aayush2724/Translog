@@ -190,6 +190,49 @@ def test_vr12_a_stated_ship_date_passes() -> None:
     assert ValidationRuleId.SHIP_DATE_REQUIRED not in {i.rule_id for i in result.issues}
 
 
+# --- VR-13. Shipment date must not be in the past (when today is supplied) ----
+
+_TODAY = date(2026, 9, 23)
+
+
+def test_vr13_a_past_ship_date_is_invalid() -> None:
+    """Defence in depth: a past date must never validate, so it can never be
+    searched on WebCargo."""
+    result = validate_shipment(_complete_record(ship_date=date(2024, 9, 26)), today=_TODAY)
+
+    assert not result.is_valid
+    issue = next(i for i in result.issues if i.rule_id == ValidationRuleId.SHIP_DATE_IN_PAST)
+    assert issue.severity is ValidationSeverity.INVALID
+    assert issue.field is FieldName.SHIP_DATE
+    assert "2024-09-26" in issue.message
+    assert result.invalid_fields == (FieldName.SHIP_DATE,)
+    assert result.missing_fields == ()
+
+
+@pytest.mark.parametrize("ship_date", [_TODAY, date(2026, 9, 24)], ids=["today", "future"])
+def test_vr13_today_or_later_passes(ship_date: date) -> None:
+    result = validate_shipment(_complete_record(ship_date=ship_date), today=_TODAY)
+
+    assert result.is_valid
+
+
+def test_vr13_is_skipped_without_today_for_existing_callers() -> None:
+    """Backward compatible: a caller that passes no date gets exactly the
+    pre-VR-13 result, past date and all."""
+    record = _complete_record(ship_date=date(2024, 9, 26))
+
+    assert validate_shipment(record).is_valid
+    assert validate_shipment(record) == validate_shipment(record, today=None)
+
+
+def test_vr13_does_not_double_report_a_missing_date() -> None:
+    result = validate_shipment(_complete_record(ship_date=None), today=_TODAY)
+
+    rule_ids = {i.rule_id for i in result.issues}
+    assert ValidationRuleId.SHIP_DATE_REQUIRED in rule_ids
+    assert ValidationRuleId.SHIP_DATE_IN_PAST not in rule_ids
+
+
 # --- Q. Multiple simultaneous missing fields --------------------------------
 
 

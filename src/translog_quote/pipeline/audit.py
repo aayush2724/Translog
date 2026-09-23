@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict
 class AuditEventType(StrEnum):
     EMAIL_RECEIVED = "email_received"
     EXTRACTION_CALLED = "extraction_called"
+    SHIP_DATE_YEAR_RESOLVED = "ship_date_year_resolved"
     RECORD_MERGED = "record_merged"
     VALIDATED = "validated"
     CLARIFICATION_DRAFTED = "clarification_drafted"

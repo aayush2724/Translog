@@ -983,6 +983,19 @@ class LiveSession:
                     "cannot run without the client's stated shipment date."
                 )
                 continue
+            # VR-13, enforced where it matters: a past departure date must never
+            # reach WebCargo. Extraction rolls a past date forward before merge,
+            # so this catches only a record that predates that fix or a date that
+            # has passed while the request waited. Loud, never a silent re-date.
+            # Only before enqueue: a job already in flight is left to finish.
+            today = self._clock.now().date()
+            if request.rate_job_id is None and request.record.ship_date < today:
+                request.rate_failure = (
+                    f"The shipment date {request.record.ship_date.isoformat()} is in "
+                    "the past; a rate search will not run for a past date. Confirm a "
+                    "current shipment date with the client."
+                )
+                continue
             # Resolve the stated places before any enqueue. Pure, deterministic,
             # no I/O — safe in the web process. A place that cannot be resolved
             # to an airport without guessing becomes a client clarification, not
@@ -1281,7 +1294,7 @@ class LiveSession:
         stored = self._working.get_request(request.request_id)
         if stored is not None:
             request.record = stored.record
-            request.validation = validate_shipment(stored.record)
+            request.validation = validate_shipment(stored.record, today=self._clock.now().date())
             request.state = stored.state
         if draft is None:
             # Over-budget: the place never resolved, so the router handed the
@@ -1539,7 +1552,7 @@ class LiveSession:
             client_address=stored.client_address,
             state=state,
             record=stored.record,
-            validation=validate_shipment(stored.record),
+            validation=validate_shipment(stored.record, today=self._clock.now().date()),
             last_message_id=message_ids[-1] if message_ids else None,
             reply_received=len(message_ids) > 1,
             messages=message_ids,

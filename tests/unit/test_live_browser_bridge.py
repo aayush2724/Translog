@@ -37,6 +37,7 @@ from tests.unit.test_gmail_thread import (
 )
 from tests.unit.test_web_live import APPROVER, GrowingSource
 
+from translog_quote.adapters.clock import FixedClock
 from translog_quote.adapters.email import CollectingEmailSink
 from translog_quote.config import Settings, WebCargoMode
 from translog_quote.domain.extraction import ExtractedValue
@@ -179,6 +180,9 @@ def _validated_session(settings: Settings, sink: CollectingEmailSink) -> LiveSes
         source=GrowingSource((ENQUIRY,), (ENQUIRY, REPLY)),  # type: ignore[arg-type]
         sink=sink,
         extractor=ScriptedExtractor(_RESOLVABLE_ENQUIRY, REPLY_EXTRACTION),
+        # Pinned before the scripted 2026-09-15 ship date: on the wall clock that
+        # date is now in the past and would (correctly) be rolled forward.
+        clock=FixedClock(),
     )
 
 
@@ -606,3 +610,59 @@ def test_the_job_request_carries_the_records_piece_count() -> None:
     assert job.origin == "Delhi, India"  # stated wording preserved, unresolved here
     assert job.goods_type == "0000 - General Cargo"  # the decided label, carried verbatim
     assert job.to_query().pieces == 8
+
+
+# --- VR-13 at the gate: a past ship date never reaches WebCargo -----------------
+
+
+def test_a_validated_request_with_a_past_ship_date_is_never_enqueued(
+    browser_settings: Settings, sink: CollectingEmailSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record stored before the year fix (production: 2024-09-26) is still
+    VALIDATED. The gate refuses it loudly instead of searching a past date."""
+    from datetime import UTC, datetime
+
+    from translog_quote.domain.shipment import DeliveryType, RequestSource, ShipmentRecord
+    from translog_quote.domain.validation import validate_shipment
+    from translog_quote.interface.web.live_session import LiveRequest
+
+    spy = QueueSpy()
+    _install_queue(monkeypatch, spy)
+    _forbid_demo_provider(monkeypatch)
+    session = LiveSession(
+        browser_settings,
+        source=GrowingSource(()),  # type: ignore[arg-type]
+        sink=sink,
+        extractor=ScriptedExtractor(),
+        clock=FixedClock(datetime(2026, 9, 23, 10, 0, tzinfo=UTC)),
+    )
+    record = ShipmentRecord(
+        request_id="R-PAST",
+        source=RequestSource.EMAIL,
+        origin="Chennai (MAA)",
+        destination="Singapore (SIN)",
+        weight_kg=500.0,
+        dimensions_in=CargoDimensions(length=34, width=24, height=6),
+        commodity="Engineering components",
+        cargo_type="Non-Haz",
+        is_chemical=False,
+        pcs=10,
+        delivery_type=DeliveryType.AIRPORT,
+        ship_date=date(2024, 9, 26),
+    )
+    session.requests["R-PAST"] = LiveRequest(
+        request_id="R-PAST",
+        client_address="client@example.com",
+        state=RequestState.VALIDATED,
+        record=record,
+        validation=validate_shipment(record),
+    )
+
+    session._search_rates_for_validated()
+
+    request = session.requests["R-PAST"]
+    assert spy.enqueued == []
+    assert request.rate_job_id is None
+    assert request.rate_failure is not None
+    assert "2024-09-26" in request.rate_failure
+    assert "past" in request.rate_failure

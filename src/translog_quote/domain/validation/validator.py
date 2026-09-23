@@ -12,6 +12,8 @@ for the latter.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from translog_quote.domain.shipment import DeliveryType, ShipmentRecord
 from translog_quote.domain.validation.model import (
     FieldName,
@@ -20,6 +22,9 @@ from translog_quote.domain.validation.model import (
     ValidationRuleId,
     ValidationSeverity,
 )
+
+if TYPE_CHECKING:
+    from datetime import date
 
 _MISSING = ValidationSeverity.MISSING
 _INVALID = ValidationSeverity.INVALID
@@ -180,6 +185,25 @@ def _check_ship_date(record: ShipmentRecord) -> ValidationIssue | None:
     )
 
 
+def _check_ship_date_not_past(record: ShipmentRecord, today: date | None) -> ValidationIssue | None:
+    """VR-13: a shipment date before ``today`` cannot be searched or quoted.
+
+    Defence in depth behind ``domain.extraction.resolve_ship_date``, which rolls a
+    past extracted date forward before it is merged: this rule catches a past
+    date that arrives any other way (an older stored record, a date that has
+    since passed). Only applied when the caller supplies ``today`` — the
+    validator stays a pure function of its inputs and never reads a clock.
+    """
+    if today is None or record.ship_date is None or record.ship_date >= today:
+        return None
+    return ValidationIssue(
+        rule_id=ValidationRuleId.SHIP_DATE_IN_PAST,
+        field=FieldName.SHIP_DATE,
+        severity=_INVALID,
+        message=f"Shipment date {record.ship_date.isoformat()} is in the past.",
+    )
+
+
 def _check_address_required_for_door(record: ShipmentRecord) -> ValidationIssue | None:
     """VR-11: conditional on ``delivery_type`` being exactly DOOR."""
     if record.delivery_type is not DeliveryType.DOOR:
@@ -208,12 +232,16 @@ _RULES = (
 )
 
 
-def validate_shipment(record: ShipmentRecord) -> ValidationResult:
+def validate_shipment(record: ShipmentRecord, *, today: date | None = None) -> ValidationResult:
     """Run every rule against ``record`` and report every finding.
 
+    ``today`` enables VR-13 (a shipment date must not be in the past). Omitted,
+    the rule is skipped and the result is exactly what it was before VR-13.
+
     Pure: no I/O, no model call, no mutation of ``record``. Calling this twice on
-    an unchanged record always returns an equal result.
+    an unchanged record and the same ``today`` always returns an equal result.
     """
     findings = [rule(record) for rule in _RULES]
+    findings.append(_check_ship_date_not_past(record, today))  # VR-13, date-dependent
     issues = tuple(issue for issue in findings if issue is not None)
     return ValidationResult(issues=issues)

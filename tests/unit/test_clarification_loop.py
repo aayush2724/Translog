@@ -1158,3 +1158,105 @@ def test_each_account_sends_its_followup_through_its_own_sink() -> None:
     # Each follow-up went out on its own account's sink and nowhere else.
     assert all("30 minutes" in m.body_text for m in sink_a.sent[1:])
     assert all("30 minutes" in m.body_text for m in sink_b.sent[1:])
+
+
+# --- Yearless ship date: resolved before merge, VR-13 as the backstop ----------
+#
+# Production: a client replied "26th september" on 2026-09-23 and the model
+# returned 2024-09-26, which reached WebCargo. The loop now rolls a past stated
+# date forward (deterministically, on the injected clock) before merging it,
+# records the correction in the audit trail, and validates against today so a
+# past date that arrives any other way can never validate.
+
+_SEPT_23 = datetime(2026, 9, 23, 10, 0, tzinfo=UTC)
+
+
+def _events(audit: _RecordingAudit, kind: AuditEventType) -> list[AuditEvent]:
+    return [e for e in audit.events if e.event is kind]
+
+
+def test_a_past_extracted_ship_date_is_rolled_forward_before_merge() -> None:
+    audit = _RecordingAudit()
+    extraction = complete(
+        ship_date=ExtractedValue[date].stated(date(2024, 9, 26), evidence="26th september")
+    )
+    wf, _, store = _followup_workflow(extraction, clock=_AdvancingClock(_SEPT_23), audit=audit)
+
+    outcome = wf.handle(REQ, email("26th september"))
+
+    assert outcome.record.ship_date == date(2026, 9, 26)
+    assert outcome.extraction.ship_date.value == date(2026, 9, 26)
+    assert outcome.extraction.ship_date.evidence == "26th september"
+    assert outcome.state is RequestState.VALIDATED
+    stored = store.get_request(REQ)
+    assert stored is not None
+    assert stored.record.ship_date == date(2026, 9, 26)
+
+    [resolved] = _events(audit, AuditEventType.SHIP_DATE_YEAR_RESOLVED)
+    assert resolved.detail == {"from": "2024-09-26", "to": "2026-09-26"}
+    kinds = [e.event for e in audit.events]
+    assert kinds.index(AuditEventType.SHIP_DATE_YEAR_RESOLVED) < kinds.index(
+        AuditEventType.RECORD_MERGED
+    ), "resolved before the merge, not patched afterwards"
+
+
+def test_the_yearless_reply_case_validates_on_the_upcoming_date() -> None:
+    """The production thread: enquiry without a date, reply "26th september"."""
+    audit = _RecordingAudit()
+    enquiry = complete(ship_date=ExtractedValue[date].not_stated())
+    reply = ExtractionResult(
+        ship_date=ExtractedValue[date].stated(date(2024, 9, 26), evidence="26th september")
+    )
+    wf, _, _ = _followup_workflow(enquiry, reply, clock=_AdvancingClock(_SEPT_23), audit=audit)
+
+    first = wf.handle(REQ, email("Chennai to Singapore", n=1))
+    assert first.state is RequestState.NEEDS_INFO
+    approve(wf)
+    outcome = wf.handle(REQ, email("26th september", n=2))
+
+    assert outcome.state is RequestState.VALIDATED
+    assert outcome.record.ship_date == date(2026, 9, 26)
+    assert len(_events(audit, AuditEventType.SHIP_DATE_YEAR_RESOLVED)) == 1
+
+
+@pytest.mark.parametrize(
+    "ship_date",
+    [
+        ExtractedValue[date].stated(date(2026, 9, 26)),
+        ExtractedValue[date].ambiguous(note="at the earliest", evidence="at the earliest"),
+        ExtractedValue[date].not_stated(),
+    ],
+    ids=["current", "ambiguous", "not_stated"],
+)
+def test_a_current_or_unstated_ship_date_is_not_touched_or_audited(
+    ship_date: ExtractedValue[date],
+) -> None:
+    audit = _RecordingAudit()
+    extraction = complete(ship_date=ship_date)
+    wf, _, _ = _followup_workflow(extraction, clock=_AdvancingClock(_SEPT_23), audit=audit)
+
+    outcome = wf.handle(REQ, email("details"))
+
+    assert outcome.extraction.ship_date == ship_date
+    assert not _events(audit, AuditEventType.SHIP_DATE_YEAR_RESOLVED)
+
+
+def test_a_stored_date_that_has_since_passed_does_not_validate() -> None:
+    """VR-13 in the loop: the date was fine when merged, the client's reply
+    completes everything else, but by then the date is in the past. The
+    request is asked about the date again rather than validated."""
+    clock = _AdvancingClock(datetime(2026, 9, 1, 10, 0, tzinfo=UTC))
+    enquiry = complete(pcs=ExtractedValue[int].not_stated())  # ship_date 2026-09-15
+    reply = ExtractionResult(pcs=ExtractedValue[int].stated(15))
+    wf, _, _ = _followup_workflow(enquiry, reply, clock=clock)
+
+    wf.handle(REQ, email("no piece count", n=1))
+    approve(wf)
+    clock.advance(timedelta(days=19))  # now 2026-09-20
+    outcome = wf.handle(REQ, email("15 pieces", n=2))
+
+    assert outcome.record.ship_date == date(2026, 9, 15)  # not silently re-dated
+    assert outcome.state is RequestState.NEEDS_INFO
+    assert outcome.validation.invalid_fields == (FieldName.SHIP_DATE,)
+    assert outcome.clarification is not None
+    assert [u.field for u in outcome.clarification.unresolved] == [FieldName.SHIP_DATE]

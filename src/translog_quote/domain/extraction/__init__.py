@@ -21,6 +21,7 @@ from translog_quote.domain.extraction.prompt import (
     EXTRACTION_SYSTEM_PROMPT,
     build_extraction_messages,
 )
+from translog_quote.domain.extraction.ship_date import resolve_ship_date, roll_forward_to_today
 
 __all__ = [
     "EXTRACTION_SCHEMA_GUIDE",
@@ -29,5 +30,7 @@ __all__ = [
     "ExtractionResult",
     "FieldStatus",
     "build_extraction_messages",
+    "resolve_ship_date",
+    "roll_forward_to_today",
     "to_extracted_fields",
 ]

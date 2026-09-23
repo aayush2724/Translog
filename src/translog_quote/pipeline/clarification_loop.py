@@ -19,7 +19,7 @@ about completeness, and none can be — the only port this class calls is
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from translog_quote.domain.clarification import (
@@ -31,7 +31,12 @@ from translog_quote.domain.clarification import (
     location_question,
 )
 from translog_quote.domain.email import OutboundMessage
-from translog_quote.domain.extraction import ExtractionResult, FieldStatus, to_extracted_fields
+from translog_quote.domain.extraction import (
+    ExtractionResult,
+    FieldStatus,
+    resolve_ship_date,
+    to_extracted_fields,
+)
 from translog_quote.domain.quotation import Approved
 from translog_quote.domain.shipment import RequestSource, ShipmentRecord, merge_shipment
 from translog_quote.domain.validation import validate_shipment
@@ -253,6 +258,13 @@ class ClarificationWorkflow:
             # and retries rather than being quarantined against a person.
             return self._extraction_failed(request_id, email, state, record, existing)
 
+        # The model must return a full calendar date, and for a yearless
+        # "26th September" it sometimes picks a year from its own sense of "now"
+        # and lands in the past. Resolved deterministically against our clock,
+        # before anything merges or validates it; see `resolve_ship_date` for the
+        # limitation (a past date is assumed to be a filled-in year).
+        extraction = self._resolve_ship_date(request_id, extraction)
+
         # A first-contact message that gives no shipment detail at all is not a
         # quotation enquiry — it is unrelated mail (a newsletter, a receipt, a
         # notification) that happens to have reached the mailbox. It is recognised
@@ -304,7 +316,7 @@ class ClarificationWorkflow:
         futile: tuple[str, ...] = ()
         notes: list[str] = []
         if state is RequestState.CLARIFICATION_SENT:
-            still_missing = validate_shipment(merge.record).missing_fields
+            still_missing = self._validate(merge.record).missing_fields
             futile = tuple(
                 field.value
                 for field in still_missing
@@ -374,7 +386,7 @@ class ClarificationWorkflow:
                 {"fields": [c.field.value for c in merge.conflicts]},
             )
 
-        validation = validate_shipment(merge.record)
+        validation = self._validate(merge.record)
         self._emit(
             request_id,
             AuditEventType.VALIDATED,
@@ -490,7 +502,7 @@ class ClarificationWorkflow:
                 stored.request_id,
                 AuditEventType.MANUAL_REVIEW_ESCALATED,
                 {
-                    "fields": [f.value for f in validate_shipment(stored.record).missing_fields],
+                    "fields": [f.value for f in self._validate(stored.record).missing_fields],
                     "notes": [FOLLOWUP_WINDOW_EXPIRED_NOTE],
                     "reason": "followup_window_expired",
                 },
@@ -730,7 +742,7 @@ class ClarificationWorkflow:
         ``is_non_enquiry`` so the router records it as seen and shows nothing.
         """
         merge = merge_shipment(record, to_extracted_fields(extraction))
-        validation = validate_shipment(record)
+        validation = self._validate(record)
         analysis = identify_unresolved(validation, extraction, merge.conflicts)
         return TurnOutcome(
             request_id=request_id,
@@ -811,7 +823,7 @@ class ClarificationWorkflow:
         )
         empty = ExtractionResult()
         merge = merge_shipment(record, to_extracted_fields(empty))
-        validation = validate_shipment(record)
+        validation = self._validate(record)
         analysis = identify_unresolved(validation, empty, merge.conflicts)
         return TurnOutcome(
             request_id=request_id,
@@ -890,7 +902,7 @@ class ClarificationWorkflow:
     ) -> TurnOutcome:
         """A ``TurnOutcome`` for a request left waiting at ``CLARIFICATION_SENT``
         after a non-answer: no new draft, no escalation, nothing merged."""
-        validation = validate_shipment(merge.record)
+        validation = self._validate(merge.record)
         analysis = identify_unresolved(validation, extraction, merge.conflicts)
         return TurnOutcome(
             request_id=request_id,
@@ -916,6 +928,27 @@ class ClarificationWorkflow:
             {"from": current.value, "to": target.value},
         )
         return target
+
+    def _today(self) -> date:
+        return self._clock.now().date()
+
+    def _validate(self, record: ShipmentRecord) -> ValidationResult:
+        """Validate against today's date, so VR-13 (no past shipment date) applies."""
+        return validate_shipment(record, today=self._today())
+
+    def _resolve_ship_date(self, request_id: str, extraction: ExtractionResult) -> ExtractionResult:
+        """Roll a past extracted ship date forward to its next occurrence, audited."""
+        resolved = resolve_ship_date(extraction, today=self._today())
+        if resolved is not extraction:
+            self._emit(
+                request_id,
+                AuditEventType.SHIP_DATE_YEAR_RESOLVED,
+                {
+                    "from": str(extraction.ship_date.value),
+                    "to": str(resolved.ship_date.value),
+                },
+            )
+        return resolved
 
     def _blank(self, request_id: str) -> ShipmentRecord:
         return ShipmentRecord(request_id=request_id, source=RequestSource.EMAIL)

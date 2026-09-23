@@ -74,6 +74,7 @@ class ValidationRuleId(StrEnum):
     MSDS_REQUIRED_FOR_CHEMICAL = "MSDS_REQUIRED_FOR_CHEMICAL"  # VR-8, conditional
     ADDRESS_REQUIRED_FOR_DOOR = "ADDRESS_REQUIRED_FOR_DOOR"  # VR-11, conditional
     SHIP_DATE_REQUIRED = "SHIP_DATE_REQUIRED"  # VR-12
+    SHIP_DATE_IN_PAST = "SHIP_DATE_IN_PAST"  # VR-13, only when validated against a date
 
 
 class ValidationIssue(BaseModel):
