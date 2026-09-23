@@ -114,7 +114,8 @@ function load(fetchStub) {
     fs.readFileSync(SOURCE, "utf8") +
     "\n;globalThis.__t = { ui, canDecide, sectionClarification, sectionApproval," +
     " renderDashboard, renderTimeline, render, post, sectionRates, refresh," +
-    " watchForChanges, REFRESH_MS," +
+    " watchForChanges, REFRESH_MS, renderDetail, nextStep, sectionManualReview," +
+    " sectionShipment, sectionMerged," +
     " syncApprover: () => syncApprover && syncApprover()," +
     " holderFor: (id) => document.getElementById(id) };";
   vm.runInContext(source, context);
@@ -845,6 +846,249 @@ checkAsync("a successful action clears a previous error", async () => {
   await t.post("poll", {}, "Checking mail\u2026");
 
   eq(t.holderFor("action-error").hidden, true, "banner hidden again");
+});
+
+
+/* --- Phase 1: connection, next step, hand-over wording, History, gone --- */
+
+/* A fetch that answers from a script: a snapshot object is a 200, `null` is a
+   network failure (the server unreachable, as during a restart or deploy). */
+function scriptedReads(...steps) {
+  let i = 0;
+  return async () => {
+    const step = steps[Math.min(i, steps.length - 1)];
+    i += 1;
+    if (step === null) throw new Error("network down");
+    const body = JSON.stringify(step);
+    return { ok: true, status: 200, text: async () => body };
+  };
+}
+
+checkAsync("B1: an unreachable server shows Disconnected and marks the last list stale", async () => {
+  const snap = snapshotWith([request({ request_id: "R-SEEN" })], { active: true, following: 1 });
+  const t = load(scriptedReads(snap, null));
+
+  await t.refresh(true);
+  eq(t.holderFor("live-label").textContent, "Live", "connected first");
+  await t.refresh(false);
+
+  eq(t.holderFor("live-label").textContent, "Disconnected", "the header stops claiming Live");
+  eq(/live-stalled/.test(t.holderFor("live-indicator").className), true, "amber");
+  const banner = t.holderFor("load-error");
+  eq(banner.hidden, false, "the connection error is shown");
+  eq(/Can’t reach the Quotation Desk server/.test(banner.textContent), true, "production wording");
+  eq(/last successful update/.test(banner.textContent), true, "says the list is from the last update");
+  eq(/may be out of date/.test(banner.textContent), true, "and does not imply it is current");
+  eq(/demo/i.test(banner.textContent), false, "no demo wording");
+  eq(/R-SEEN/.test(t.holderFor("dashboard-list").textContent), true, "the last list is kept");
+  eq(t.holderFor("view-dashboard").className, "is-stale", "and visibly marked stale");
+});
+
+checkAsync("B1: a first read that fails claims no stale data", async () => {
+  const t = load(scriptedReads(null));
+
+  await t.refresh(true);
+
+  eq(t.holderFor("live-label").textContent, "Disconnected", "not Live");
+  const text = t.holderFor("load-error").textContent;
+  eq(/Can’t reach the Quotation Desk server/.test(text), true, "the error is shown");
+  eq(/last successful update/.test(text), false, "there was no earlier update to mention");
+});
+
+checkAsync("B1: reconnecting clears the stale marking even when nothing changed", async () => {
+  const snap = snapshotWith([request({})], { active: true, following: 1 });
+  const t = load(scriptedReads(snap, null, snap));
+
+  await t.refresh(true);
+  await t.refresh(false);
+  await t.refresh(false);
+
+  eq(t.holderFor("live-label").textContent, "Live", "live again");
+  eq(t.holderFor("load-error").hidden, true, "the error is gone");
+  eq(t.holderFor("view-dashboard").className, "", "no longer dimmed");
+});
+
+checkAsync("B1/C2: an action the server never answered is worded for production", async () => {
+  const t = load(async () => { throw new Error("network down"); });
+  t.ui.snap = snapshotWith([], {});
+  t.ui.view = "dashboard";
+
+  await t.post("clarification/approve", { by: "Ops" }, "Sending…");
+
+  const text = t.holderFor("action-error").textContent;
+  eq(/demo/i.test(text), false, "no demo server");
+  eq(/Quotation Desk server did not respond/.test(text), true, "names what failed");
+});
+
+check("B2: the next step follows the summary, first match wins", () => {
+  const t = load();
+  const cases = [
+    [{ goods_type_hold: { catalog: [] }, rate_failure: "x" }, "Choose the WebCargo goods type"],
+    [{ awaiting_clarification: true }, "Review and approve the clarification draft"],
+    [{ awaiting_decision: true }, "Approve or decline the quotation"],
+    [{ status: { state: "manual_review", label: "MANUAL REVIEW", tone: "amber" } }, "Handle manually"],
+    [{ rate_search_pending: true }, "Searching WebCargo for rates"],
+    [{ rate_search_pending: true, worker_notice: "worker offline" }, "waiting for the rate-search worker"],
+    [{ status: { state: "clarification_sent", label: "AWAITING CLIENT REPLY", tone: "blue" } },
+      "Waiting on the client"],
+    [{ rate_failure: "the date is in the past" }, "Check why the rate search failed"],
+  ];
+  for (const [overrides, expected] of cases) {
+    const step = t.nextStep(request(overrides));
+    eq(step !== null && step[1].includes(expected), true, `${JSON.stringify(overrides)} -> ${expected}`);
+  }
+  eq(t.nextStep(request({ status: { state: "validated", label: "VALIDATED", tone: "green" } })), null,
+    "nothing to say when nothing is pending");
+  eq(t.nextStep(request({ status: { state: "quotation_sent", label: "QUOTATION SENT", tone: "green" } })),
+    null, "a settled request has no next step");
+});
+
+check("B2: the next step is on the card, and the status pill is unchanged", () => {
+  const t = load();
+  t.ui.snap = snapshotWith(
+    [request({ awaiting_clarification: true, status: { state: "needs_info", label: "INFORMATION REQUIRED", tone: "amber" } })],
+    { active: true, following: 1 }
+  );
+  t.renderDashboard();
+  const holder = t.holderFor("dashboard-list");
+  const line = holder.find((n) => /next-step/.test(n.className) && n.tagName === "p");
+
+  eq(line !== null, true, "a next-step line is rendered");
+  eq(/Next step/.test(line.textContent), true, "labelled");
+  eq(/approve the clarification draft/.test(line.textContent), true, "with the operator action");
+  eq(/next-step-action/.test(line.className), true, "styled as an action");
+  eq(holder.find((n) => n.className === "pill pill-amber").textContent, "INFORMATION REQUIRED", "pill as before");
+});
+
+check("B3: a hand-over card is neutral and shows the recorded reason", () => {
+  const t = load();
+  const reason = "Client did not provide the required shipment details within the 30-minute response window.";
+  t.ui.snap = snapshotWith(
+    [request({ status: { state: "manual_review", label: "MANUAL REVIEW", tone: "amber" }, manual_review_notes: [reason] })],
+    { active: true, following: 1 }
+  );
+  t.renderDashboard();
+  const text = t.holderFor("dashboard-list").textContent;
+
+  eq(/Handed to a person — Client did not provide/.test(text), true, "the actual reason");
+  eq(/answer could not be used/.test(text), false, "no assumed cause");
+});
+
+check("B3: a hand-over with no recorded note shows the next step once, and invents no cause", () => {
+  const t = load();
+  t.ui.snap = snapshotWith(
+    [request({ status: { state: "manual_review", label: "MANUAL REVIEW", tone: "amber" }, manual_review_notes: [] })],
+    { active: true, following: 1 }
+  );
+  t.renderDashboard();
+  const holder = t.holderFor("dashboard-list");
+
+  eq(holder.findAll((n) => n.className === "waiting-note").length, 0,
+    "no second line repeating what the next step already says");
+  eq(/Handle manually/.test(holder.textContent), true, "the hand-over is still stated");
+  eq(/answer could not be used/.test(holder.textContent), false, "no assumed cause");
+});
+
+check("B3: the detail hand-over card lists the notes and drops the old assumption", () => {
+  const t = load();
+  const withNotes = t.sectionManualReview({
+    status: { state: "manual_review" },
+    manual_review_notes: ["This message could not be read into a shipment."],
+  }).textContent;
+  eq(/HANDED TO A PERSON/.test(withNotes), true, "the pill says it");
+  eq(/Automatic processing has stopped for this request/.test(withNotes), true, "neutral lead");
+  eq(/could not be read into a shipment/.test(withNotes), true, "the recorded reason");
+  eq(/The client replied, but their answer/.test(withNotes), false, "no assumed cause");
+
+  const noNotes = t.sectionManualReview({ status: { state: "manual_review" }, manual_review_notes: [] });
+  eq(noNotes !== null, true, "a restored hand-over still gets its card");
+  eq(/not available in this view/.test(noNotes.textContent), true, "and says the reason is not here");
+
+  eq(t.sectionManualReview({ status: { state: "validated" }, manual_review_notes: [] }), null,
+    "no card for a request that was never handed over");
+});
+
+function historySnapshot(activeId) {
+  const snap = snapshotWith([request({ request_id: activeId })], { active: true, following: 1 });
+  snap.history = [request({ request_id: "R-OLD", status: { state: "quotation_sent", label: "QUOTATION SENT", tone: "green" } })];
+  return snap;
+}
+const isDetails = (n) => n.tagName === "details";
+
+check("B4: an open History stays open when the dashboard is rebuilt", () => {
+  const t = load();
+  t.ui.snap = historySnapshot("R-1");
+  t.renderDashboard();
+  const fold = t.holderFor("dashboard-list").find(isDetails);
+  eq(fold.open === true, false, "closed by default");
+
+  fold.open = true;
+  fold.fire("toggle");
+  t.ui.snap = historySnapshot("R-2");
+  t.renderDashboard();
+  const rebuilt = t.holderFor("dashboard-list").find(isDetails);
+
+  eq(rebuilt !== fold, true, "it really was rebuilt");
+  eq(rebuilt.open, true, "and is still open");
+  eq(rebuilt.attrs.open, "", "open in the markup too");
+});
+
+checkAsync("B4: a polling update does not collapse History; closing it is remembered too", async () => {
+  const t = load(scriptedReads(historySnapshot("R-1"), historySnapshot("R-2"), historySnapshot("R-3")));
+  await t.refresh(true);
+  const fold = t.holderFor("dashboard-list").find(isDetails);
+  fold.open = true;
+  fold.fire("toggle");
+
+  await t.refresh(false);  // a real change, so the page is rebuilt
+  const afterPoll = t.holderFor("dashboard-list").find(isDetails);
+  eq(/R-2/.test(t.holderFor("dashboard-list").textContent), true, "the update rendered");
+  eq(afterPoll.open, true, "History survived the poll");
+
+  afterPoll.open = false;
+  afterPoll.fire("toggle");
+  await t.refresh(false);
+  eq(t.holderFor("dashboard-list").find(isDetails).open === true, false, "and stays closed once closed");
+});
+
+check("B7: a request that disappeared clears its header, timeline and sections", () => {
+  const t = load();
+  t.holderFor("detail-header").replaceChildren(new Node("h1"));
+  t.holderFor("detail-header").children[0].textContent = "Old request header";
+  t.holderFor("timeline").replaceChildren(new Node("li"));
+  t.ui.view = "detail";
+  t.ui.selected = "R-GONE";
+  t.ui.snap = snapshotWith([], { active: true });  // selected: null
+
+  t.renderDetail();
+
+  eq(t.holderFor("detail-header").children.length, 0, "no stale header");
+  eq(t.holderFor("timeline").children.length, 0, "no stale timeline");
+  eq(t.holderFor("timeline").hidden, true, "and no empty timeline box left on screen");
+  eq(/no longer available/.test(t.holderFor("sections").textContent), true, "says why");
+});
+
+check("C1: validation issues show the message, not the internal rule id", () => {
+  const t = load();
+  const text = t.sectionShipment({
+    shipment: [{ label: "Shipment date", value: "26 Sep 2024", status: "known", source: "enquiry" }],
+    validation: {
+      is_valid: false,
+      issues: [{ rule_id: "SHIP_DATE_IN_PAST", message: "Shipment date 2024-09-26 is in the past." }],
+    },
+    merged: [], carried: [],
+  }).textContent;
+
+  eq(/Shipment date 2024-09-26 is in the past\./.test(text), true, "the message");
+  eq(/SHIP_DATE_IN_PAST/.test(text), false, "no rule id");
+});
+
+check("C6: no narration copy on the clarification or merge cards", () => {
+  const t = load();
+  eq(/Deterministic wording/.test(t.sectionClarification(awaitingClarification()).textContent), false,
+    "clarification card");
+  const merged = t.sectionMerged({ reply_received: true, merged: ["pcs"], carried: ["origin"] });
+  eq(/mail thread/.test(merged.textContent), false, "merge card");
 });
 
 (async () => {

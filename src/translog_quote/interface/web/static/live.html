@@ -30,7 +30,11 @@
   <p id="busy-banner" class="busy-banner" role="status" aria-live="polite" hidden></p>
   <!-- Outside both views on purpose: an action can fail from either one,
        and the banner that says so used to live in the detail view only. -->
-  <p id="action-error" class="banner banner-amber" role="alert" aria-live="assertive" hidden></p>
+  <p id="action-error" class="banner banner-amber top-banner" role="alert" aria-live="assertive" hidden></p>
+  <!-- The page cannot reach the desk server. At the top, not under the list:
+       whatever is on screen below it is the last update that did arrive, and
+       the operator must know that before acting on it. Text set by live.js. -->
+  <p id="load-error" class="banner banner-amber top-banner" role="alert" aria-live="assertive" hidden></p>
 
   <main class="container">
     <section id="view-dashboard">
@@ -51,10 +55,6 @@
       </div>
     </section>
 
-    <p id="load-error" class="load-error" hidden>
-      Could not reach the demo server. Start it with:
-      <code>python -m translog_quote.interface.web --live</code>
-    </p>
   </main>
 
   <!-- No page footer. On a short page it floated a rule and a disclaimer

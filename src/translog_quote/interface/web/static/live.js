@@ -24,6 +24,14 @@ const ui = {
   refreshAgain: false,
   editing: false,
   error: null,
+  /* The last read of the desk server failed. What is on screen is then the last
+     update that did arrive, and is shown as stale rather than as current. */
+  disconnected: false,
+  lastUpdatedAt: null,
+  /* Whether the operator has History open. The dashboard is rebuilt whenever
+     the state changes, and a rebuilt fold starts closed — without this a poll
+     would snap it shut under whoever was reading it. */
+  historyOpen: false,
 };
 
 /* The live approver field's re-sync, if a decision field is on screen. The
@@ -265,22 +273,28 @@ async function readAndRender(force) {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     text = await response.text();
   } catch (err) {
-    document.getElementById("load-error").hidden = false;
+    /* The page could not reach the desk server — a restart, a deploy, a lost
+       network. Nothing on screen is removed: it is marked as the last update
+       that arrived, and the header stops claiming the desk is live. */
+    ui.disconnected = true;
+    renderConnection();
     return;
   }
-  document.getElementById("load-error").hidden = true;
 
+  const reconnected = ui.disconnected;
+  ui.disconnected = false;
   ui.snap = JSON.parse(text);
+  ui.lastUpdatedAt = new Date().toISOString();
   const key = stateKey(ui.snap);
-  if (force || key !== ui.snapKey) {
+  if (force || reconnected || key !== ui.snapKey) {
     ui.snapKey = key;
     render();
-  } else if (ui.view === "dashboard") {
+  } else {
     /* Nothing happened, so nothing is redrawn — but the indicator still has to
        track the mailbox, or a poll that started failing would go unreported
        until something else changed. Written straight into the header rather
        than through a render. */
-    renderLiveIndicator();
+    renderConnection();
   }
 }
 
@@ -336,7 +350,7 @@ async function post(action, body, label) {
     ui.error =
       err && err.name === "AbortError"
         ? "The server took too long to answer. It may still be working — the page will show the result as soon as it does."
-        : "The demo server did not respond.";
+        : "The Quotation Desk server did not respond. Check the request before trying again — the action may or may not have gone through.";
   }
   clearTimeout(timer);
   ui.busy = false;
@@ -360,8 +374,15 @@ async function post(action, body, label) {
  * last successful read is the tooltip — available when questioned, not text
  * on the page. */
 function renderLiveIndicator() {
-  const poll = ui.snap.poll;
   const indicator = document.getElementById("live-indicator");
+  if (ui.disconnected) {
+    indicator.className = "live live-stalled";
+    document.getElementById("live-label").textContent = "Disconnected";
+    indicator.setAttribute("title", "The Quotation Desk server could not be reached. Retrying automatically.");
+    return;
+  }
+  if (!ui.snap) return;
+  const poll = ui.snap.poll;
   const failing = Boolean(poll.error);
   indicator.className = failing ? "live live-stalled" : "live";
   document.getElementById("live-label").textContent = failing ? "Reconnecting" : "Live";
@@ -374,6 +395,28 @@ function renderLiveIndicator() {
         ? `Mailbox last checked ${checked}`
         : "Watching the mailbox"
   );
+}
+
+/* Whether what is on screen is current. When the last read failed, a banner at
+   the top says so — with the time of the last update that did arrive — and
+   both views are dimmed, so nobody acts on a request list that has stopped
+   moving believing it is live. Cleared by the next read that succeeds. */
+function renderConnection() {
+  const banner = document.getElementById("load-error");
+  const stale = ui.disconnected && Boolean(ui.snap);
+  banner.hidden = !ui.disconnected;
+  if (ui.disconnected) {
+    const since = (fmtStamp(ui.lastUpdatedAt) || "").replace(/ /g, "\u00A0");
+    banner.textContent = stale
+      ? `⚠ Can’t reach the Quotation Desk server — retrying automatically. ` +
+        `What is shown below is from the last successful update${since ? ` (${since})` : ""} and may be out of date.`
+      : "⚠ Can’t reach the Quotation Desk server — retrying automatically.";
+  } else {
+    banner.textContent = "";
+  }
+  document.getElementById("view-dashboard").className = stale ? "is-stale" : "";
+  document.getElementById("view-detail").className = stale ? "is-stale" : "";
+  renderLiveIndicator();
 }
 
 /* Nothing has arrived yet. Deliberately almost empty: a dashboard with no work
@@ -396,11 +439,7 @@ function renderDashboard() {
      request stays inspectable rather than gone — hidden by default, one click
      away. Empty (and absent entirely in demonstration mode) when there is none. */
   const history = snap.history || [];
-  const historySection = history.length
-    ? el("details", { class: "history-band" },
-        el("summary", { class: "group-head" }, `History (${history.length})`),
-        el("div", { class: "request-list" }, ...history.map(requestCard)))
-    : null;
+  const historySection = history.length ? historyBand(history) : null;
 
   /* The page title is for a page with something on it. The empty state carries
      its own heading and reads better without a second one above it. */
@@ -434,8 +473,58 @@ function renderDashboard() {
   holder.replaceChildren(...groups);
 }
 
+/* History, folded by default and kept the way the operator left it: the fold is
+   rebuilt on every state change, so its open state lives in `ui`, not the DOM. */
+function historyBand(history) {
+  const fold = el("details", { class: "history-band", open: ui.historyOpen ? "" : null },
+    el("summary", { class: "group-head" }, `History (${history.length})`),
+    el("div", { class: "request-list" }, ...history.map(requestCard)));
+  if (ui.historyOpen) fold.open = true;
+  fold.addEventListener("toggle", () => { ui.historyOpen = Boolean(fold.open); });
+  return fold;
+}
+
+/* The operator's next move on a request, from facts the summary already
+   carries — first match wins, in this order. `action` is something the
+   operator must do; `wait` is the desk or the client working, nothing to do.
+   Status pills are untouched: this reads them, it does not replace them. */
+function nextStep(request) {
+  const state = request.status && request.status.state;
+  if (request.goods_type_hold) return ["action", "Choose the WebCargo goods type"];
+  if (request.awaiting_clarification) return ["action", "Review and approve the clarification draft"];
+  if (request.awaiting_decision) return ["action", "Approve or decline the quotation"];
+  if (state === "manual_review") return ["action", "Handle manually — automatic processing has stopped"];
+  if (request.rate_search_pending) {
+    return request.worker_notice
+      ? ["wait", "Rate search queued — waiting for the rate-search worker"]
+      : ["wait", "Searching WebCargo for rates — nothing to do"];
+  }
+  if (state === "clarification_sent") return ["wait", "Waiting on the client’s reply"];
+  if (request.rate_failure) return ["action", "Check why the rate search failed"];
+  return null;
+}
+
+function nextStepLine(request) {
+  const step = nextStep(request);
+  if (!step) return null;
+  const [kind, text] = step;
+  return el("p", { class: `next-step next-step-${kind}` },
+    el("span", { class: "next-step-key" }, "Next step"), text);
+}
+
+/* Why a request was handed to a person, in the words recorded when it happened.
+   Neutral on purpose: a hand-over can come from an unusable answer, an
+   extraction failure, a lapsed follow-up window or an unresolved place, and the
+   note — not this sentence — says which. */
+function manualReviewSummary(notes) {
+  const more = notes.length > 1 ? ` (+${notes.length - 1} more)` : "";
+  return `Handed to a person — ${notes[0]}${more}`;
+}
+
 function requestCard(request) {
-  const received = fmtStamp(request.received_at);
+  /* Non-breaking inside the timestamp: on a narrow card the line may wrap
+     between the reference and the time, never through "10:52 PM IST". */
+  const received = (fmtStamp(request.received_at) || "").replace(/ /g, "\u00A0") || null;
   const muted = !request.is_enquiry;
   return el("article", { class: `card request-card${muted ? " request-muted" : ""}` },
     el("div", { class: "card-body" },
@@ -459,6 +548,7 @@ function requestCard(request) {
             window.scrollTo(0, 0);
             refresh(true);
           }))),
+      nextStepLine(request),
       request.waiting_replies
         ? el("p", { class: "waiting-note" },
             `${request.waiting_replies} client reply waiting — approve the clarification to merge it`)
@@ -470,8 +560,7 @@ function requestCard(request) {
         ? el("p", { class: "waiting-note" }, request.worker_notice)
         : null,
       request.manual_review_notes && request.manual_review_notes.length
-        ? el("p", { class: "waiting-note" },
-            "Handed to manual review — the client's answer could not be used automatically.")
+        ? el("p", { class: "waiting-note" }, manualReviewSummary(request.manual_review_notes))
         : null,
       request.not_enquiry_reason
         ? el("p", { class: "not-enquiry" }, request.not_enquiry_reason)
@@ -559,7 +648,6 @@ function sectionMerged(detail) {
   if (!detail.reply_received || !detail.merged.length) return null;
   return card(
     [el("h2", null, "Merged shipment")],
-    el("p", { class: "card-sub" }, "The reply was matched to this enquiry by its mail thread, not by subject line."),
     kv([
       ["Supplied by the reply", detail.merged.join(", ")],
       ["Carried from the enquiry", detail.carried.join(", ") || "—"],
@@ -579,7 +667,7 @@ function sectionShipment(detail) {
     el("table", { class: "shipment-table" }, el("tbody", null, ...rows)),
     detail.validation.issues.length
       ? el("ul", { class: "issue-list" },
-          ...detail.validation.issues.map((issue) => el("li", null, `${issue.rule_id}: ${issue.message}`)))
+          ...detail.validation.issues.map((issue) => el("li", null, issue.message)))
       : null,
     detail.merged.length ? el("p", { class: "small muted" }, `Supplied by the reply: ${detail.merged.join(", ")}. Carried from the enquiry: ${detail.carried.join(", ")}.`) : null
   );
@@ -589,7 +677,6 @@ function sectionClarification(detail) {
   const clar = detail.clarification;
   if (!clar) return null;
   const children = [
-    el("p", { class: "card-sub" }, "Deterministic wording — no model writes client-facing copy."),
     el("ul", { class: "issue-list" }, ...clar.unresolved.map((item) => el("li", null, `${item.title}: ${item.question}`))),
     el("pre", { class: "email-body" }, clar.body_text),
   ];
@@ -785,14 +872,18 @@ function sectionManualReview(detail) {
   /* Why a person has to take over, in the model's own words. Rendered only
      for a request that was actually escalated; an empty card would imply a
      problem where there is none. */
-  const notes = detail.manual_review_notes;
-  if (!notes || !notes.length) return null;
+  const notes = detail.manual_review_notes || [];
+  const handedOver = detail.status && detail.status.state === "manual_review";
+  if (!notes.length && !handedOver) return null;
   return card(
     [el("h2", null, "Manual review required"), pill("HANDED TO A PERSON", "amber")],
     el("p", null,
-      "The client replied, but their answer could not be used automatically. " +
-      "Asking the same question again will not resolve it — this request needs a person."),
-    el("ul", { class: "issue-list" }, ...notes.map((note) => el("li", null, note)))
+      "Automatic processing has stopped for this request; nothing further is " +
+      "sent until someone takes it over."),
+    notes.length
+      ? el("ul", { class: "issue-list" }, ...notes.map((note) => el("li", null, note)))
+      : el("p", { class: "muted small" },
+          "The reason was recorded when it was handed over and is not available in this view.")
   );
 }
 
@@ -884,8 +975,18 @@ function decisionRow() {
 function renderDetail() {
   const detail = ui.snap.selected;
   if (!detail) {
+    /* The open request is not in the latest snapshot. Everything that described
+       it goes — header, timeline, sections — so nothing stale is left looking
+       current; only the notice and the way back remain. */
+    document.getElementById("detail-header").replaceChildren();
+    const timeline = document.getElementById("timeline");
+    timeline.replaceChildren();
+    timeline.hidden = true;
     document.getElementById("sections").replaceChildren(
-      el("div", { class: "card empty-state" }, "This request is no longer available.")
+      el("div", { class: "card empty-state" },
+        el("p", null, "This request is no longer available."),
+        el("p", { class: "muted small" },
+          "It is not in the latest update from the desk. Go back to all requests to see where things stand."))
     );
     return;
   }
@@ -901,6 +1002,7 @@ function renderDetail() {
         mailboxTag(detail.account),
         pill(detail.status.label, detail.status.tone)))
   );
+  document.getElementById("timeline").hidden = false;
   renderTimeline(detail.timeline);
 
   const sections = [
@@ -940,6 +1042,7 @@ function render() {
   const failure = document.getElementById("action-error");
   failure.hidden = !ui.error;
   failure.textContent = ui.error ? `⚠ ${ui.error}` : "";
+  renderConnection();
 }
 
 document.addEventListener("DOMContentLoaded", () => {
