@@ -69,6 +69,21 @@ class ContractViolation(TranslogError):
     """
 
 
+class ExtractionUnavailable(TranslogError):
+    """The extraction model could not be called for one message.
+
+    Raised only by the clarification workflow, and only around its single model
+    call: the provider's `TransientFailure`/`PermanentFailure` is translated into
+    this so a caller can isolate *that message* without also swallowing an
+    unrelated infrastructure failure elsewhere in the turn. ``permanent`` says
+    whether retrying soon can help (a timeout) or not (a spent API key, HTTP 402).
+    """
+
+    def __init__(self, message: str, *, permanent: bool) -> None:
+        super().__init__(message)
+        self.permanent = permanent
+
+
 class IllegalTransition(TranslogError):
     """A state change was attempted that the transition table does not permit.
 

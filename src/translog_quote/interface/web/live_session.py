@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from translog_quote import bootstrap
@@ -51,6 +52,7 @@ from translog_quote.domain.validation import validate_shipment
 from translog_quote.domain.workflow import TERMINAL_STATES, RequestState
 from translog_quote.errors import (
     ContractViolation,
+    ExtractionUnavailable,
     IllegalTransition,
     PermanentFailure,
     TranslogError,
@@ -100,6 +102,12 @@ if TYPE_CHECKING:
 #: How many mailbox messages one poll may read. A conversation is an enquiry
 #: and its replies; a small ceiling, not a mailbox scan.
 MESSAGE_LIMIT = 10
+
+#: How long a message whose extraction the provider refused *permanently* (a
+#: spent or rejected API key) is held back before it is tried again. Long enough
+#: that a poll every few seconds cannot hammer a refusing provider; short enough
+#: that restoring the key is picked up without a restart.
+EXTRACTION_RETRY_AFTER = timedelta(minutes=15)
 
 _log = get_logger("interface.web.live_session")
 
@@ -409,6 +417,12 @@ class LiveSession:
         "nothing is running"."""
 
         self.last_poll_error: str | None = None
+        # Messages whose extraction the provider refused permanently (e.g. a spent
+        # key, HTTP 402), mapped to when they may be tried again. In memory on
+        # purpose, like an uncommitted draft: they stay unrecorded, so the
+        # watermark holds at them and a restart simply tries each once more.
+        self._extraction_hold: dict[str, datetime.datetime] = {}
+        self._extraction_failed_this_poll = False
         """The class of the last failed poll, or None. Written by whatever
         drives the polling — the background poller does, and clears it on the
         next success — so an unreachable mailbox is visible, not silent."""
@@ -429,6 +443,11 @@ class LiveSession:
         CLARIFICATION_SENT, so a reply cannot be processed until the question
         it answers has actually gone out — and only a person can send it.
         """
+        # This poll's own verdict. A raise below leaves it for the caller to set;
+        # an extraction the provider refused sets it at the end, so an outage the
+        # poll survived is still reported rather than shown as a healthy desk.
+        self.last_poll_error = None
+        self._extraction_failed_this_poll = False
         received = self._fetch(since=self._mail_cutoff())
         client_mail = [email for email in received if not _is_internal(email)]
         self.skipped_internal = len(received) - len(client_mail)
@@ -474,8 +493,19 @@ class LiveSession:
                 if email.message_id not in waiting:
                     waiting.append(email.message_id)
                 continue
+            if self._extraction_held(email.message_id):
+                # Refused permanently a moment ago; asking again every poll would
+                # only spend the key (or fail identically) until someone fixes
+                # the provider side. Unrecorded, so the watermark still holds.
+                continue
             try:
                 self._route(email)
+            except ExtractionUnavailable as exc:
+                # The model could not be called for *this* message. It is left
+                # unrecorded — not consumed, not a request — so the watermark
+                # holds at it and a later poll retries it; everything after it in
+                # this poll, the rate searches and the watermark still run.
+                self._hold_after_extraction_failure(email, exc)
             except IllegalTransition:
                 # This message belongs to a request that is holding a
                 # clarification draft. The table permits no way out of
@@ -493,6 +523,14 @@ class LiveSession:
                 _log.info("Message deferred: its request is awaiting a clarification send")
             else:
                 self._routed.add(email.message_id)
+
+        # An extraction the provider refused did not stop this poll, but it is
+        # still an outage the desk must see: report it the way a failed poll was
+        # always reported, for as long as any message is held back because of it.
+        now = self._clock.now()
+        self._extraction_hold = {mid: t for mid, t in self._extraction_hold.items() if t > now}
+        if self._extraction_hold or self._extraction_failed_this_poll:
+            self.last_poll_error = ExtractionUnavailable.__name__
 
         # Hand over any request whose 30-minute follow-up window has lapsed with
         # no usable reply. Time-triggered, so it catches a client who sent one
@@ -875,6 +913,35 @@ class LiveSession:
         message stops being *re-fetched*, not stops being *waited for*.
         """
         return message_id in self._routed or self._router.already_processed(message_id)
+
+    def _extraction_held(self, message_id: str) -> bool:
+        """Whether this message is inside its hold after a permanent refusal."""
+        until = self._extraction_hold.get(message_id)
+        if until is None:
+            return False
+        if self._clock.now() >= until:
+            del self._extraction_hold[message_id]
+            return False
+        return True
+
+    def _hold_after_extraction_failure(self, email: RawEmail, exc: ExtractionUnavailable) -> None:
+        """Record one message's extraction failure without consuming it.
+
+        A permanent refusal (a spent or rejected key) is held back from the model
+        for `EXTRACTION_RETRY_AFTER`, so a poll every few seconds cannot turn one
+        stuck message into a stream of paid or pointless calls. A transient one
+        (a timeout, a 5xx the transport already retried) is simply tried again
+        next poll, as before."""
+        self._extraction_failed_this_poll = True
+        if exc.permanent:
+            self._extraction_hold[email.message_id] = self._clock.now() + EXTRACTION_RETRY_AFTER
+        _log.warning(
+            "Extraction unavailable for message %s (%s, retry %s): %s",
+            email.message_id,
+            "permanent" if exc.permanent else "transient",
+            f"after {EXTRACTION_RETRY_AFTER}" if exc.permanent else "next poll",
+            exc,
+        )
 
     def _route(self, email: RawEmail) -> None:
         routed = self._router.route(email)

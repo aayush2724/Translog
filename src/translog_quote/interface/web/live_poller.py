@@ -140,7 +140,9 @@ class LivePoller:
                 exc,
             )
             return False
-        self._session.last_poll_error = None
+        # A poll that returned owns its own verdict: it clears the error itself,
+        # or sets it when it survived an outage it must still report (an
+        # extraction the provider refused). Clearing it here would hide that.
         # One line per poll: the poll number, how long the lock was held, and
         # the memory the process is holding at that moment. Enough to tell a
         # flat curve from a climbing one, and to see the last value before a

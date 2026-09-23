@@ -40,8 +40,14 @@ from translog_quote.domain.extraction import (
 from translog_quote.domain.quotation import Approved
 from translog_quote.domain.shipment import RequestSource, ShipmentRecord, merge_shipment
 from translog_quote.domain.validation import validate_shipment
-from translog_quote.domain.workflow import QuotationRequest, RequestState
-from translog_quote.errors import ContractViolation, IllegalTransition
+from translog_quote.domain.workflow import TRANSITIONS, QuotationRequest, RequestState
+from translog_quote.errors import (
+    ContractViolation,
+    ExtractionUnavailable,
+    IllegalTransition,
+    PermanentFailure,
+    TransientFailure,
+)
 from translog_quote.pipeline.audit import AuditEvent, AuditEventType
 from translog_quote.pipeline.state_machine import StateMachine
 
@@ -161,6 +167,12 @@ class TurnOutcome:
     nothing on the dashboard. Never set for a reply (a reply belongs to a known
     thread) nor for a message that stated any field."""
 
+    reply_not_accepted: bool = False
+    """A client message arrived for a request that can no longer take a
+    clarification answer (it is validated, quoted, closed or with a person). It
+    was not extracted and changed nothing; the caller records it as seen so it
+    is never re-read, and creates no request."""
+
     @property
     def is_complete(self) -> bool:
         return self.state is RequestState.VALIDATED
@@ -238,9 +250,37 @@ class ClarificationWorkflow:
             and self._rounds.get(request_id, 0) >= self._max_rounds
         )
 
+        # A reply is only worth a model call if the request can take it. The
+        # table says which states can: the ones that may move to EXTRACTED. A
+        # request still holding an unsent draft (NEEDS_INFO) will be able to once
+        # a person sends it, so it is refused exactly as `_advance` would refuse
+        # it — `IllegalTransition`, which the caller defers without recording —
+        # but *before* the model is paid rather than after. Every other state
+        # (validated, quoted, closed, with a person) can never take one: such a
+        # reply is acknowledged without extraction and recorded by the caller,
+        # instead of being re-extracted on every poll forever, which is what
+        # drained the OpenRouter key on 2026-09-23.
+        if existing is not None and not _accepts_client_reply(state):
+            if state is RequestState.NEEDS_INFO:
+                self._machine.assert_transition(state, RequestState.EXTRACTED)
+            return self._reply_not_accepted(request_id, record, state)
+
         # --- the model's only involvement -------------------------------------
         try:
             extraction = self._extractor.extract_shipment(email.body_text)
+        except (TransientFailure, PermanentFailure) as exc:
+            # The provider could not answer for this message: a timeout, an
+            # outage, a rejected or exhausted key (HTTP 402). Translated into
+            # one narrow type so the caller can isolate *this message* — leave it
+            # unrecorded for a later poll — without swallowing anything else that
+            # might go wrong in the turn. Nothing is merged or persisted.
+            permanent = isinstance(exc, PermanentFailure)
+            self._emit(
+                request_id,
+                AuditEventType.EXTRACTION_UNAVAILABLE,
+                {"error": type(exc).__name__, "permanent": permanent},
+            )
+            raise ExtractionUnavailable(str(exc), permanent=permanent) from exc
         except ContractViolation:
             # The model's output could not be read into the extraction contract —
             # malformed JSON, or an impossible value the contract rejects (a
@@ -732,6 +772,34 @@ class ClarificationWorkflow:
 
     # -------------------------------------------------------------- helpers --
 
+    def _reply_not_accepted(
+        self, request_id: str, record: ShipmentRecord, state: RequestState
+    ) -> TurnOutcome:
+        """A client message for a request that can no longer take one.
+
+        No extraction, no merge, no transition, nothing saved: the request and
+        its record stay exactly as they were. The audit says it arrived, so a
+        client writing after their quotation is visible to the desk rather than
+        silently absorbed. The caller records the message as seen.
+        """
+        self._emit(request_id, AuditEventType.REPLY_NOT_ACCEPTED, {"state": state.value})
+        empty = ExtractionResult()
+        merge = merge_shipment(record, to_extracted_fields(empty))
+        validation = self._validate(record)
+        analysis = identify_unresolved(validation, empty, merge.conflicts)
+        return TurnOutcome(
+            request_id=request_id,
+            state=state,
+            record=record,
+            extraction=empty,
+            merge=merge,
+            validation=validation,
+            analysis=analysis,
+            clarification=None,
+            round_number=self._rounds.get(request_id, 0),
+            reply_not_accepted=True,
+        )
+
     def _not_an_enquiry(
         self, request_id: str, record: ShipmentRecord, extraction: ExtractionResult
     ) -> TurnOutcome:
@@ -1020,3 +1088,14 @@ def _abandoned_note_places(places: Sequence[UnresolvedPlace], rounds: int) -> st
 def _reply_subject(inbound: str, fallback: str) -> str:
     subject = inbound.strip() or fallback
     return subject if subject.lower().startswith("re:") else f"Re: {subject}"
+
+
+def _accepts_client_reply(state: RequestState) -> bool:
+    """Whether a client message can be merged into a request in ``state``.
+
+    Read straight off the transition table — a turn moves the request to
+    EXTRACTED, so only a state that may move there (or already is there) can
+    take one. No new rule: this is the same check `_advance` makes, asked
+    before the model call instead of after it.
+    """
+    return state is RequestState.EXTRACTED or RequestState.EXTRACTED in TRANSITIONS[state]

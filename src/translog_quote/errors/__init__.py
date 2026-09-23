@@ -8,6 +8,7 @@ the surrounding infrastructure or a contract is broken.
 
 from translog_quote.errors.taxonomy import (
     ContractViolation,
+    ExtractionUnavailable,
     IllegalTransition,
     PermanentFailure,
     TransientFailure,
@@ -19,6 +20,7 @@ from translog_quote.errors.taxonomy import (
 
 __all__ = [
     "ContractViolation",
+    "ExtractionUnavailable",
     "IllegalTransition",
     "PermanentFailure",
     "TransientFailure",

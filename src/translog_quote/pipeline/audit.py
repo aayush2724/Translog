@@ -20,6 +20,8 @@ class AuditEventType(StrEnum):
     EMAIL_RECEIVED = "email_received"
     EXTRACTION_CALLED = "extraction_called"
     SHIP_DATE_YEAR_RESOLVED = "ship_date_year_resolved"
+    EXTRACTION_UNAVAILABLE = "extraction_unavailable"
+    REPLY_NOT_ACCEPTED = "reply_not_accepted"
     RECORD_MERGED = "record_merged"
     VALIDATED = "validated"
     CLARIFICATION_DRAFTED = "clarification_drafted"

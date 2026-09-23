@@ -127,6 +127,24 @@ class InboundRouter:
         outcome = self._workflow.handle(request_id, email)
         self._record(request_id, email.message_id)
 
+        # A reply to a request that can no longer take one (validated, quoted,
+        # closed, with a person). The workflow did not call the model and changed
+        # nothing; recorded above so it is never re-read, and — because it is
+        # recorded against the request it answered — never mistaken for a new
+        # enquiry either.
+        if outcome.reply_not_accepted:
+            return RoutedMessage(
+                request_id=request_id,
+                is_reply=is_reply,
+                needs_manual_review=False,
+                outcome=outcome,
+                ignored=True,
+                reason=(
+                    f"Reply to a request in state {outcome.state.value}, which no longer "
+                    "takes clarification answers: recorded, not extracted."
+                ),
+            )
+
         # A first-contact message that stated no shipment detail at all is
         # unrelated mail, recognised by content in the workflow. It is recorded
         # as seen (above) but produces no request and appears nowhere.
