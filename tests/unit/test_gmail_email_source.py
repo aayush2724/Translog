@@ -441,6 +441,21 @@ def dated(gmail_id: str, date_str: str, mid: str, *, subject: str | None = None)
     )
 
 
+def malformed(gmail_id: str, date_str: str, mid: str) -> dict[str, Any]:
+    """A well-formed envelope with **no readable text part** — the exact
+    production failure. From/Date/Message-ID headers are valid, so it fails at
+    the body stage inside ``parse_gmail_message`` (ContractViolation, "no
+    readable text part") rather than earlier, mirroring the Account A message."""
+    return message(
+        gmail_id=gmail_id,
+        payload={
+            "mimeType": "application/pdf",
+            "headers": headers(**{"Date": date_str, "Message-ID": mid}),
+            "body": {"attachmentId": "att-1"},
+        },
+    )
+
+
 class PagingTransport:
     """A Gmail transport that honours pageToken, so ``messages.list`` pagination
     can be exercised. Pages are given newest-first, as Gmail returns them."""
@@ -635,3 +650,168 @@ def test_the_seen_filter_does_not_apply_to_the_demonstration_newest_slice() -> N
     emails = source.fetch_new()  # since is None -> newest slice
 
     assert [e.message_id for e in emails] == ["<enquiry-1@mail.example.com>"]
+
+
+# --- operations mode: one malformed message must not abort the whole poll -------
+
+
+def test_a_malformed_message_does_not_abort_the_operations_fetch() -> None:
+    """The production incident, at the fetch. A message with no readable text part
+    used to raise a ContractViolation out of ``_ingest`` that aborted the entire
+    account poll. Now it is caught and the poll completes, returning the valid
+    mail around it."""
+    bodies = {
+        "messages/bad": malformed("bad", "Mon, 24 Aug 2026 09:00:00 +0000", "<bad@x>"),
+        "messages/m2": dated("m2", "Tue, 25 Aug 2026 09:00:00 +0000", "<m2@x>"),
+        "messages/m3": dated("m3", "Wed, 26 Aug 2026 09:00:00 +0000", "<m3@x>"),
+    }
+    transport = PagingTransport([(["m3", "m2", "bad"], None)], bodies)
+    source = _ops_source(transport, max_results=10)
+
+    emails = source.fetch_new(since=datetime(2026, 8, 20, tzinfo=UTC))
+
+    assert [e.message_id for e in emails] == ["<m2@x>", "<m3@x>"]
+
+
+def test_a_malformed_message_is_quarantined_by_its_gmail_id() -> None:
+    """Not silently dropped: its Gmail id is recorded in the source's quarantine
+    set so the poll can move past it and later skip it before re-fetching."""
+    bodies = {
+        "messages/bad": malformed("bad", "Mon, 24 Aug 2026 09:00:00 +0000", "<bad@x>"),
+        "messages/m2": dated("m2", "Tue, 25 Aug 2026 09:00:00 +0000", "<m2@x>"),
+    }
+    transport = PagingTransport([(["m2", "bad"], None)], bodies)
+    source = _ops_source(transport, max_results=10)
+
+    source.fetch_new(since=datetime(2026, 8, 20, tzinfo=UTC))
+
+    assert source._unparseable == {"bad"}  # type: ignore[attr-defined]
+
+
+def test_a_malformed_message_does_not_spend_the_budget_so_newer_mail_is_reached() -> None:
+    """Like the internal/seen skips: the malformed message is quarantined without
+    consuming a client slot, so a tight per-poll budget still reaches the newer
+    valid message behind it instead of being burned on the unparseable one."""
+    bodies = {
+        "messages/bad": malformed("bad", "Mon, 24 Aug 2026 09:00:00 +0000", "<bad@x>"),
+        "messages/good": dated("good", "Tue, 25 Aug 2026 09:00:00 +0000", "<good@x>"),
+    }
+    transport = PagingTransport([(["good", "bad"], None)], bodies)
+    source = _ops_source(transport, max_results=1)
+
+    emails = source.fetch_new(since=datetime(2026, 8, 20, tzinfo=UTC))
+
+    assert [e.message_id for e in emails] == ["<good@x>"]
+
+
+def test_a_quarantined_message_is_not_re_fetched_on_a_later_poll() -> None:
+    """Once quarantined it is skipped *before* the re-fetch, so a message the
+    overlap window keeps re-listing neither re-spends the budget nor re-raises —
+    the fix that stops the quota re-burn seen in production."""
+    bodies = {
+        "messages/bad": malformed("bad", "Mon, 24 Aug 2026 09:00:00 +0000", "<bad@x>"),
+        "messages/good": dated("good", "Tue, 25 Aug 2026 09:00:00 +0000", "<good@x>"),
+    }
+    transport = PagingTransport([(["good", "bad"], None)], bodies)
+    source = _ops_source(transport, max_results=10)
+
+    source.fetch_new(since=datetime(2026, 8, 20, tzinfo=UTC))
+    after_first = len(transport.calls)
+    source.fetch_new(since=datetime(2026, 8, 20, tzinfo=UTC))
+
+    second_poll_gets = [
+        path for path, _ in transport.calls[after_first:] if path.startswith("messages/")
+    ]
+    assert "messages/bad" not in second_poll_gets  # skipped before the fetch
+    assert "messages/good" in second_poll_gets  # a normal message is still read
+
+
+def test_a_malformed_message_never_becomes_a_raw_email() -> None:
+    """It cannot create a request downstream because it is never returned as a
+    RawEmail at all, and leaves no provider metadata to resurrect it by."""
+    bodies = {"messages/bad": malformed("bad", "Mon, 24 Aug 2026 09:00:00 +0000", "<bad@x>")}
+    transport = PagingTransport([(["bad"], None)], bodies)
+    source = _ops_source(transport, max_results=10)
+
+    emails = source.fetch_new(since=datetime(2026, 8, 20, tzinfo=UTC))
+
+    assert emails == ()
+    assert source.provider_metadata("<bad@x>") is None
+
+
+def test_a_malformed_and_a_seen_message_are_both_skipped_to_reach_newer_mail() -> None:
+    """The quarantine composes with the seen-skip starvation fix: an unparseable
+    message and an already-handled one are both stepped over without spending the
+    budget, so a tight budget still reaches the fresh client message behind them.
+    Existing seen-skip behaviour is unchanged."""
+    bodies = {
+        "messages/bad": malformed("bad", "Mon, 24 Aug 2026 09:00:00 +0000", "<bad@x>"),
+        "messages/seen": dated("seen", "Tue, 25 Aug 2026 09:00:00 +0000", "<seen@x>"),
+        "messages/new": dated("new", "Wed, 26 Aug 2026 09:00:00 +0000", "<new@x>"),
+    }
+    transport = PagingTransport([(["new", "seen", "bad"], None)], bodies)
+    seen = {"<seen@x>"}
+    source = GmailEmailSource(
+        transport,
+        mailbox_address=MAILBOX,
+        max_results=1,
+        overlap_seconds=0.0,
+        seen=lambda mid: mid in seen,
+    )
+
+    emails = source.fetch_new(since=datetime(2026, 8, 20, tzinfo=UTC))
+
+    assert [e.message_id for e in emails] == ["<new@x>"]
+    assert source._unparseable == {"bad"}  # type: ignore[attr-defined]
+
+
+def test_quarantine_state_is_isolated_per_source_instance() -> None:
+    """Each account has its own GmailEmailSource, so one mailbox quarantining a
+    malformed message never causes another account's source to skip its own — even
+    when the two happen to share a Gmail id."""
+    source_a = _ops_source(
+        PagingTransport(
+            [(["bad"], None)],
+            {"messages/bad": malformed("bad", "Mon, 24 Aug 2026 09:00:00 +0000", "<bad-a@x>")},
+        ),
+        max_results=10,
+    )
+    source_b = _ops_source(
+        PagingTransport(
+            [(["bad"], None)],
+            {"messages/bad": dated("bad", "Mon, 24 Aug 2026 09:00:00 +0000", "<bad-b@x>")},
+        ),
+        max_results=10,
+    )
+
+    source_a.fetch_new(since=datetime(2026, 8, 20, tzinfo=UTC))
+
+    assert source_a._unparseable == {"bad"}  # type: ignore[attr-defined]
+    assert source_b._unparseable == set()  # type: ignore[attr-defined]
+    # Account B still reads its own message with the same Gmail id normally.
+    emails_b = source_b.fetch_new(since=datetime(2026, 8, 20, tzinfo=UTC))
+    assert [e.message_id for e in emails_b] == ["<bad-b@x>"]
+
+
+def test_a_fresh_source_re_parses_and_re_quarantines_after_a_restart() -> None:
+    """The quarantine is in-memory and per-session by design. A restart builds a
+    fresh source with an empty set, so it re-fetches and re-parses the malformed
+    message once, then re-quarantines it — safe, exactly as a restart re-derives
+    an uncommitted draft. It does not skip the newer valid mail."""
+    bodies = {
+        "messages/bad": malformed("bad", "Mon, 24 Aug 2026 09:00:00 +0000", "<bad@x>"),
+        "messages/good": dated("good", "Tue, 25 Aug 2026 09:00:00 +0000", "<good@x>"),
+    }
+    first = _ops_source(PagingTransport([(["good", "bad"], None)], bodies), max_results=10)
+    first.fetch_new(since=datetime(2026, 8, 20, tzinfo=UTC))
+    assert first._unparseable == {"bad"}  # type: ignore[attr-defined]
+
+    restart_transport = PagingTransport([(["good", "bad"], None)], bodies)
+    second = _ops_source(restart_transport, max_results=10)
+    assert second._unparseable == set()  # type: ignore[attr-defined]
+
+    emails = second.fetch_new(since=datetime(2026, 8, 20, tzinfo=UTC))
+
+    assert "messages/bad" in [path for path, _ in restart_transport.calls]  # re-parsed once
+    assert second._unparseable == {"bad"}  # type: ignore[attr-defined]
+    assert [e.message_id for e in emails] == ["<good@x>"]

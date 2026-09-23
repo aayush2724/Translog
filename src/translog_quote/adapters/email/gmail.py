@@ -622,6 +622,16 @@ class GmailEmailSource:
         # pins the watermark cannot indefinitely starve newer mail behind it.
         self._seen = seen
         self._metadata: dict[str, GmailMessageMetadata] = {}
+        # Gmail ids whose full message could not be parsed into a RawEmail this
+        # session (a ContractViolation from parse_gmail_message — e.g. a message
+        # with no readable text part). Quarantined here so one malformed message
+        # cannot abort the whole account poll: it is skipped before re-fetching
+        # on the operations path, the fetch loop moves on to newer mail, and the
+        # watermark advances past it once newer mail is processed. In-memory and
+        # per-source by design — a restart re-derives it (one re-parse, then
+        # re-quarantine), and a message that stays in the query window is only
+        # re-fetched until the watermark clears it.
+        self._unparseable: set[str] = set()
 
     def close(self) -> None:
         """Release the transport's pooled connection, if it has one.
@@ -718,7 +728,15 @@ class GmailEmailSource:
         """Fully fetch one listed id and append it to ``emails`` if it is a
         client message. Skips (without spending the budget) deleted, own
         outbound, self-sent, and internal/approver mail — and, when
-        ``skip_seen`` is set, mail already handled (see ``seen``)."""
+        ``skip_seen`` is set, mail already handled (see ``seen``) or already
+        quarantined as unparseable this session (see ``_unparseable``)."""
+        if skip_seen and gmail_id in self._unparseable:
+            # Already found unparseable this session. Skip before re-fetching so
+            # a malformed message that the overlap window keeps re-listing can
+            # neither re-spend the per-poll budget nor re-raise and stall the
+            # poll. Dropped by the same watermark advance that clears it.
+            _log.info("Gmail message %s is quarantined as unparseable; skipped", gmail_id)
+            return
         try:
             full = self._transport.get_json(f"messages/{gmail_id}", {"format": "full"})
         except _NotFound:
@@ -737,7 +755,23 @@ class GmailEmailSource:
             _log.info("Gmail message %s was sent by this run; skipped", gmail_id)
             return
 
-        raw = parse_gmail_message(full)
+        try:
+            raw = parse_gmail_message(full)
+        except ContractViolation as exc:
+            # A single malformed message (no readable text part, no parseable
+            # From, bad base64, …) must never abort the account poll. Quarantine
+            # its Gmail id, record the failure with that id, and skip it — the
+            # fetch loop continues to newer mail and the watermark advances past
+            # it. Not silently dropped: it is logged and held for the session so
+            # the poll can make progress instead of freezing on it every cycle.
+            self._unparseable.add(gmail_id)
+            _log.warning(
+                "Gmail message %s could not be parsed and was quarantined for this "
+                "session so it cannot stall the account poll: %s",
+                gmail_id,
+                exc,
+            )
+            return
         if skip_seen and self._seen is not None and self._seen(raw.message_id):
             # Already handled this run or durably committed. Skipped so the
             # oldest-first per-poll budget advances past it to newer mail; the

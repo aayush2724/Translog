@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from tests.unit.test_gmail_email_source import MAILBOX, PagingTransport, dated
+from tests.unit.test_gmail_email_source import MAILBOX, PagingTransport, dated, malformed
 from tests.unit.test_operations_restart import RECORD, _base_settings, _operations
 
 from translog_quote.adapters.clock import FixedClock
@@ -282,3 +282,36 @@ def test_one_sessions_seen_set_does_not_leak_into_another(tmp_path) -> None:  # 
 
     assert session_a._seen_message("<a-only@x>") is True
     assert session_b._seen_message("<a-only@x>") is False
+
+
+# --- a malformed message must not freeze the watermark (the Account A incident) --
+
+
+def test_a_malformed_message_does_not_freeze_the_watermark(tmp_path: object) -> None:
+    """End to end, over the real ``GmailEmailSource`` and ``LiveSession``. A
+    malformed historical message sits at the front of the window; before the fix
+    ``parse_gmail_message`` aborted the whole poll and the watermark never moved.
+    Now it is quarantined, the newer valid message is processed, and the cutoff
+    advances *past* the malformed message rather than freezing on it."""
+    bodies = {
+        "messages/bad": malformed("bad", "Mon, 24 Aug 2026 09:00:00 +0000", "<bad@x>"),
+        "messages/good": dated(
+            "good", "Tue, 25 Aug 2026 09:00:00 +0000", "<good@x>", subject="Real enquiry"
+        ),
+    }
+    transport = PagingTransport([(["good", "bad"], None)], bodies)
+    settings = _operations(_base_settings(tmp_path), since=SEED)
+    session, _ = _ops_session(settings, transport=transport, durable=InMemoryStore())
+
+    session.poll()  # must not raise despite the malformed message
+
+    # The valid message became a request; the malformed one created nothing and
+    # was quarantined in the source instead of aborting the poll.
+    assert _mids(session) == {"<good@x>"}
+    assert session._source._unparseable == {"bad"}  # type: ignore[attr-defined]
+    # The watermark advanced to the valid message — strictly past the malformed
+    # message (24 Aug) that used to freeze it.
+    good_received = session.requests[_rid(session, "<good@x>")].enquiry.received_at
+    assert good_received == datetime(2026, 8, 25, 9, 0, tzinfo=UTC)
+    assert session.demonstration.last_poll_watermark == good_received
+    assert session.demonstration.last_poll_watermark > datetime(2026, 8, 24, 9, 0, tzinfo=UTC)
