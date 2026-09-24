@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from pydantic_core import to_jsonable_python
+
 from translog_quote.domain.clarification import (
     UnresolvedAnalysis,
     UnresolvedField,
@@ -45,6 +47,7 @@ from translog_quote.errors import (
     ContractViolation,
     ExtractionUnavailable,
     IllegalTransition,
+    OutboundUnavailable,
     PermanentFailure,
     TransientFailure,
 )
@@ -420,10 +423,24 @@ class ClarificationWorkflow:
             {"changed": [f.value for f in merge.changed], "conflicts": len(merge.conflicts)},
         )
         if merge.has_conflicts:
+            # Both values are kept here, structured. When the conflict question
+            # is drafted the stored record leaves the field open (see the save
+            # below), so this event is the durable evidence of what the client
+            # said before and what they said instead.
             self._emit(
                 request_id,
                 AuditEventType.CONFLICT_DETECTED,
-                {"fields": [c.field.value for c in merge.conflicts]},
+                {
+                    "fields": [c.field.value for c in merge.conflicts],
+                    "conflicts": [
+                        {
+                            "field": c.field.value,
+                            "existing_value": to_jsonable_python(c.existing_value),
+                            "incoming_value": to_jsonable_python(c.new_value),
+                        }
+                        for c in merge.conflicts
+                    ],
+                },
             )
 
         validation = self._validate(merge.record)
@@ -490,11 +507,28 @@ class ClarificationWorkflow:
             else:
                 state, clarification = self._decide(request_id, state, email, analysis)
 
+        # A question asking the client which of two values they gave is correct
+        # leaves that field open in the stored record — the same way the location
+        # clarification clears the place it asks about. The answer then fills it
+        # (merge rule 1) instead of conflicting, round after round, with the value
+        # the client is correcting. Only the stored record is cleared: the turn's
+        # outcome still carries the value in question for display, and the draft
+        # itself is never persisted, so a restart re-derives the same conflict.
+        saved_record = merge.record
+        if clarification is not None:
+            asked_to_choose = {
+                u.field.value
+                for u in clarification.unresolved
+                if u.reason is UnresolvedReason.CONFLICT
+            }
+            if asked_to_choose:
+                saved_record = merge.record.model_copy(update=dict.fromkeys(asked_to_choose))
+
         self._store.save_request(
             QuotationRequest(
                 request_id=request_id,
                 state=state,
-                record=merge.record,
+                record=saved_record,
                 client_address=email.from_address,
             )
         )
@@ -861,13 +895,14 @@ class ClarificationWorkflow:
         """
         notice_at = existing.failure_notice_sent_at if existing else None
         if notice_at is None:
-            self._sink.send(
+            self._send_unattended(
+                request_id,
                 OutboundMessage(
                     to_address=email.from_address,
                     subject=_reply_subject(email.subject, FAILURE_NOTICE_SUBJECT),
                     body_text=FAILURE_NOTICE_BODY,
                     in_reply_to=email.message_id,
-                )
+                ),
             )
             notice_at = self._clock.now()
             self._emit(request_id, AuditEventType.FAILURE_NOTICE_SENT, {})
@@ -928,13 +963,14 @@ class ClarificationWorkflow:
         crash strictly between the two re-sends one reminder on the next run
         (at-least-once, the benign window the no-rates notice accepts too).
         """
-        self._sink.send(
+        self._send_unattended(
+            request_id,
             OutboundMessage(
                 to_address=email.from_address,
                 subject=_reply_subject(email.subject, FOLLOWUP_SUBJECT),
                 body_text=FOLLOWUP_BODY,
                 in_reply_to=email.message_id,
-            )
+            ),
         )
         self._emit(
             request_id,
@@ -951,6 +987,28 @@ class ClarificationWorkflow:
             )
         )
         return self._waiting_outcome(request_id, merge, extraction)
+
+    def _send_unattended(self, request_id: str, message: OutboundMessage) -> None:
+        """Send a client email the workflow sends on its own, mid-turn.
+
+        Both callers send before anything of the turn is persisted, so when the
+        provider refuses — an outage, a rejected token, a 400 on the message —
+        the turn can be abandoned cleanly. The failure is translated into one
+        narrow type so the caller can isolate *this message* (leave it
+        unrecorded and hold it) instead of the error aborting the whole poll,
+        which left the message unrecorded and re-extracted, paid, on every poll.
+        Only the send itself is wrapped: anything else still propagates.
+        """
+        try:
+            self._sink.send(message)
+        except (TransientFailure, PermanentFailure, ContractViolation) as exc:
+            permanent = not isinstance(exc, TransientFailure)
+            self._emit(
+                request_id,
+                AuditEventType.OUTBOUND_UNAVAILABLE,
+                {"error": type(exc).__name__, "permanent": permanent},
+            )
+            raise OutboundUnavailable(str(exc), permanent=permanent) from exc
 
     def _still_waiting(
         self, request_id: str, merge: MergeResult, extraction: ExtractionResult

@@ -315,3 +315,35 @@ def test_a_malformed_message_does_not_freeze_the_watermark(tmp_path: object) -> 
     assert good_received == datetime(2026, 8, 25, 9, 0, tzinfo=UTC)
     assert session.demonstration.last_poll_watermark == good_received
     assert session.demonstration.last_poll_watermark > datetime(2026, 8, 24, 9, 0, tzinfo=UTC)
+
+
+def test_a_minus_zero_date_header_does_not_freeze_the_mailbox(tmp_path: object) -> None:
+    """End to end, over the real ``GmailEmailSource`` and ``LiveSession``. A
+    ``Date: ... -0000`` header used to parse to a naive datetime; sorting it
+    beside an ordinary aware one raised ``TypeError`` before any message was
+    routed, on every poll, so the account never moved again."""
+    bodies = {
+        "messages/zoneless": dated(
+            "zoneless", "Mon, 24 Aug 2026 09:00:00 -0000", "<zoneless@x>", subject="Enquiry A"
+        ),
+        "messages/normal": dated(
+            "normal", "Tue, 25 Aug 2026 09:00:00 +0000", "<normal@x>", subject="Enquiry B"
+        ),
+    }
+    transport = PagingTransport([(["normal", "zoneless"], None)], bodies)
+    settings = _operations(_base_settings(tmp_path), since=SEED)
+    session, extractor = _ops_session(settings, transport=transport, durable=InMemoryStore())
+
+    session.poll()  # used to raise TypeError: can't compare offset-naive and offset-aware
+    session.poll()  # and again on every later poll
+
+    assert _mids(session) == {"<zoneless@x>", "<normal@x>"}
+    assert len(extractor.calls) == 2, "each message extracted once"
+    zoneless = session.requests[_rid(session, "<zoneless@x>")].enquiry
+    assert zoneless is not None
+    assert zoneless.received_at == datetime(2026, 8, 24, 9, 0, tzinfo=UTC)
+    # Both drafts are unresolved, so the cutoff holds at the older one — and is
+    # an aware instant a later comparison can use.
+    watermark = session.demonstration.last_poll_watermark
+    assert watermark == datetime(2026, 8, 24, 9, 0, tzinfo=UTC)
+    assert watermark is not None and watermark.tzinfo is not None

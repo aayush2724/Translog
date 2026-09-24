@@ -8,7 +8,7 @@ Every Gmail response here is a canned dictionary shaped like the documented
 from __future__ import annotations
 
 import base64
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -220,6 +220,39 @@ def test_internal_date_is_the_fallback_when_the_date_header_is_unparseable() -> 
     )
 
     assert email.received_at == datetime.fromtimestamp(1756185900, tz=UTC)
+
+
+@pytest.mark.parametrize(
+    "date_header",
+    [
+        "Tue, 26 Aug 2026 10:15:00 -0000",  # RFC 5322: UTC, local zone unknown
+        "Tue, 26 Aug 2026 10:15:00",  # no zone at all
+    ],
+)
+def test_a_date_header_without_a_usable_zone_is_read_as_utc_never_naive(
+    date_header: str,
+) -> None:
+    """`parsedate_to_datetime` returns a *naive* datetime for these; one naive
+    `received_at` among aware ones made the poll's sort raise every cycle."""
+    email = parse_gmail_message(
+        message(
+            payload={
+                "mimeType": "text/plain",
+                "headers": headers(Date=date_header),
+                "body": {"data": b64("body")},
+            }
+        )
+    )
+
+    assert email.received_at.tzinfo is not None
+    assert email.received_at == datetime(2026, 8, 26, 10, 15, tzinfo=UTC)
+
+
+def test_a_date_header_with_a_real_zone_is_unchanged() -> None:
+    email = parse_gmail_message(message())  # the default header: +0530
+
+    assert email.received_at == datetime(2026, 8, 26, 4, 45, tzinfo=UTC)
+    assert email.received_at.utcoffset() == timedelta(hours=5, minutes=30)
 
 
 def test_gmails_own_id_stands_in_when_a_message_id_header_is_absent() -> None:

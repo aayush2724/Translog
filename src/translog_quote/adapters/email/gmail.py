@@ -509,13 +509,22 @@ def _header_map(payload: dict[str, Any]) -> dict[str, str]:
 
 
 def _received_at(headers: dict[str, str], message: dict[str, Any]) -> datetime:
-    """The ``Date`` header when it parses; Gmail's ``internalDate`` otherwise."""
+    """The ``Date`` header when it parses; Gmail's ``internalDate`` otherwise.
+
+    Always timezone-aware. A header whose zone is ``-0000`` (RFC 5322: the time
+    is UTC, the sender's local zone is unknown) parses to a *naive* datetime,
+    and one naive value among aware ones made the poll's oldest-first sort raise
+    ``TypeError`` on every cycle — freezing the whole mailbox. It is read as the
+    UTC it states.
+    """
     raw_date = headers.get("date")
     if raw_date:
         try:
-            return parsedate_to_datetime(raw_date)
+            parsed = parsedate_to_datetime(raw_date)
         except (TypeError, ValueError):
             pass
+        else:
+            return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
     internal = message.get("internalDate")
     if isinstance(internal, str) and internal.isdigit():
         return datetime.fromtimestamp(int(internal) / 1000, tz=UTC)

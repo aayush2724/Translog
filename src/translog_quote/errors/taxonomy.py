@@ -84,6 +84,22 @@ class ExtractionUnavailable(TranslogError):
         self.permanent = permanent
 
 
+class OutboundUnavailable(TranslogError):
+    """An automatic client email could not be sent while handling one message.
+
+    Raised only by the clarification workflow, and only around the sends it makes
+    on its own during a turn (the extraction-failure notice and the non-answer
+    reminder) — never around an operator-approved send, whose failure the
+    operator sees directly. Like `ExtractionUnavailable`, it lets a caller isolate
+    *that message* without swallowing anything else. Nothing has been persisted
+    when it is raised, so the message can be handled again from scratch.
+    """
+
+    def __init__(self, message: str, *, permanent: bool) -> None:
+        super().__init__(message)
+        self.permanent = permanent
+
+
 class IllegalTransition(TranslogError):
     """A state change was attempted that the transition table does not permit.
 

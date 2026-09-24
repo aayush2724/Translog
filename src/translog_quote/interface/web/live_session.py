@@ -54,6 +54,7 @@ from translog_quote.errors import (
     ContractViolation,
     ExtractionUnavailable,
     IllegalTransition,
+    OutboundUnavailable,
     PermanentFailure,
     TranslogError,
     UnresolvedLocation,
@@ -108,6 +109,13 @@ MESSAGE_LIMIT = 10
 #: that a poll every few seconds cannot hammer a refusing provider; short enough
 #: that restoring the key is picked up without a restart.
 EXTRACTION_RETRY_AFTER = timedelta(minutes=15)
+
+#: How long a message whose automatic client email (failure notice, reminder)
+#: could not be sent is held back before it is handled again. Held whether the
+#: send failure was transient or permanent: the message was already extracted,
+#: and handling it again means paying for that extraction again, so retrying on
+#: every poll would turn one Gmail outage into a stream of paid model calls.
+OUTBOUND_RETRY_AFTER = timedelta(minutes=15)
 
 _log = get_logger("interface.web.live_session")
 
@@ -426,6 +434,9 @@ class LiveSession:
         """The class of the last failed poll, or None. Written by whatever
         drives the polling — the background poller does, and clears it on the
         next success — so an unreachable mailbox is visible, not silent."""
+        # Messages whose automatic client email could not be sent, mapped to when
+        # they may be handled again. In memory for the same reason as above.
+        self._outbound_hold: dict[str, datetime.datetime] = {}
 
         self.requests: dict[str, LiveRequest] = {}
         #: Browser-worker liveness, refreshed each poll so the render path reads a
@@ -493,7 +504,7 @@ class LiveSession:
                 if email.message_id not in waiting:
                     waiting.append(email.message_id)
                 continue
-            if self._extraction_held(email.message_id):
+            if self._extraction_held(email.message_id) or self._outbound_held(email.message_id):
                 # Refused permanently a moment ago; asking again every poll would
                 # only spend the key (or fail identically) until someone fixes
                 # the provider side. Unrecorded, so the watermark still holds.
@@ -506,6 +517,12 @@ class LiveSession:
                 # holds at it and a later poll retries it; everything after it in
                 # this poll, the rate searches and the watermark still run.
                 self._hold_after_extraction_failure(email, exc)
+            except OutboundUnavailable as exc:
+                # The automatic client email for *this* message could not be
+                # sent. Isolated the same way: unrecorded (watermark holds), held
+                # so its paid extraction is not repeated every poll, and the rest
+                # of this poll still runs.
+                self._hold_after_outbound_failure(email, exc)
             except IllegalTransition:
                 # This message belongs to a request that is holding a
                 # clarification draft. The table permits no way out of
@@ -531,6 +548,9 @@ class LiveSession:
         self._extraction_hold = {mid: t for mid, t in self._extraction_hold.items() if t > now}
         if self._extraction_hold or self._extraction_failed_this_poll:
             self.last_poll_error = ExtractionUnavailable.__name__
+        self._outbound_hold = {mid: t for mid, t in self._outbound_hold.items() if t > now}
+        if self._outbound_hold and self.last_poll_error is None:
+            self.last_poll_error = OutboundUnavailable.__name__
 
         # Hand over any request whose 30-minute follow-up window has lapsed with
         # no usable reply. Time-triggered, so it catches a client who sent one
@@ -940,6 +960,32 @@ class LiveSession:
             email.message_id,
             "permanent" if exc.permanent else "transient",
             f"after {EXTRACTION_RETRY_AFTER}" if exc.permanent else "next poll",
+            exc,
+        )
+
+    def _outbound_held(self, message_id: str) -> bool:
+        """Whether this message is inside its hold after a failed automatic send."""
+        until = self._outbound_hold.get(message_id)
+        if until is None:
+            return False
+        if self._clock.now() >= until:
+            del self._outbound_hold[message_id]
+            return False
+        return True
+
+    def _hold_after_outbound_failure(self, email: RawEmail, exc: OutboundUnavailable) -> None:
+        """Record one message's failed automatic send without consuming it.
+
+        Held for `OUTBOUND_RETRY_AFTER` whatever the failure's kind: the message
+        was already extracted, so handling it again pays for that extraction
+        again. Unrecorded, so the watermark holds at it and a restart simply
+        handles it once more."""
+        self._outbound_hold[email.message_id] = self._clock.now() + OUTBOUND_RETRY_AFTER
+        _log.warning(
+            "Automatic client email not sent for message %s (%s, retry after %s): %s",
+            email.message_id,
+            "permanent" if exc.permanent else "transient",
+            OUTBOUND_RETRY_AFTER,
             exc,
         )
 
