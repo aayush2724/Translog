@@ -804,6 +804,7 @@ function sectionRates(detail) {
           : "Nothing was sent and nothing was approved. This needs a look — it will not clear itself on the next check."));
   }
   const selection = rates.selection;
+  const handedOver = Boolean(detail.status && detail.status.state === "manual_review");
   return card(
     [el("h2", null, "Rate search & selection"), pill(rates.simulated ? "SIMULATED" : "LIVE PROVIDER", rates.simulated ? "amber" : "green")],
     simBanner(rates),
@@ -829,7 +830,12 @@ function sectionRates(detail) {
             .map((rate) => rateCard(rate, rate.source_ref === selection.source_ref ? selection : null)))
       : el("p", { class: "muted" }, "No eligible rate — nothing will be quoted."),
     rates.excluded.length
-      ? el("details", { class: "excluded-fold" },
+      ? el("details", {
+            class: "excluded-fold",
+            /* Handed to a person with nothing eligible: the excluded rows are
+               what the operator works from, so they start open. */
+            open: handedOver ? "" : null,
+          },
           el("summary", null,
             `${rates.excluded.length} rate(s) excluded — see why`),
           el("div", { class: "excluded-rows" },
@@ -838,6 +844,7 @@ function sectionRates(detail) {
                 carrierAvatar(row.carrier_code, true),
                 el("span", { class: "excluded-name" }, row.carrier_name),
                 el("span", { class: `reason-chip reason-${row.reason}` }, row.reason.replace(/_/g, " ")),
+                el("span", { class: "excluded-rate small" }, excludedRateFacts(row)),
                 el("span", { class: "excluded-detail muted small" }, row.detail)))))
       : null
   );
@@ -852,6 +859,19 @@ function carrierAvatar(code, dim) {
 
 /* One rate as a marketplace-style comparison card. `chosen` is the selection
    payload when this rate is the selected one, else null. */
+/* What an excluded rate actually offered, from the fields the rate already
+   carries: service, departure date tab, transit and price. A missing value is
+   shown as absent, never guessed. */
+function excludedRateFacts(row) {
+  const price = row.amount ? `${row.amount}${row.currency ? ` ${row.currency}` : ""}` : "price —";
+  return [
+    row.product || null,
+    row.departure_date ? `departs ${row.departure_date}` : null,
+    `⏱ ${row.transit || "—"}`,
+    price,
+  ].filter(Boolean).join(" · ");
+}
+
 function rateCard(rate, chosen) {
   return el("div", { class: `rate-card${chosen ? " rate-selected" : ""}` },
     chosen ? el("span", { class: "rate-ribbon" }, "SELECTED") : null,

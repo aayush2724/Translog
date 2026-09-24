@@ -46,7 +46,7 @@ from translog_quote.domain.quotation import (
     decision_from_choice,
     no_rates_message,
 )
-from translog_quote.domain.rates import FASTEST_ELIGIBLE
+from translog_quote.domain.rates import FASTEST_ELIGIBLE, ExclusionReason
 from translog_quote.domain.shipment import DeliveryType, FieldName
 from translog_quote.domain.validation import validate_shipment
 from translog_quote.domain.workflow import TERMINAL_STATES, RequestState
@@ -116,6 +116,21 @@ EXTRACTION_RETRY_AFTER = timedelta(minutes=15)
 #: and handling it again means paying for that extraction again, so retrying on
 #: every poll would turn one Gmail outage into a stream of paid model calls.
 OUTBOUND_RETRY_AFTER = timedelta(minutes=15)
+
+#: The operator-facing reason when a door-delivery request got rates back, but
+#: every one was excluded only because it does not confirm door delivery. The
+#: airport-to-airport rates are real; the door leg is not something Translog can
+#: price or promise, so a person decides. Nothing is sent to the client.
+DOOR_LEG_NOTE = "Port/airport rates available, door leg needs manual pricing."
+
+#: Plain wording for each exclusion reason, for the hand-over note shown to the
+#: operator (never the internal enum value).
+_EXCLUSION_WORDING: dict[ExclusionReason, str] = {
+    ExclusionReason.INCOMPLETE_RATE: "missing a price or currency",
+    ExclusionReason.UNRANKABLE_NO_TRANSIT: "no transit time to rank by",
+    ExclusionReason.CARRIER_RESTRICTED: "a carrier restriction",
+    ExclusionReason.SERVICE_NOT_AVAILABLE: "the requested service is not offered",
+}
 
 _log = get_logger("interface.web.live_session")
 
@@ -1241,9 +1256,12 @@ class LiveSession:
         """Record a finished rate outcome and build the approval packet if any.
 
         A selection opens the human approval gate. A search that found nothing
-        usable (``NO_ELIGIBLE_RATE``) is closed out instead: the client is sent a
+        usable (``NO_ELIGIBLE_RATE``) splits on whether the provider returned any
+        rows at all. Zero rows is a genuinely empty market: the client is sent a
         "no rates" notice and the request moves to ``CLOSED_NO_RATES`` — see
         ``_notify_no_rates`` for the send/persist ordering and its crash window.
+        Rows that came back but were all excluded are not "no rates" — see
+        ``_hand_over_returned_rates``.
         """
         request.rate_failure = None
         request.rates = outcome
@@ -1258,7 +1276,88 @@ class LiveSession:
                 selection=outcome.selection,
             )
         elif outcome.state is RequestState.NO_ELIGIBLE_RATE:
-            self._notify_no_rates(request)
+            if outcome.returned == 0:
+                self._notify_no_rates(request)
+            else:
+                self._hand_over_returned_rates(request, outcome)
+
+    def _hand_over_returned_rates(self, request: LiveRequest, outcome: RateSearchOutcome) -> None:
+        """Rates came back, none is eligible: hand to a person, email nobody.
+
+        Telling the client "we are unable to source a rate" would be untrue when
+        the provider returned rates, and a filter or mapping gap would then reach
+        the client as a thin market. The main case is door delivery: WebCargo's
+        results do not state door capability, so every airport-to-airport rate is
+        excluded for an unconfirmed door leg (``drop_service_mismatch`` runs last,
+        so that exclusion means the rate was otherwise usable).
+
+        The returned rates stay on the request for the operator to see; no
+        approval packet is built, so nothing can be quoted from here. The
+        request moves VALIDATED -> MANUAL_REVIEW (an existing edge) and is
+        committed durably, so a restart neither re-runs the search nor emails.
+        Rates are not part of the durable record, so a compact summary goes into
+        the audit trail with the reason.
+        """
+        excluded = outcome.filtered.excluded
+        door_leg_only = bool(excluded) and all(
+            e.reason is ExclusionReason.SERVICE_NOT_AVAILABLE
+            and e.rate.restrictions.serves_door_delivery is None
+            for e in excluded
+        )
+        if door_leg_only:
+            note = DOOR_LEG_NOTE
+            reason = "door_leg_needs_manual_pricing"
+        else:
+            why = sorted({_EXCLUSION_WORDING[e.reason] for e in excluded})
+            note = (
+                f"WebCargo returned {outcome.returned} rate(s) but none could be used "
+                f"automatically ({'; '.join(why) or 'no reason recorded'}). "
+                "Handed to a person; no client email was sent."
+            )
+            reason = "returned_rates_all_excluded"
+
+        request.state = RequestState.MANUAL_REVIEW
+        request.manual_review_notes = (note,)
+        request.packet = None
+
+        from translog_quote.pipeline.audit import AuditEvent, AuditEventType
+
+        self.audit.record(
+            AuditEvent(
+                request_id=request.request_id,
+                event=AuditEventType.MANUAL_REVIEW_ESCALATED,
+                at=self._clock.now(),
+                detail={
+                    "reason": reason,
+                    "notes": [note],
+                    "returned": outcome.returned,
+                    "rates": [
+                        {
+                            "carrier": e.rate.carrier_name,
+                            "total": None
+                            if e.rate.total_amount is None
+                            else str(e.rate.total_amount),
+                            "currency": e.rate.currency,
+                            "excluded": e.reason.value,
+                        }
+                        for e in excluded
+                    ],
+                },
+            )
+        )
+        stored = self._working.get_request(request.request_id)
+        if stored is not None:
+            # The note is persisted with the state, so after a restart the
+            # Active hand-over still says why. The rates themselves are not.
+            self._working.save_request(
+                stored.model_copy(
+                    update={
+                        "state": RequestState.MANUAL_REVIEW,
+                        "manual_review_notes": (note,),
+                    }
+                )
+            )
+            bootstrap.commit_request(self._working, self._durable, request.request_id)
 
     def _escalate_expired_followups(self) -> None:
         """Move any request past its 30-minute follow-up deadline to a person.
@@ -1679,6 +1778,9 @@ class LiveSession:
             operator_goods_type=stored.operator_goods_type,
             operator_goods_type_fingerprint=stored.operator_goods_type_fingerprint,
             operator_goods_type_by=stored.operator_goods_type_by,
+            # A persisted hand-over reason comes back with the request, so an
+            # Active MANUAL_REVIEW card still explains itself after a restart.
+            manual_review_notes=stored.manual_review_notes,
             # MANUAL_REVIEW is terminal for *automation* but not settled work: a
             # person still owes it a decision. So it comes back as active/needs
             # attention, not collapsed under history like the truly-finished

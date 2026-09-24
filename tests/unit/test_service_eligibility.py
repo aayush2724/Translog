@@ -289,13 +289,13 @@ def test_a_door_enquiry_halts_at_the_gate_with_a_door_capable_rate(
     assert "Door delivery included" in client_mail[0].body_text
 
 
-def test_a_dead_end_notifies_the_client_and_closes(
+def test_a_door_dead_end_with_returned_rates_goes_to_a_person_not_the_client(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No door-capable rate -> the search found nothing usable. The client is
-    sent a "no rates" notice and the request closes at CLOSED_NO_RATES — no
-    approval gate, and no automatic clarification (a thin market is not missing
-    information). The notice carries no figures and no selection."""
+    """No door-capable rate, but the search did return rates. That is not "no
+    rates": the request is handed to a person (MANUAL_REVIEW) with the rates
+    kept, no approval packet, no automatic clarification — and nothing at all is
+    sent to the client. (Zero rows is the case that still emails; see below.)"""
     sink = CollectingEmailSink()
     session = LiveSession(
         settings,
@@ -313,21 +313,24 @@ def test_a_dead_end_notifies_the_client_and_closes(
 
     request = next(iter(session.requests.values()))
 
-    assert request.state is RequestState.CLOSED_NO_RATES
-    assert request.final_reply_sent is True
+    assert request.state is RequestState.MANUAL_REVIEW
+    assert request.final_reply_sent is False
     assert request.packet is None
     assert request.awaiting_quotation_decision is False
     assert request.clarification is None
-    # Exactly one client message: the no-rates notice, with nothing to quote.
+    assert request.rates is not None
+    assert request.rates.returned > 0, "the returned rates are kept for the operator"
+    assert request.manual_review_notes, "the hand-over says why"
     client_mail = [m for m in sink.sent if m.to_address == "client@example.com"]
-    assert len(client_mail) == 1
-    assert "unable to source" in client_mail[0].body_text.lower()
+    assert client_mail == [], "nothing is sent to the client automatically"
 
 
-def test_a_dead_end_notifies_once_and_persists_the_closed_state(
+def test_a_zero_row_dead_end_notifies_once_and_persists_the_closed_state(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The notice is sent exactly once and CLOSED_NO_RATES is committed durably.
+    """The search returned no rows at all — the one case that still emails the
+    client. The notice is sent exactly once and CLOSED_NO_RATES is committed
+    durably.
 
     The durable commit is what stops a restart re-running the search and sending
     a second notice (rate outcomes are otherwise not persisted). A second poll
@@ -345,7 +348,9 @@ def test_a_dead_end_notifies_once_and_persists_the_closed_state(
     )
     from translog_quote import bootstrap
 
-    monkeypatch.setattr(bootstrap, "build_demo_rate_provider", MockWebCargoAdapter)
+    monkeypatch.setattr(
+        bootstrap, "build_demo_rate_provider", lambda: MockWebCargoAdapter(rates=())
+    )
     session.poll()
 
     request = next(iter(session.requests.values()))

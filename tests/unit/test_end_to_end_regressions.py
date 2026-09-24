@@ -14,7 +14,6 @@ to the worker, and "reached WebCargo" means "a job was enqueued".
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -472,26 +471,14 @@ def test_5_a_request_awaiting_the_client_survives_a_restart_and_nothing_is_repro
 # --- 6. No-rate path through the browser worker result --------------------------------
 
 
-def _zero_eligible_status() -> JobStatus:
-    """A COMPLETED worker result where WebCargo returned rates but none is
-    usable: both lack a transit time, so neither can be ranked (AMB-1)."""
-    rates = tuple(
-        Rate(
-            carrier_code=code,
-            carrier_name=name,
-            product="GEN",
-            total_amount=Decimal(amount),
-            currency="INR",
-            transit=None,
-            departure_date_label="Mon 05 Oct",
-        )
-        for code, name, amount in (
-            ("TK", "Turkish Cargo", "16900.00"),
-            ("EK", "Emirates", "20762.00"),
-        )
-    )
+def _zero_rows_status() -> JobStatus:
+    """A COMPLETED worker result where WebCargo returned no rows at all — the
+    only case that still earns the automatic "no rates" client notice. (Rows
+    that came back but were all excluded go to a person instead; see
+    ``test_door_leg_hand_over``.)"""
+    rates: tuple[Rate, ...] = ()
     filtered = filter_rates(rates)
-    assert filtered.eligible == () and len(filtered.excluded) == 2
+    assert filtered.eligible == () and filtered.excluded == ()
     result = RateSearchJobResult(
         adapter_id="webcargo-browser",
         is_simulated=False,
@@ -511,14 +498,14 @@ def _zero_eligible_status() -> JobStatus:
     return JobStatus(job_id=JOB_ID, state=JobState.COMPLETED, result=result)
 
 
-def test_6_zero_eligible_worker_rates_close_with_exactly_one_client_notice(
+def test_6_zero_worker_rows_close_with_exactly_one_client_notice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Browser mode: the worker's COMPLETED result has rates but none eligible.
+    """Browser mode: the worker's COMPLETED result has no rows at all.
     The request must close at CLOSED_NO_RATES, the client must get exactly one
     "no rates" notice (in the enquiry's thread), no quotation packet may exist,
     and further polls must neither re-notify nor re-search."""
-    queue = QueueSpy(fetch_returns=_zero_eligible_status())
+    queue = QueueSpy(fetch_returns=_zero_rows_status())
     _install_queue(monkeypatch, queue)
     _forbid_demo_provider(monkeypatch)
     enquiry = _email(

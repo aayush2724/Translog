@@ -537,6 +537,7 @@ h1 { font-size: 1.3rem; font-weight: 600; }
 .reason-chip.reason-service_not_available { background: #fdf1e2; color: #96570f; }
 .reason-chip.reason-unrankable_no_transit { background: #eef0f6; color: #5a6584; }
 .excluded-detail { flex-basis: 100%; padding-left: 2.5rem; }
+.excluded-rate { flex-basis: 100%; padding-left: 2.5rem; color: #3d4663; font-variant-numeric: tabular-nums; }
 
 /* ------------------------------------------------ timeline as a stepper */
 

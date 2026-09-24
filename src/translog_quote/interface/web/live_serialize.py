@@ -203,10 +203,15 @@ def rates_json(outcome: RateSearchOutcome) -> Json:
             "date": outcome.query.date.isoformat(),
         },
         "eligible": [_rate_json(rate) for rate in outcome.filtered.eligible],
+        # Excluded rows carry the rate itself, not just the carrier: an operator
+        # handed a request whose returned rates were all excluded (e.g. a door
+        # delivery WebCargo cannot confirm) prices it from these rows. Only
+        # fields the rate already holds — WebCargo's route and times are not on
+        # the rate and are not invented here.
         "excluded": [
             {
-                "carrier_code": excluded.rate.carrier_code,
-                "carrier_name": excluded.rate.carrier_name,
+                **_rate_json(excluded.rate),
+                "departure_date": excluded.rate.departure_date_label or None,
                 "reason": excluded.reason.value,
                 "detail": excluded.detail,
             }

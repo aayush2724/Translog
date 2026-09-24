@@ -773,6 +773,59 @@ check("the detail view renders nothing when there is no failure and no rates", (
   eq(t.sectionRates({ rates: null, rate_failure: null }), null, "still nothing to show");
 });
 
+/* A door-delivery request whose returned airport rates were all excluded is
+   handed to a person, who prices the door leg from these rows — so each row has
+   to show what the rate actually offered, not just the carrier and the reason. */
+function doorHandOverRates() {
+  const row = (code, name, amount) => ({
+    carrier_code: code, carrier_name: name, product: `${code} General`,
+    amount, currency: "Rs", transit: "20h 30m", departure_date: "05/10/2026",
+    source_ref: `webcargo-browser:05/10/2026:${code} General:#0`,
+    reason: "service_not_available",
+    detail: `${name} does not state door delivery for this rate; an undeclared capability is not offered`,
+  });
+  return {
+    simulated: false, banner: null, adapter_id: "webcargo-browser",
+    returned: 2, eligible_count: 0, excluded_count: 2,
+    query: { origin: "Chennai (MAA)", destination: "Singapore (SIN)", weight_kg: 500, date: "2026-10-05" },
+    eligible: [],
+    excluded: [row("TK", "Turkish Cargo", "16900.00"), row("EK", "Emirates", "20762.00")],
+    selection: null,
+    strategy: "Fastest eligible transit — ranked by transit time, not price",
+  };
+}
+
+check("door hand-over: excluded rows show each returned rate's service, date, transit and price", () => {
+  const t = load();
+  const section = t.sectionRates({
+    rates: doorHandOverRates(),
+    status: { state: "manual_review" },
+  });
+  const rows = section.findAll((n) => n.className === "excluded-rate small");
+  eq(rows.length, 2, "one rate line per excluded row");
+  eq(rows[0].textContent, "TK General · departs 05/10/2026 · ⏱ 20h 30m · 16900.00 Rs", "first row");
+  eq(rows[1].textContent, "EK General · departs 05/10/2026 · ⏱ 20h 30m · 20762.00 Rs", "second row");
+  eq(/No eligible rate — nothing will be quoted/.test(section.textContent), true, "still unquotable");
+});
+
+check("door hand-over: excluded rows start open for manual review, folded otherwise", () => {
+  const t = load();
+  const fold = (state) =>
+    t.sectionRates({ rates: doorHandOverRates(), status: { state } })
+      .find((n) => n.tagName === "details");
+  eq("open" in fold("manual_review").attrs, true, "open for the operator to price from");
+  eq("open" in fold("rate_selected").attrs, false, "folded when a rate was selected");
+});
+
+check("door hand-over: a missing price or transit reads as absent, never guessed", () => {
+  const t = load();
+  const rates = doorHandOverRates();
+  rates.excluded = [{ ...rates.excluded[0], amount: null, currency: null, transit: null, departure_date: null }];
+  const section = t.sectionRates({ rates, status: { state: "manual_review" } });
+  const line = section.find((n) => n.className === "excluded-rate small");
+  eq(line.textContent, "TK General · ⏱ — · price —", "absent values stay absent");
+});
+
 check("exactly one card is SELECTED when the winning carrier returns several rates", () => {
   /* Bug A: the SELECTED card was matched by carrier_code, so every rate from the
      winning carrier lit up SELECTED and inherited the winner's reason. Identity

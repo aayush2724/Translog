@@ -172,3 +172,11 @@ class QuotationRequest(BaseModel):
     and the poll sweep can escalate an expired window on any process that resumes
     the request. Optional with a ``None`` default so a request written before this
     field existed loads unchanged."""
+
+    manual_review_notes: tuple[str, ...] = ()
+    """Why the request was handed to a person, as shown to the operator —
+    persisted so an Active ``MANUAL_REVIEW`` request still explains itself after
+    a restart. Written today only by the rate-search hand-over (rates returned but
+    none eligible, e.g. "Port/airport rates available, door leg needs manual
+    pricing."). Empty by default so a request written before this field existed
+    loads unchanged."""
