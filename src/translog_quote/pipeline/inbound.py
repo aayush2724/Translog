@@ -25,6 +25,7 @@ from translog_quote.domain.conversation import AmbiguousCorrelation, NewRequest,
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from datetime import date
 
     from translog_quote.domain.clarification import ClarificationMessage, UnresolvedPlace
     from translog_quote.domain.conversation import CorrelationPolicy
@@ -183,6 +184,25 @@ class InboundRouter:
     def pending_draft(self, request_id: str) -> ClarificationMessage | None:
         """The draft holding this request at NEEDS_INFO, if there is one."""
         return self._workflow.pending_draft(request_id)
+
+    def request_ship_date_clarification(
+        self,
+        request_id: str,
+        stated: date,
+        *,
+        to_address: str,
+        subject: str,
+        in_reply_to: str,
+    ) -> ClarificationMessage | None:
+        """Draft a date clarification for a validated request whose shipment
+        date has passed. A pass-through, like `request_location_clarification`."""
+        return self._workflow.request_ship_date_clarification(
+            request_id,
+            stated,
+            to_address=to_address,
+            subject=subject,
+            in_reply_to=in_reply_to,
+        )
 
     def request_location_clarification(
         self,

@@ -195,6 +195,22 @@ def _live_decide_goods_type(
 
 
 #: Every live action a browser may take. A literal table, like the static one.
+def _live_resolve_manual_review(
+    session: LiveSession | MultiAccountSession, body: dict[str, object]
+) -> None:
+    """Mark a manual-review request resolved: MANUAL_REVIEW -> RESOLVED.
+
+    Names the request and the operator (`by`), with an optional `note`. The
+    session refuses an unnamed operator and any request not handed to a person;
+    it sends nothing. Resolving an already-resolved request is a no-op."""
+    request_id = _str_or_none(body.get("request_id"))
+    if request_id is None:
+        raise LiveSequenceError("A resolution must name the request it applies to.")
+    session.resolve_manual_review(
+        request_id, by=str(body.get("by", "")), note=str(body.get("note", "") or "")
+    )
+
+
 _LIVE_ACTIONS: dict[
     str, Callable[[LiveSession | MultiAccountSession, dict[str, object]], None]
 ] = {
@@ -202,6 +218,7 @@ _LIVE_ACTIONS: dict[
     "clarification/approve": _live_approve_clarification,
     "quotation/decide": _live_decide,
     "goods-type/decide": _live_decide_goods_type,
+    "manual-review/resolve": _live_resolve_manual_review,
 }
 
 

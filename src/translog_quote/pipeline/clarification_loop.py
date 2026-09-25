@@ -31,6 +31,7 @@ from translog_quote.domain.clarification import (
     compose_clarification,
     identify_unresolved,
     location_question,
+    past_ship_date_question,
 )
 from translog_quote.domain.email import OutboundMessage
 from translog_quote.domain.extraction import (
@@ -40,7 +41,12 @@ from translog_quote.domain.extraction import (
     to_extracted_fields,
 )
 from translog_quote.domain.quotation import Approved
-from translog_quote.domain.shipment import RequestSource, ShipmentRecord, merge_shipment
+from translog_quote.domain.shipment import (
+    FieldName,
+    RequestSource,
+    ShipmentRecord,
+    merge_shipment,
+)
 from translog_quote.domain.validation import validate_shipment
 from translog_quote.domain.workflow import TRANSITIONS, QuotationRequest, RequestState
 from translog_quote.errors import (
@@ -59,7 +65,7 @@ if TYPE_CHECKING:
 
     from translog_quote.domain.clarification import ClarificationMessage, UnresolvedPlace
     from translog_quote.domain.email import RawEmail
-    from translog_quote.domain.shipment import FieldName, MergeResult
+    from translog_quote.domain.shipment import MergeResult
     from translog_quote.domain.validation import ValidationResult
     from translog_quote.pipeline.audit import AuditSink
     from translog_quote.ports import ClockPort, EmailSink, ExtractionPort, StorePort
@@ -360,10 +366,16 @@ class ClarificationWorkflow:
         notes: list[str] = []
         if state is RequestState.CLARIFICATION_SENT:
             still_missing = self._validate(merge.record).missing_fields
+            # The shipment date is the exception. An ambiguous date is almost
+            # always one given without its year ("26th September"): asking for the
+            # complete date is a genuinely different, answerable question, so it
+            # is re-asked (below, as AMBIGUOUS) under the ordinary round budget
+            # instead of handed to a person on the first unusable reply.
             futile = tuple(
                 field.value
                 for field in still_missing
-                if getattr(extraction, field.value).status is FieldStatus.AMBIGUOUS
+                if field is not FieldName.SHIP_DATE
+                and getattr(extraction, field.value).status is FieldStatus.AMBIGUOUS
             )
             notes = [note for field in futile if (note := getattr(extraction, field).note)]
 
@@ -392,12 +404,16 @@ class ClarificationWorkflow:
             # late non-answer, and by `sweep_followup_deadlines` for a client who
             # went silent entirely. A further non-answer *inside* the window is
             # left waiting: exactly one reminder, never a loop of them.
+            # An ambiguous shipment date is an answer we can re-ask precisely, not
+            # a non-answer — it takes the ordinary clarification path, not the
+            # courtesy reminder.
             if (
                 not futile
                 and still_missing
                 and not merge.changed
                 and not extraction.fields_by_status(FieldStatus.STATED)
                 and not extraction.fields_by_status(FieldStatus.INVALID)
+                and extraction.ship_date.status is not FieldStatus.AMBIGUOUS
             ):
                 followup_at = existing.clarification_followup_sent_at if existing else None
                 now = self._clock.now()
@@ -735,6 +751,104 @@ class ClarificationWorkflow:
                 "round": self._rounds[request_id],
                 "fields": [u.field.value for u in clarification.unresolved],
                 "reasons": sorted(r.value for r in clarification.reasons),
+                "sent": False,
+                "awaiting": "human approval",
+            },
+        )
+        return clarification
+
+    def request_ship_date_clarification(
+        self,
+        request_id: str,
+        stated: date,
+        *,
+        to_address: str,
+        subject: str,
+        in_reply_to: str,
+    ) -> ClarificationMessage | None:
+        """Draft one clarification for a validated request whose shipment date
+        has already passed, so a rate search would be refused.
+
+        The same shape as ``request_location_clarification``, which it mirrors
+        deliberately: found after validation (the date can pass while a request
+        waits), registered in the same ``_pending`` so the existing
+        ``approve_clarification`` releases it — never sent without a person —
+        and counted against the same round budget. It is a safety net for dates
+        that are still invalid; the yearless roll-forward at extraction is
+        untouched and runs before any of this.
+
+        It clears ``ship_date`` on the stored record (working store only; the
+        durable store changes at approval), so the client's new date fills an
+        empty field instead of conflicting with the past one, and a restart
+        before approval re-derives this draft rather than stranding a cleared
+        field. The past date is kept in the question and the audit.
+
+        Idempotent: a second call while a draft is pending returns it without a
+        second draft, transition, round or audit event.
+        """
+        pending = self.pending_draft(request_id)
+        if pending is not None:
+            return pending
+
+        stored = self._store.get_request(request_id)
+        if stored is None:  # pragma: no cover - a validated request is always stored
+            raise IllegalTransition(f"no request {request_id} to clarify against")
+
+        rounds = self._rounds.get(request_id, 0)
+        if rounds >= self._max_rounds:
+            note = (
+                f"After {rounds} clarification rounds the shipment date is still in the "
+                f"past ({stated.isoformat()}). Automated clarification has stopped; a "
+                "person must decide how to proceed."
+            )
+            state = self._advance(request_id, stored.state, RequestState.MANUAL_REVIEW)
+            self._store.save_request(
+                stored.model_copy(update={"state": state, "manual_review_notes": (note,)})
+            )
+            self._emit(
+                request_id,
+                AuditEventType.MANUAL_REVIEW_ESCALATED,
+                {
+                    "fields": [FieldName.SHIP_DATE.value],
+                    "notes": [note],
+                    "reason": "ship_date_in_past_budget_exhausted",
+                },
+            )
+            return None
+
+        field = UnresolvedField(
+            field=FieldName.SHIP_DATE,
+            reason=UnresolvedReason.INVALID,
+            question=past_ship_date_question(stated),
+            detail=stated.isoformat(),
+        )
+        clarification = compose_clarification(request_id, UnresolvedAnalysis(unresolved=(field,)))
+        assert clarification is not None  # one unresolved field
+
+        cleared = stored.record.model_copy(update={FieldName.SHIP_DATE.value: None})
+        state = self._advance(request_id, stored.state, RequestState.NEEDS_INFO)
+        self._store.save_request(stored.model_copy(update={"state": state, "record": cleared}))
+
+        self._pending[request_id] = _PendingDraft(
+            message=clarification,
+            to_address=to_address,
+            subject=_reply_subject(subject, clarification.subject),
+            in_reply_to=in_reply_to,
+        )
+        self._rounds[request_id] = rounds + 1
+        self._emit(
+            request_id,
+            AuditEventType.SHIP_DATE_IN_PAST,
+            {"stated": stated.isoformat(), "today": self._today().isoformat()},
+        )
+        self._emit(
+            request_id,
+            AuditEventType.CLARIFICATION_DRAFTED,
+            {
+                "round": self._rounds[request_id],
+                "fields": [FieldName.SHIP_DATE.value],
+                "reasons": [UnresolvedReason.INVALID.value],
+                "reason": "ship_date_in_past",
                 "sent": False,
                 "awaiting": "human approval",
             },

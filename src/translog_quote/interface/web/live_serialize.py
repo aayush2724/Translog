@@ -126,6 +126,7 @@ _STATUS_LABELS: dict[RequestState, tuple[str, str]] = {
     RequestState.FAILED: ("FAILED", "gray"),
     RequestState.ACCEPTED: ("ACCEPTED", "green"),
     RequestState.DECLINED: ("CLIENT DECLINED", "gray"),
+    RequestState.RESOLVED: ("RESOLVED", "gray"),
 }
 
 
@@ -466,6 +467,33 @@ def timeline_json(request: LiveRequest, events: list[AuditEvent]) -> list[Json]:
             }
         )
 
+    if request.state is RequestState.RESOLVED:
+        # Handed to a person, then settled by them. Ends on who resolved it,
+        # the same way the manual-review block ends on the hand-over.
+        rows = [row for row in rows if row["state"] == "done"]
+        rows.append(
+            {
+                "key": "manual_review",
+                "label": "Manual review",
+                "state": "done",
+                "at": None,
+                "note": "Handed to a person",
+                "waiting_on": None,
+            }
+        )
+        rows.append(
+            {
+                "key": "resolved",
+                "label": "Resolved",
+                "state": "done",
+                "at": request.resolved_at.isoformat() if request.resolved_at else None,
+                "note": f"Resolved by {request.resolved_by}"
+                if request.resolved_by
+                else "Resolved by an operator",
+                "waiting_on": None,
+            }
+        )
+
     if request.state in (RequestState.CLOSED_NO_RATES, RequestState.NO_ELIGIBLE_RATE):
         # The search ran and found no usable rate. Same failure mode the manual-
         # review block fixes: without this the first not-done row rendered as
@@ -681,6 +709,13 @@ def request_detail(session: LiveSession, request: LiveRequest) -> Json:
         "worker_notice": _worker_notice(session, request),
         "goods_type_hold": _goods_type_hold(session, request),
         "manual_review_notes": list(request.manual_review_notes),
+        "resolution": None
+        if request.state is not RequestState.RESOLVED
+        else {
+            "by": request.resolved_by,
+            "at": request.resolved_at.isoformat() if request.resolved_at else None,
+            "note": request.resolution_note,
+        },
         "validation": validation_json(request.validation),
         "clarification": None
         if clarification is None

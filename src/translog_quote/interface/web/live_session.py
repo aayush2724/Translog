@@ -203,6 +203,9 @@ class LiveRequest:
     clarification: ClarificationMessage | None = None
     clarification_sent_by: str | None = None
     manual_review_notes: tuple[str, ...] = ()
+    resolved_by: str | None = None
+    resolved_at: datetime.datetime | None = None
+    resolution_note: str | None = None
     """Why this request was handed to a person: the model's own explanation of
     the answer it could not use. Empty for every request that was not."""
 
@@ -315,6 +318,7 @@ class LiveRequest:
             RequestState.QUOTATION_SENT,
             RequestState.MAKER_REJECTED,
             RequestState.CLOSED_NO_RATES,
+            RequestState.RESOLVED,
         }
 
 
@@ -766,6 +770,71 @@ class LiveSession:
         bootstrap.commit_request(self._working, self._durable, request_id)
         return request
 
+    def resolve_manual_review(self, request_id: str, *, by: str, note: str = "") -> LiveRequest:
+        """An operator has settled a request that was handed to a person.
+
+        The one exit from MANUAL_REVIEW (MANUAL_REVIEW -> RESOLVED): the request
+        moves to History, automation never touches it again, and a later client
+        reply is recorded without a model call (RESOLVED cannot take a reply).
+        Who, when and the optional note are persisted with the request and
+        audited. Nothing is sent to anyone.
+
+        Idempotent: resolving an already-resolved request changes nothing and
+        records nothing further. Any other state is refused as out of sequence.
+        """
+        request = self.requests.get(request_id)
+        if request is None:
+            raise LiveSequenceError(f"There is no request {request_id}.")
+        who = by.strip()
+        if not who:
+            raise LiveSequenceError("A request can only be resolved by a named person.")
+        if request.state is RequestState.RESOLVED:
+            return request
+        if request.state is not RequestState.MANUAL_REVIEW:
+            raise LiveSequenceError(
+                f"{request_id} is not awaiting manual review; only a request handed "
+                "to a person can be marked resolved."
+            )
+        stored = self._working.get_request(request_id)
+        if stored is None:
+            raise LiveSequenceError(f"There is no stored record for {request_id}.")
+
+        from translog_quote.pipeline.audit import AuditEvent, AuditEventType
+        from translog_quote.pipeline.state_machine import StateMachine
+
+        StateMachine().assert_transition(RequestState.MANUAL_REVIEW, RequestState.RESOLVED)
+        now = self._clock.now()
+        text = note.strip() or None
+        self._working.save_request(
+            stored.model_copy(
+                update={
+                    "state": RequestState.RESOLVED,
+                    "resolved_by": who,
+                    "resolved_at": now,
+                    "resolution_note": text,
+                }
+            )
+        )
+        bootstrap.commit_request(self._working, self._durable, request_id)
+        request.state = RequestState.RESOLVED
+        request.resolved_by = who
+        request.resolved_at = now
+        request.resolution_note = text
+        self.audit.record(
+            AuditEvent(
+                request_id=request_id,
+                event=AuditEventType.MANUAL_REVIEW_RESOLVED,
+                at=now,
+                detail={
+                    "by": who,
+                    "note": text or "",
+                    "from": RequestState.MANUAL_REVIEW.value,
+                    "to": RequestState.RESOLVED.value,
+                },
+            )
+        )
+        return request
+
     def decide_goods_type(self, request_id: str, *, goods_type: str, by: str) -> None:
         """Record an operator's Goods Type pick for a held request.
 
@@ -1116,13 +1185,12 @@ class LiveSession:
             # so this catches only a record that predates that fix or a date that
             # has passed while the request waited. Loud, never a silent re-date.
             # Only before enqueue: a job already in flight is left to finish.
+            # Not a dead end: the client is asked for a current date through the
+            # ordinary, operator-approved clarification (VALIDATED -> NEEDS_INFO),
+            # and the reply resumes the normal flow.
             today = self._clock.now().date()
             if request.rate_job_id is None and request.record.ship_date < today:
-                request.rate_failure = (
-                    f"The shipment date {request.record.ship_date.isoformat()} is in "
-                    "the past; a rate search will not run for a past date. Confirm a "
-                    "current shipment date with the client."
-                )
+                self._draft_ship_date_clarification(request, request.record.ship_date)
                 continue
             # Resolve the stated places before any enqueue. Pure, deterministic,
             # no I/O — safe in the web process. A place that cannot be resolved
@@ -1527,6 +1595,51 @@ class LiveSession:
         request.rate_failure = None
         request.rate_job_id = None
 
+    def _draft_ship_date_clarification(self, request: LiveRequest, stated: datetime.date) -> None:
+        """Ask the client for a current shipment date instead of refusing the
+        rate search forever, and mirror the result into the interface's view.
+
+        The draft is registered in the workflow's pending set (via the router),
+        so the existing ``approve_clarification`` releases it — nothing is sent
+        until a person approves. Idempotent across polls (the pending draft is
+        returned), and after a restart the durable VALIDATED record re-derives
+        the same draft rather than sending anything. If the clarification budget
+        is spent the workflow hands the request to a person instead; that
+        hand-over is committed so it survives a restart."""
+        if self._working.get_request(request.request_id) is None:
+            # Nothing to clarify against (a committed request always has its
+            # thread, which is how the working store is seeded — so this is not
+            # expected). Keep the previous visible refusal rather than raise and
+            # abort every poll.
+            request.rate_failure = (
+                f"The shipment date {stated.isoformat()} is in the past; a rate search "
+                "will not run for a past date. Confirm a current shipment date with "
+                "the client."
+            )
+            return
+        draft = self._router.request_ship_date_clarification(
+            request.request_id,
+            stated,
+            to_address=request.client_address,
+            subject=request.subject,
+            in_reply_to=request.last_message_id or "",
+        )
+        stored = self._working.get_request(request.request_id)
+        if stored is not None:
+            request.record = stored.record
+            request.validation = validate_shipment(stored.record, today=self._clock.now().date())
+            request.state = stored.state
+        request.rate_failure = None
+        request.rate_job_id = None
+        if draft is None:
+            if request.state is RequestState.MANUAL_REVIEW:
+                request.clarification = None
+                if stored is not None:
+                    request.manual_review_notes = stored.manual_review_notes
+                bootstrap.commit_request(self._working, self._durable, request.request_id)
+            return
+        request.clarification = draft
+
     def _resolve_goods_type(self, request: LiveRequest) -> tuple[str | None, str | None]:
         """The Goods Type to search under, and its source, or ``(None, None)`` to
         hold for an operator.
@@ -1781,6 +1894,9 @@ class LiveSession:
             # A persisted hand-over reason comes back with the request, so an
             # Active MANUAL_REVIEW card still explains itself after a restart.
             manual_review_notes=stored.manual_review_notes,
+            resolved_by=stored.resolved_by,
+            resolved_at=stored.resolved_at,
+            resolution_note=stored.resolution_note,
             # MANUAL_REVIEW is terminal for *automation* but not settled work: a
             # person still owes it a decision. So it comes back as active/needs
             # attention, not collapsed under history like the truly-finished

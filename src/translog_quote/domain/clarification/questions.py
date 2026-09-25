@@ -12,7 +12,12 @@ question is a generator that can invent a premise.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from translog_quote.domain.shipment import FieldName
+
+if TYPE_CHECKING:
+    from datetime import date
 
 #: What to ask when the client has said nothing about a field.
 MISSING_QUESTIONS: dict[FieldName, str] = {
@@ -38,6 +43,10 @@ AMBIGUOUS_QUESTIONS: dict[FieldName, str] = {
     FieldName.PCS: "The total number of pieces for this shipment",
     FieldName.ORIGIN: "The single origin airport or city for this shipment",
     FieldName.DESTINATION: "The single destination airport or city for this shipment",
+    # Typically a date given without its year ("26th September"). Asking for the
+    # complete date is a different question from the plain "missing" one, which
+    # is what lets an ambiguous date be re-asked rather than handed to a person.
+    FieldName.SHIP_DATE: "The complete shipment date, including the day, month and year",
 }
 
 _CONFLICT = "{label} — we have received two different values, {first} and {second}"
@@ -116,6 +125,21 @@ def location_question(field: FieldName, stated: str) -> str:
     interpolates the stated place, so it is a function, not a table row.
     """
     return _LOCATION_UNRESOLVED.format(label=FIELD_LABELS[field], stated=stated)
+
+
+#: What to ask when the shipment date on a validated request is already in the
+#: past — found at rate-search time, so a search would be refused. It quotes the
+#: date we hold, so the client can see what is being corrected.
+_PAST_SHIP_DATE = (
+    "Shipment date — the date we have, {stated}, is already in the past. Please "
+    "confirm the date you would like the shipment to leave, including the day, "
+    "month and year."
+)
+
+
+def past_ship_date_question(stated: date) -> str:
+    """Ask for a current shipment date in place of one that has already passed."""
+    return _PAST_SHIP_DATE.format(stated=f"{stated.day} {stated:%B %Y}")
 
 
 def conflict_question(field: FieldName, existing: object, incoming: object) -> str:

@@ -22,6 +22,8 @@ class AuditEventType(StrEnum):
     SHIP_DATE_YEAR_RESOLVED = "ship_date_year_resolved"
     EXTRACTION_UNAVAILABLE = "extraction_unavailable"
     OUTBOUND_UNAVAILABLE = "outbound_unavailable"
+    SHIP_DATE_IN_PAST = "ship_date_in_past"
+    MANUAL_REVIEW_RESOLVED = "manual_review_resolved"
     REPLY_NOT_ACCEPTED = "reply_not_accepted"
     RECORD_MERGED = "record_merged"
     VALIDATED = "validated"

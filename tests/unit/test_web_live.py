@@ -528,6 +528,7 @@ def test_the_live_surfaces_are_closed_whitelists() -> None:
         "clarification/approve",
         "quotation/decide",
         "goods-type/decide",
+        "manual-review/resolve",
     }
 
 

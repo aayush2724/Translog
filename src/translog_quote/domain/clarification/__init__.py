@@ -21,7 +21,7 @@ from translog_quote.domain.clarification.model import (
     UnresolvedPlace,
     UnresolvedReason,
 )
-from translog_quote.domain.clarification.questions import location_question
+from translog_quote.domain.clarification.questions import location_question, past_ship_date_question
 
 __all__ = [
     "DEFAULT_SUBJECT",
@@ -33,4 +33,5 @@ __all__ = [
     "compose_clarification",
     "identify_unresolved",
     "location_question",
+    "past_ship_date_question",
 ]

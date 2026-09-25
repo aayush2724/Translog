@@ -1061,6 +1061,55 @@ check("B3: the detail hand-over card lists the notes and drops the old assumptio
     "no card for a request that was never handed over");
 });
 
+/* The one way out of manual review: a named person marks it resolved. */
+const isTextarea = (n) => n.tagName === "textarea";
+
+check("resolve: the button waits for a name, then posts the name and the note", () => {
+  const calls = [];
+  const t = load((url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ requests: [] }) });
+  });
+  const section = t.sectionManualReview({
+    status: { state: "manual_review" },
+    manual_review_notes: ["Shipment date still unclear after clarification."],
+  });
+  const resolve = section.find((n) => isButton(n) && /Mark as resolved/.test(n.textContent));
+  eq(resolve !== null, true, "a resolve action is offered");
+  eq(resolve.disabled, true, "disabled until a name is typed");
+
+  section.find(isInput).fire("input", { target: { value: "Aayush" } });
+  section.find(isTextarea).value = "Priced by phone.";
+  eq(resolve.disabled, false, "a name enables it");
+  resolve.fire("click");
+
+  eq(calls.length, 1, "one request");
+  eq(calls[0].url, "/api/live/manual-review/resolve", "endpoint");
+  eq(calls[0].body.by, "Aayush", "resolver name in the body");
+  eq(calls[0].body.note, "Priced by phone.", "the optional note in the body");
+  eq(/Nothing is sent to the client/.test(section.textContent), true, "says nothing is sent");
+});
+
+check("resolve: a resolved request shows who, when and why, with nothing left to do", () => {
+  const t = load();
+  const section = t.sectionManualReview({
+    status: { state: "resolved" },
+    manual_review_notes: ["Shipment date still unclear after clarification."],
+    resolution: { by: "Aayush", at: "2026-09-25T10:00:00+00:00", note: "Priced by phone." },
+  });
+  const text = section.textContent;
+  eq(/RESOLVED/.test(text), true, "the pill says resolved");
+  eq(/Resolved by Aayush/.test(text), true, "who resolved it");
+  eq(/Priced by phone\./.test(text), true, "the note");
+  eq(section.find(isButton), null, "no action left");
+});
+
+check("resolve: the manual-review next step points at resolving it", () => {
+  const t = load();
+  const step = t.nextStep({ status: { state: "manual_review" } });
+  eq(step !== null && /mark it resolved/.test(step[1]), true, "names the way out");
+});
+
 function historySnapshot(activeId) {
   const snap = snapshotWith([request({ request_id: activeId })], { active: true, following: 1 });
   snap.history = [request({ request_id: "R-OLD", status: { state: "quotation_sent", label: "QUOTATION SENT", tone: "green" } })];

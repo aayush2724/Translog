@@ -36,6 +36,7 @@ from translog_quote.adapters.store import InMemoryStore
 from translog_quote.config import Settings, WebCargoMode
 from translog_quote.config.settings import DemoSettings
 from translog_quote.domain.clarification.questions import invalid_question
+from translog_quote.domain.conversation import Thread
 from translog_quote.domain.email import RawEmail
 from translog_quote.domain.extraction import ExtractedValue, ExtractionResult
 from translog_quote.domain.rates import (
@@ -47,7 +48,7 @@ from translog_quote.domain.rates import (
 )
 from translog_quote.domain.rates import LocationRef as RateLocationRef
 from translog_quote.domain.shipment import CargoDimensions, DeliveryType, FieldName
-from translog_quote.domain.validation import ValidationRuleId, validate_shipment
+from translog_quote.domain.validation import validate_shipment
 from translog_quote.domain.workflow import QuotationRequest, RequestState
 from translog_quote.interface.jobs import JobState, JobStatus, RateSearchJobResult
 from translog_quote.interface.web import live_serialize
@@ -232,9 +233,12 @@ def test_2_a_stored_explicit_past_date_never_reaches_webcargo_and_is_not_rewritt
     spy: QueueSpy,
 ) -> None:
     """The shape of the real bad request: a VALIDATED record already carrying
-    2024-09-26 in the durable store (it predates the fix). After a restart in
-    operations mode, repeated polls must never enqueue it, must show a visible
-    reason on the dashboard and in VR-13, and must leave the stored date as-is."""
+    2024-09-26 in the durable store (it predates the fix), committed with its
+    thread as every real request is. After a restart in operations mode,
+    repeated polls must never enqueue it and must leave the stored date as-is.
+    It is no longer a dead end: the client is asked for a current date through
+    the ordinary, operator-approved clarification — drafted once, sent to nobody
+    until a person approves."""
     settings = _operations(_settings(WebCargoMode.BROWSER), since=TODAY - timedelta(days=1))
     record = _full_record(PAST_RECORD_ID, ship_date=date(2024, 9, 26))
     durable = InMemoryStore()
@@ -245,6 +249,9 @@ def test_2_a_stored_explicit_past_date_never_reaches_webcargo_and_is_not_rewritt
             record=record,
             client_address=CLIENT,
         )
+    )
+    durable.save_thread(
+        Thread(request_id=PAST_RECORD_ID, message_ids=("<past-enq@client.example>",))
     )
     session = _browser_session(
         settings,
@@ -260,23 +267,30 @@ def test_2_a_stored_explicit_past_date_never_reaches_webcargo_and_is_not_rewritt
     request = session.requests[PAST_RECORD_ID]
     assert spy.enqueued == [], "a past date must never be sent to the worker"
     assert request.rate_job_id is None
-    assert request.rate_failure is not None
-    assert "2024-09-26" in request.rate_failure and "past" in request.rate_failure
-    assert request.validation.invalid_fields == (FieldName.SHIP_DATE,)
-    assert ValidationRuleId.SHIP_DATE_IN_PAST in {i.rule_id for i in request.validation.issues}
+    # A date clarification awaiting a person — not a permanent rate failure.
+    assert request.state is RequestState.NEEDS_INFO
+    assert request.rate_failure is None
+    assert request.awaiting_clarification_approval
+    assert request.clarification is not None
+    assert "2024" in request.clarification.body_text
+    assert "in the past" in request.clarification.body_text
+    events = _events_for(session, PAST_RECORD_ID)
+    assert events.count(AuditEventType.SHIP_DATE_IN_PAST) == 1, "drafted once, not per poll"
+    assert AuditEventType.CLARIFICATION_SENT not in events, "nothing sent before approval"
 
-    # Not silently rewritten — in memory or in the durable store.
-    assert request.record.ship_date == date(2024, 9, 26)
+    # Not silently rewritten: the durable date is untouched until a person
+    # approves the question, and the year is never guessed.
     stored = durable.get_request(PAST_RECORD_ID)
     assert stored is not None
+    assert stored.state is RequestState.VALIDATED
     assert stored.record.ship_date == date(2024, 9, 26)
-    assert AuditEventType.SHIP_DATE_YEAR_RESOLVED not in _events_for(session, PAST_RECORD_ID)
+    assert AuditEventType.SHIP_DATE_YEAR_RESOLVED not in events
 
-    # Visible to the operator on the dashboard row.
+    # Visible to the operator on the dashboard row, as a draft to approve.
     snap = live_serialize.snapshot(session)
     rows: list[Any] = snap["requests"]  # type: ignore[assignment]
     row = next(r for r in rows if r["request_id"] == PAST_RECORD_ID)
-    assert "past" in row["rate_failure"]
+    assert row["status"]["state"] == "needs_info"
 
 
 def test_2b_an_explicit_year_in_new_mail_is_rolled_forward_documented_limitation(

@@ -180,6 +180,9 @@ class MultiAccountSession:
     def decide_goods_type(self, request_id: str, *, goods_type: str, by: str) -> None:
         self._owner(request_id).decide_goods_type(request_id, goods_type=goods_type, by=by)
 
+    def resolve_manual_review(self, request_id: str, *, by: str, note: str = "") -> LiveRequest:
+        return self._owner(request_id).resolve_manual_review(request_id, by=by, note=note)
+
     def close(self) -> None:
         """Release every account session's pooled connections."""
         for session in self.sessions.values():

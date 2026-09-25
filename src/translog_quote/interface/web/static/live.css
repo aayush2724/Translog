@@ -118,6 +118,8 @@
 }
 
 .decision-actions { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; }
+.resolution-input { flex: 1 1 16rem; min-height: 2.4rem; font: inherit; padding: 0.4rem 0.55rem; border: 1px solid #cfd5e4; border-radius: 8px; }
+.resolution-note { white-space: pre-wrap; color: #3d4663; }
 
 .btn-decline {
   background: #fff;

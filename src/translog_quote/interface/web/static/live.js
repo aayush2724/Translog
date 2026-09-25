@@ -493,7 +493,7 @@ function nextStep(request) {
   if (request.goods_type_hold) return ["action", "Choose the WebCargo goods type"];
   if (request.awaiting_clarification) return ["action", "Review and approve the clarification draft"];
   if (request.awaiting_decision) return ["action", "Approve or decline the quotation"];
-  if (state === "manual_review") return ["action", "Handle manually — automatic processing has stopped"];
+  if (state === "manual_review") return ["action", "Handle manually — automatic processing has stopped; mark it resolved when done"];
   if (request.rate_search_pending) {
     return request.worker_notice
       ? ["wait", "Rate search queued — waiting for the rate-search worker"]
@@ -893,17 +893,50 @@ function sectionManualReview(detail) {
      for a request that was actually escalated; an empty card would imply a
      problem where there is none. */
   const notes = detail.manual_review_notes || [];
-  const handedOver = detail.status && detail.status.state === "manual_review";
+  const state = detail.status && detail.status.state;
+  const handedOver = state === "manual_review";
+  const reasons = notes.length
+    ? el("ul", { class: "issue-list" }, ...notes.map((note) => el("li", null, note)))
+    : null;
+  /* Settled by an operator: say who, when and why, and nothing else to do. */
+  if (state === "resolved" && detail.resolution) {
+    const resolution = detail.resolution;
+    return card(
+      [el("h2", null, "Manual review"), pill("RESOLVED", "gray")],
+      el("p", null,
+        `Resolved by ${resolution.by || "an operator"}` +
+        (resolution.at ? ` at ${fmtStamp(resolution.at)}` : "") + "."),
+      resolution.note ? el("p", { class: "resolution-note" }, resolution.note) : null,
+      reasons);
+  }
   if (!notes.length && !handedOver) return null;
+  /* The one way out of manual review: a named person marks it resolved. It
+     moves the request to History and sends nothing to anyone. */
+  const note = el("textarea", {
+    class: "resolution-input",
+    rows: "2",
+    placeholder: "Resolution note (optional)",
+    "aria-label": "Resolution note (optional)",
+  });
+  const resolve = handedOver
+    ? button("Mark as resolved", "approve",
+        () => post("manual-review/resolve", { by: ui.approver, note: note.value || "" },
+          "Marking as resolved…"),
+        !canDecide())
+    : null;
   return card(
     [el("h2", null, "Manual review required"), pill("HANDED TO A PERSON", "amber")],
     el("p", null,
       "Automatic processing has stopped for this request; nothing further is " +
       "sent until someone takes it over."),
-    notes.length
-      ? el("ul", { class: "issue-list" }, ...notes.map((note) => el("li", null, note)))
-      : el("p", { class: "muted small" },
-          "The reason was recorded when it was handed over and is not available in this view.")
+    reasons
+      || el("p", { class: "muted small" },
+          "The reason was recorded when it was handed over and is not available in this view."),
+    resolve ? el("div", { class: "decision-actions" }, approverField(resolve), note, resolve) : null,
+    resolve
+      ? el("p", { class: "action-note" },
+          "Moves the request to History. Nothing is sent to the client. A name is required.")
+      : null
   );
 }
 

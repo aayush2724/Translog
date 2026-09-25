@@ -25,8 +25,17 @@ def test_every_transition_target_is_a_real_state() -> None:
 
 
 def test_terminal_states_have_no_exits() -> None:
-    for state in TERMINAL_STATES:
+    """Terminal for automation means no automatic exit. The single exception is
+    MANUAL_REVIEW, whose one exit is an operator marking it RESOLVED — a person's
+    action, so a hand-over always has a defined end."""
+    for state in TERMINAL_STATES - {RequestState.MANUAL_REVIEW}:
         assert TRANSITIONS[state] == frozenset()
+    assert TRANSITIONS[RequestState.MANUAL_REVIEW] == frozenset({RequestState.RESOLVED})
+
+
+def test_resolved_is_terminal_with_no_exits() -> None:
+    assert RequestState.RESOLVED in TERMINAL_STATES
+    assert TRANSITIONS[RequestState.RESOLVED] == frozenset()
 
 
 def test_pending_approval_has_no_automatic_exit(machine: StateMachine) -> None:

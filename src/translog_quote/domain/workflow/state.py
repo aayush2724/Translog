@@ -41,6 +41,10 @@ class RequestState(StrEnum):
     MAKER_REJECTED = "maker_rejected"
     FAILED = "failed"
     MANUAL_REVIEW = "manual_review"
+    # A manual-review request an operator has settled. The only way out of
+    # MANUAL_REVIEW, so every hand-over has a defined end rather than sitting
+    # in the Active list forever. Sends nothing.
+    RESOLVED = "resolved"
 
 
 TERMINAL_STATES: frozenset[RequestState] = frozenset(
@@ -51,6 +55,7 @@ TERMINAL_STATES: frozenset[RequestState] = frozenset(
         RequestState.MAKER_REJECTED,
         RequestState.FAILED,
         RequestState.MANUAL_REVIEW,
+        RequestState.RESOLVED,
     }
 )
 
@@ -122,7 +127,10 @@ TRANSITIONS: dict[RequestState, frozenset[RequestState]] = {
     RequestState.CLOSED_NO_RATES: frozenset(),
     RequestState.MAKER_REJECTED: frozenset(),
     RequestState.FAILED: frozenset(),
-    RequestState.MANUAL_REVIEW: frozenset(),
+    # A person took the request over; the one exit is that person marking it
+    # resolved. No automatic edge, no timer — an operator action only.
+    RequestState.MANUAL_REVIEW: frozenset({RequestState.RESOLVED}),
+    RequestState.RESOLVED: frozenset(),
 }
 
 
@@ -172,6 +180,14 @@ class QuotationRequest(BaseModel):
     and the poll sweep can escalate an expired window on any process that resumes
     the request. Optional with a ``None`` default so a request written before this
     field existed loads unchanged."""
+
+    resolved_by: str | None = None
+    """The operator who marked a manual-review request resolved. Persisted with
+    ``resolved_at`` and ``resolution_note`` so the History entry still says who
+    settled it, when, and why after a restart. ``None`` until resolved, so a
+    request written before these fields existed loads unchanged."""
+    resolved_at: datetime | None = None
+    resolution_note: str | None = None
 
     manual_review_notes: tuple[str, ...] = ()
     """Why the request was handed to a person, as shown to the operator —
