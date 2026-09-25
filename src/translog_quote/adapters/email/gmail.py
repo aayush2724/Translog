@@ -92,6 +92,67 @@ class _Throttled(TransientFailure):
         self.retry_after = retry_after
 
 
+class GmailQuotaExceeded(PermanentFailure):
+    """Gmail refused a read because this mailbox's API quota or rate limit is
+    spent (a 403 carrying a quota/rate-limit reason).
+
+    A ``PermanentFailure`` so the in-poll retry loop does not retry it —
+    retrying immediately is exactly what keeps the mailbox over its per-minute
+    quota. ``GmailEmailSource`` turns it into a short per-account polling hold
+    instead. ``retry_after`` is Gmail's own hint, when it sent one."""
+
+    def __init__(self, message: str, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+#: How long a mailbox's reads are paused after Gmail reports its quota spent.
+#: The limit that tripped is per minute, so one minute is the natural floor; a
+#: longer ``Retry-After`` from Gmail is honoured, up to the cap.
+QUOTA_HOLD_SECONDS = 60.0
+QUOTA_HOLD_MAX_SECONDS = 15 * 60.0
+
+#: Gmail's documented reasons for a quota or rate-limit refusal.
+_QUOTA_REASONS = frozenset(
+    {"ratelimitexceeded", "userratelimitexceeded", "quotaexceeded", "rate_limit_exceeded"}
+)
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    """A numeric ``Retry-After``, uncapped (the hold applies its own cap).
+
+    Not the shared ``_parse_retry_after``: that caps at the in-poll retry
+    ceiling, which would silently shorten a quota hold Gmail asked for. Any
+    other form is ignored, and the hold falls back to its one-minute floor."""
+    if value is None:
+        return None
+    try:
+        seconds = float(value.strip())
+    except ValueError:
+        return None
+    return seconds if seconds >= 0 else None
+
+
+def _is_quota_refusal(response: httpx.Response) -> bool:
+    """Whether a 403 is Gmail saying "quota/rate limit exceeded" rather than
+    "you are not allowed". Reads only the error body's own reason, status and
+    message; an unreadable body is not a quota refusal."""
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return False
+    if str(error.get("status", "")).upper() == "RESOURCE_EXHAUSTED":
+        return True
+    for entry in [*(error.get("errors") or []), *(error.get("details") or [])]:
+        if isinstance(entry, dict) and str(entry.get("reason", "")).lower() in _QUOTA_REASONS:
+            return True
+    message = str(error.get("message", "")).lower()
+    return "quota exceeded" in message or "rate limit exceeded" in message
+
+
 class _Unauthorized(PermanentFailure):
     """The access token was rejected. Caught once for a single refresh; a
     second rejection escapes as the ``PermanentFailure`` it already is."""
@@ -322,6 +383,11 @@ class HttpxGmailTransport:
         if status == 401:
             raise _Unauthorized(
                 "Gmail API rejected the credentials (401). Re-run the gmail-auth consent command."
+            )
+        if status == 403 and _is_quota_refusal(response):
+            raise GmailQuotaExceeded(
+                f"Gmail API quota/rate limit exceeded (403): {_gmail_detail(response)}",
+                retry_after=_retry_after_seconds(response.headers.get("Retry-After")),
             )
         if status == 403:
             raise PermanentFailure(
@@ -611,6 +677,7 @@ class GmailEmailSource:
         is_internal: Callable[[RawEmail], bool] | None = None,
         sent_by_us: Callable[[], Collection[str]] | None = None,
         seen: Callable[[str], bool] | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if not mailbox_address:
             raise PermanentFailure(
@@ -641,6 +708,19 @@ class GmailEmailSource:
         # re-quarantine), and a message that stays in the query window is only
         # re-fetched until the watermark clears it.
         self._unparseable: set[str] = set()
+        # Gmail id -> the Message-ID its full download carried, remembered only
+        # so an already-handled message need not be downloaded again on every
+        # poll (each download spends Gmail quota). Purely an optimisation and
+        # never the source of truth: a hit may skip only when `seen` confirms
+        # that Message-ID *now*; a miss, or a hit `seen` does not confirm, takes
+        # the full-download path exactly as before. In memory, per source (so
+        # per account), never persisted — a restart simply downloads once.
+        self._message_id_by_gmail_id: dict[str, str] = {}
+        # When Gmail last refused this mailbox for quota, reads pause until this
+        # monotonic instant rather than retrying every poll. Per source, so one
+        # mailbox's hold never pauses another.
+        self._monotonic = monotonic
+        self._quota_hold_until: float | None = None
 
     def close(self) -> None:
         """Release the transport's pooled connection, if it has one.
@@ -670,11 +750,29 @@ class GmailEmailSource:
         holding more than the budget is drained across successive polls; a
         restart resumes from the persisted watermark, so mail that arrived
         during a deploy is read exactly once (the durable already-processed
-        check upstream drops anything the overlap re-lists)."""
-        self._verify_mailbox()
-        if since is None:
-            return self._fetch_newest_slice()
-        return self._fetch_since(since)
+        check upstream drops anything the overlap re-lists).
+
+        After Gmail refuses this mailbox for quota, reads pause for
+        ``QUOTA_HOLD_SECONDS`` (or Gmail's longer ``Retry-After``): each call in
+        that window raises ``GmailQuotaExceeded`` without contacting Gmail."""
+        if self._quota_hold_until is not None:
+            remaining = self._quota_hold_until - self._monotonic()
+            if remaining > 0:
+                raise GmailQuotaExceeded(
+                    "Gmail API quota/rate limit exceeded; reads from this mailbox are "
+                    f"paused for another {remaining:.0f}s"
+                )
+            self._quota_hold_until = None
+        try:
+            self._verify_mailbox()
+            if since is None:
+                return self._fetch_newest_slice()
+            return self._fetch_since(since)
+        except GmailQuotaExceeded as exc:
+            hold = min(max(QUOTA_HOLD_SECONDS, exc.retry_after or 0.0), QUOTA_HOLD_MAX_SECONDS)
+            self._quota_hold_until = self._monotonic() + hold
+            _log.warning("%s; reads from this mailbox are paused for %.0fs", exc, hold)
+            raise
 
     def _fetch_newest_slice(self) -> tuple[RawEmail, ...]:
         """The original single-page, newest-first read."""
@@ -701,6 +799,11 @@ class GmailEmailSource:
 
         ids = self._list_ids(query)
         ids.reverse()  # Gmail lists newest-first; drain the oldest first.
+        # Forget ids that have left the window, so the memo stays bounded.
+        listed = set(ids)
+        self._message_id_by_gmail_id = {
+            gid: mid for gid, mid in self._message_id_by_gmail_id.items() if gid in listed
+        }
 
         emails: list[RawEmail] = []
         for gmail_id in ids:
@@ -746,6 +849,14 @@ class GmailEmailSource:
             # poll. Dropped by the same watermark advance that clears it.
             _log.info("Gmail message %s is quarantined as unparseable; skipped", gmail_id)
             return
+        if skip_seen and self._seen is not None:
+            known = self._message_id_by_gmail_id.get(gmail_id)
+            if known is not None and self._seen(known):
+                # Downloaded before, and its Message-ID is handled right now —
+                # the same skip the post-download check below would make, minus
+                # the download. Anything less certain falls through to it.
+                _log.info("Gmail message %s was already handled; skipped", gmail_id)
+                return
         try:
             full = self._transport.get_json(f"messages/{gmail_id}", {"format": "full"})
         except _NotFound:
@@ -781,6 +892,7 @@ class GmailEmailSource:
                 exc,
             )
             return
+        self._message_id_by_gmail_id[gmail_id] = raw.message_id
         if skip_seen and self._seen is not None and self._seen(raw.message_id):
             # Already handled this run or durably committed. Skipped so the
             # oldest-first per-poll budget advances past it to newer mail; the
