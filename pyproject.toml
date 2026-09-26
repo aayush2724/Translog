@@ -59,7 +59,12 @@ packages = ["src/translog_quote"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+# "src": the package under test, ahead of any stale site-packages copy.
+# ".": the repo root, so `tests` — a namespace package, no __init__.py — is
+# importable for the cross-test imports (`from tests.unit.test_gmail_thread …`,
+# 38 files). `python -m pytest` got this for free (cwd lands on sys.path); the
+# bare `pytest` console script does not and failed collection without it.
+pythonpath = ["src", "."]
 addopts = "-q --strict-markers"
 markers = [
     "phase2: awaits Phase 2 (extraction, ingestion, validation)",

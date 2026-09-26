@@ -12,7 +12,7 @@ weight or a transit time is spelled.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from translog_quote.domain.quotation import SIMULATED_RATE_NOTICE
@@ -767,7 +767,45 @@ def _activity_at(request: LiveRequest) -> datetime:
     return _OLDEST_ACTIVITY
 
 
-def snapshot(session: LiveSession | MultiAccountSession, *, selected: str | None = None) -> Json:
+#: How long a settled request stays under History before it leaves the desk.
+#: Measured from the instant it settled (`LiveRequest.settled_at`, persisted),
+#: not from when the page last drew it, so a restart neither resets the window
+#: nor resurrects last week's work. One hour is long enough for the operator
+#: who approved a quotation to re-read the confirmation and for a colleague to
+#: see what just went out; after that the request is finished business and the
+#: desk should lead with live work. A display window only: the durable store
+#: and the audit trail keep every request forever, and a late client reply
+#: still correlates to it there.
+HISTORY_RETENTION = timedelta(hours=1)
+
+
+def _settled_at(request: LiveRequest) -> datetime | None:
+    """The instant this request settled, or None if the desk never recorded it.
+
+    ``settled_at`` is the stamp every settling transition writes today; the
+    fallback to ``resolved_at`` covers a manual-review request resolved by a
+    build that persisted only that — same instant, older field name."""
+    return request.settled_at or request.resolved_at
+
+
+def _in_history_window(request: LiveRequest, now: datetime) -> bool:
+    """Whether a settled request is still young enough to show under History.
+
+    Only meaningful for a settled (or restored-terminal) request; an active one
+    is never asked. A settle time the desk never recorded means the request
+    settled before this build — long ago by any reasonable reading — so it is
+    treated as outside the window rather than shown for an hour after every
+    restart. The boundary is exclusive: at exactly the retention it is gone."""
+    settled = _settled_at(request)
+    return settled is not None and now - settled < HISTORY_RETENTION
+
+
+def snapshot(
+    session: LiveSession | MultiAccountSession,
+    *,
+    selected: str | None = None,
+    now: datetime | None = None,
+) -> Json:
     """Everything the browser may know, in one shape.
 
     A :class:`MultiAccountSession` is rendered by :func:`_multi_snapshot`, which
@@ -785,12 +823,20 @@ def snapshot(session: LiveSession | MultiAccountSession, *, selected: str | None
     `selected` is deliberately looked up against every request the session
     holds rather than against this list. Approving a quotation settles it, and
     an operator reading the confirmation of what they just sent must not have
-    it disappear from under them; it leaves the *desk*, not the record.
+    it disappear from under them; it leaves the *desk*, not the record. Once
+    its History window (`HISTORY_RETENTION`) has passed it is gone from here
+    too — `selected` answers None, and the page clears a card that no longer
+    exists on the desk — while the store and the audit trail keep it.
+
+    `now` is the instant the History window is measured against; it defaults
+    to the session's own clock and exists so a test can look an hour ahead
+    without a movable clock.
     """
     from translog_quote.interface.web.multi_account_session import MultiAccountSession
 
     if isinstance(session, MultiAccountSession):
-        return _multi_snapshot(session, selected=selected)
+        return _multi_snapshot(session, selected=selected, now=now)
+    at = now or session.now()
 
     # Operations mode follows the store, not the demonstration's request_ids
     # (a past restart may have reset them): every restored request is in view,
@@ -802,15 +848,21 @@ def snapshot(session: LiveSession | MultiAccountSession, *, selected: str | None
     # Two groups only: Active (anything still in play, any age) and History
     # (terminal/completed — a quotation sent, a decline, a no-rates close, or a
     # request restored from the store already terminal). A live-settled request
-    # therefore moves into History rather than vanishing. Active leads with the
-    # newest activity. No age cutoff: operations follows the whole store.
+    # therefore moves into History rather than vanishing at once. Active leads
+    # with the newest activity and has no age cutoff. History has one: a settled
+    # request is shown for HISTORY_RETENTION after it settled, then leaves the
+    # desk (the store keeps it) so the fold stops growing without bound.
     active = sorted(
         (r for r in followed if not r.is_settled and not r.history),
         key=_activity_at,
         reverse=True,
     )
-    history = [r for r in followed if r.is_settled or r.history]
+    history = [r for r in followed if (r.is_settled or r.history) and _in_history_window(r, at)]
     chosen = session.requests.get(selected) if selected else None
+    if chosen is not None and (chosen.is_settled or chosen.history):
+        # Off the desk means off the detail pane too, so the page cannot keep
+        # showing a request that has no card anywhere.
+        chosen = chosen if _in_history_window(chosen, at) else None
     demonstration = session.demonstration
     return {
         "demonstration": {
@@ -862,29 +914,40 @@ def snapshot(session: LiveSession | MultiAccountSession, *, selected: str | None
     }
 
 
-def _multi_snapshot(session: MultiAccountSession, *, selected: str | None = None) -> Json:
+def _multi_snapshot(
+    session: MultiAccountSession, *, selected: str | None = None, now: datetime | None = None
+) -> Json:
     """The unified snapshot across every account's session.
 
     Each request is rendered by its OWNING session, so its approver,
     demonstration membership and audit timeline are that account's, and each row
     is tagged with its ``account``. The top-level blocks aggregate across
-    accounts; the audit is the merged, time-ordered trail."""
+    accounts; the audit is the merged, time-ordered trail. The History window
+    is measured against each owning session's clock (or `now`), the same clock
+    that stamped the settle."""
     active_pairs: list[tuple[datetime, Json]] = []
     history_rows: list[Json] = []
     for account_id, sess in session.sessions.items():
+        at = now or sess.now()
         if sess.operations_mode:
             followed = list(sess.requests.values())
         else:
             followed = [r for r in sess.requests.values() if sess.in_demonstration(r.request_id)]
         for request in followed:
-            row = request_summary(sess, request)
-            row["account"] = account_id
             # Two groups only: History is terminal/completed (settled, or restored
-            # already terminal); Active is everything else, any age. A live-settled
-            # request moves to History rather than vanishing.
+            # already terminal) and only while inside its HISTORY_RETENTION
+            # window; Active is everything else, any age. A live-settled request
+            # moves to History rather than vanishing at once, and leaves the desk
+            # an hour later (the store keeps it).
             if request.history or request.is_settled:
+                if not _in_history_window(request, at):
+                    continue
+                row = request_summary(sess, request)
+                row["account"] = account_id
                 history_rows.append(row)
             else:
+                row = request_summary(sess, request)
+                row["account"] = account_id
                 active_pairs.append((_activity_at(request), row))
     # Newest activity first, across all accounts.
     active_rows = [row for _, row in sorted(active_pairs, key=lambda pair: pair[0], reverse=True)]
@@ -894,6 +957,11 @@ def _multi_snapshot(session: MultiAccountSession, *, selected: str | None = None
         for account_id, sess in session.sessions.items():
             chosen = sess.requests.get(selected)
             if chosen is not None:
+                # Same rule as the single-account path: past its History window a
+                # settled request has no card, so it has no detail pane either.
+                settled = chosen.is_settled or chosen.history
+                if settled and not _in_history_window(chosen, now or sess.now()):
+                    break
                 chosen_detail = request_detail(sess, chosen)
                 chosen_detail["account"] = account_id
                 break

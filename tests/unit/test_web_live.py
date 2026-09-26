@@ -1955,6 +1955,34 @@ def test_a_settled_request_moves_into_history(after_reply: LiveSession) -> None:
     assert demo["history"] == 1
 
 
+@pytest.mark.parametrize("choice", ["approve", "decline"])
+def test_a_decided_request_leaves_history_an_hour_after_the_decision(
+    after_reply: LiveSession, choice: str
+) -> None:
+    """Either gate answer settles the request and stamps when. It shows under
+    History for HISTORY_RETENTION from that instant — still inspectable — and
+    then leaves the desk entirely: no card, no detail. The record stays."""
+    from translog_quote.interface.web.live_serialize import HISTORY_RETENTION
+
+    request_id = next(iter(after_reply.requests))
+    after_reply.decide(request_id, choice=choice, by=APPROVER, reason="because")
+    settled_at = after_reply.requests[request_id].settled_at
+    assert settled_at is not None
+
+    inside = live_serialize.snapshot(after_reply, selected=request_id)
+    assert any(row["request_id"] == request_id for row in inside["history"])  # type: ignore[index, union-attr]
+    assert isinstance(inside["selected"], dict)
+
+    later = live_serialize.snapshot(
+        after_reply, selected=request_id, now=settled_at + HISTORY_RETENTION
+    )
+    assert later["requests"] == []
+    assert later["history"] == []
+    assert later["selected"] is None
+    assert later["demonstration"]["history"] == 0  # type: ignore[index]
+    assert request_id in after_reply.requests  # off the desk, not forgotten
+
+
 def test_active_requests_are_sorted_newest_activity_first(
     settings: Settings, sink: CollectingEmailSink
 ) -> None:

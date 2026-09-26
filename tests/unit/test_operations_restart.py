@@ -159,10 +159,16 @@ def test_demonstration_mode_still_hides_a_request_outside_its_focus(tmp_path: ob
 
 def test_terminal_requests_return_as_hidden_history(tmp_path: object) -> None:
     """Req 2. A terminal request is visible as history — restored, flagged, kept
-    out of the active list and the rate pass, surfaced under a separate key."""
+    out of the active list and the rate pass, surfaced under a separate key —
+    for as long as its History window lasts (it settled five minutes ago here;
+    see test_history_retention for the window itself)."""
     settings = _operations(_base_settings(tmp_path), since=NOW - timedelta(hours=1))
     durable = InMemoryStore()
-    durable.save_request(_stored("R-done", RequestState.CLOSED_NO_RATES))
+    durable.save_request(
+        _stored("R-done", RequestState.CLOSED_NO_RATES).model_copy(
+            update={"settled_at": NOW - timedelta(minutes=5)}
+        )
+    )
     durable.save_thread(Thread(request_id="R-done", message_ids=("<t>",)))
 
     session = _session(settings, durable=durable)

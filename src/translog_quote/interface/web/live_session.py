@@ -206,6 +206,13 @@ class LiveRequest:
     resolved_by: str | None = None
     resolved_at: datetime.datetime | None = None
     resolution_note: str | None = None
+
+    settled_at: datetime.datetime | None = None
+    """When this request settled (see ``QuotationRequest.settled_at``): stamped
+    by the session at the moment it settles, restored from the store otherwise.
+    The dashboard shows a settled request under History for a fixed window from
+    this instant and then drops it from view. ``None`` on a restored request
+    that settled before the desk recorded settle times."""
     """Why this request was handed to a person: the model's own explanation of
     the answer it could not use. Empty for every request that was not."""
 
@@ -697,6 +704,15 @@ class LiveSession:
         """Whether a restart resumes rather than starting a fresh demonstration."""
         return self._settings.demo.startup_mode == "operations"
 
+    def now(self) -> datetime.datetime:
+        """This session's clock, for a renderer that measures an age against it.
+
+        The serializer needs "now" to decide whether a settled request is still
+        inside its History window. Reading the session's own clock — fixed in a
+        demonstration, the wall clock in production — keeps the dashboard's
+        idea of time the same one the audit trail is stamped with."""
+        return self._clock.now()
+
     def _mail_cutoff(self) -> datetime.datetime | None:
         """The instant before which inbound mail is out of scope.
 
@@ -767,8 +783,29 @@ class LiveSession:
         request.decision = outcome.decision
         request.quotation_sent = outcome.sent
         request.state = outcome.state
+        self._mark_settled(request)
         bootstrap.commit_request(self._working, self._durable, request_id)
         return request
+
+    def _mark_settled(self, request: LiveRequest) -> None:
+        """Stamp *when* a request settled, in the working store and in view.
+
+        Called just before the durable commit of a settling transition, so the
+        instant travels with the state it describes. A request that did not
+        settle (a decision that was refused, say) or that already carries a
+        stamp is left alone: the time is set once and never moves, otherwise a
+        replayed transition could push a finished request back onto the desk.
+        Idempotence in the working store matters more than it looks — the
+        Redis-backed commit copies the whole record, so a second stamp would be
+        persisted too.
+        """
+        if not request.is_settled or request.settled_at is not None:
+            return
+        now = self._clock.now()
+        stored = self._working.get_request(request.request_id)
+        if stored is not None and stored.settled_at is None:
+            self._working.save_request(stored.model_copy(update={"settled_at": now}))
+        request.settled_at = now
 
     def resolve_manual_review(self, request_id: str, *, by: str, note: str = "") -> LiveRequest:
         """An operator has settled a request that was handed to a person.
@@ -812,6 +849,8 @@ class LiveSession:
                     "resolved_by": who,
                     "resolved_at": now,
                     "resolution_note": text,
+                    # Resolving IS settling: the same instant starts the History window.
+                    "settled_at": now,
                 }
             )
         )
@@ -820,6 +859,7 @@ class LiveSession:
         request.resolved_by = who
         request.resolved_at = now
         request.resolution_note = text
+        request.settled_at = now
         self.audit.record(
             AuditEvent(
                 request_id=request_id,
@@ -1514,10 +1554,16 @@ class LiveSession:
         stored = self._working.get_request(request_id)
         if stored is None:
             return
+        # The close is the settle: stamp when, so the History window that the
+        # dashboard measures from it survives a restart (see `_mark_settled`).
+        now = self._clock.now()
         self._working.save_request(
-            stored.model_copy(update={"state": RequestState.CLOSED_NO_RATES})
+            stored.model_copy(update={"state": RequestState.CLOSED_NO_RATES, "settled_at": now})
         )
         bootstrap.commit_request(self._working, self._durable, request_id)
+        live = self.requests.get(request_id)
+        if live is not None and live.settled_at is None:
+            live.settled_at = now
 
     def _unresolved_places(self, record: ShipmentRecord) -> tuple[UnresolvedPlace, ...]:
         """The stated origin/destination the resolver cannot turn into an airport
@@ -1897,6 +1943,10 @@ class LiveSession:
             resolved_by=stored.resolved_by,
             resolved_at=stored.resolved_at,
             resolution_note=stored.resolution_note,
+            # When it settled, if this build (or a later one) recorded it. A
+            # terminal request from an older store has None and is treated by
+            # the dashboard as settled long ago — hidden, not resurrected.
+            settled_at=stored.settled_at,
             # MANUAL_REVIEW is terminal for *automation* but not settled work: a
             # person still owes it a decision. So it comes back as active/needs
             # attention, not collapsed under history like the truly-finished

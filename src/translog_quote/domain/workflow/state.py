@@ -196,3 +196,15 @@ class QuotationRequest(BaseModel):
     none eligible, e.g. "Port/airport rates available, door leg needs manual
     pricing."). Empty by default so a request written before this field existed
     loads unchanged."""
+
+    settled_at: datetime | None = None
+    """When the request reached a settled state — the quotation went out, the
+    gate declined it, the no-rates notice closed it, or a person resolved it.
+
+    Persisted so the dashboard's History window (a settled request is shown for
+    a fixed time after it settles, then leaves the desk) survives a restart:
+    a request settled five minutes before a deploy still gets its remaining
+    minutes, and one settled last week does not come back for an hour. Nothing
+    reads this to decide workflow — it is display evidence only. ``None`` for a
+    request written before this field existed, which the dashboard treats as
+    settled long ago (hidden). Set once, never reset."""
