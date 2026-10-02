@@ -85,7 +85,15 @@ function makeContext(fetchStub) {
       return node;
     },
     getElementById: (id) => (byId[id] = byId[id] || new Node("div")),
-    addEventListener: () => {},
+    /* Recorded, not run: a test boots the page by firing DOMContentLoaded
+       itself, and drives visibility by flipping `hidden` and firing the
+       listener the page registered. */
+    hidden: false,
+    listeners: {},
+    addEventListener: (event, fn) => {
+      (document.listeners[event] = document.listeners[event] || []).push(fn);
+    },
+    title: "",
   };
   return vm.createContext({
     Node, document, console,
@@ -117,6 +125,7 @@ function load(fetchStub) {
     " watchForChanges, REFRESH_MS, renderDetail, nextStep, sectionManualReview," +
     " sectionShipment, sectionMerged," +
     " syncApprover: () => syncApprover && syncApprover()," +
+    " document," +
     " holderFor: (id) => document.getElementById(id) };";
   vm.runInContext(source, context);
   return context.__t;
@@ -1191,6 +1200,60 @@ check("C6: no narration copy on the clarification or merge cards", () => {
     "clarification card");
   const merged = t.sectionMerged({ reply_received: true, merged: ["pcs"], carried: ["origin"] });
   eq(/mail thread/.test(merged.textContent), false, "merge card");
+});
+
+/* --- production readiness: titles and background tabs ------------------- */
+
+check("the document title names the open request and reverts on the dashboard", () => {
+  const t = load();
+  t.ui.snap = snapshotWith([request({ request_id: "R-T1" })], { active: true, following: 1 });
+  t.ui.view = "detail";
+  t.ui.selected = "R-T1";
+  t.render();
+  eq(t.document.title, "Request R-T1 — Translog Express — Quotation Desk (Live)", "detail");
+
+  t.ui.view = "dashboard";
+  t.ui.selected = null;
+  t.render();
+  eq(t.document.title, "Translog Express — Quotation Desk (Live)", "dashboard");
+});
+
+check("request cards are h3 under the band's h2", () => {
+  const t = load();
+  t.ui.snap = snapshotWith([request({ request_id: "R-H" })], { active: true, following: 1 });
+  t.renderDashboard();
+  const holder = t.holderFor("dashboard-list");
+  eq(holder.findAll((n) => n.tagName === "h2").map((n) => n.textContent).join("|"), "Active (1)", "one h2");
+  eq(holder.findAll((n) => n.tagName === "h3").length, 1, "the card title is an h3");
+});
+
+checkAsync("a hidden tab reads nothing until it is shown again", async () => {
+  const stub = statePages(snapshotWith([], { active: true }));
+  const t = load(stub);
+  t.watchForChanges();
+
+  t.document.hidden = true;
+  await intervals[0].fn();
+  eq(stub.calls.length, 0, "no read while the tab is hidden");
+
+  t.document.hidden = false;
+  await intervals[0].fn();
+  eq(stub.calls.length, 1, "the tick reads again once visible");
+});
+
+checkAsync("a tab coming back into view refreshes at once", async () => {
+  const stub = statePages(snapshotWith([], { active: true }));
+  const t = load(stub);
+  /* Boot the page the way the browser does: fire DOMContentLoaded. */
+  for (const fn of t.document.listeners.DOMContentLoaded) fn();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const before = stub.calls.length;
+  eq(before >= 1, true, "the page read state on load");
+
+  t.document.hidden = false;
+  for (const fn of t.document.listeners.visibilitychange) fn();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  eq(stub.calls.length, before + 1, "a visible tab refreshed immediately");
 });
 
 (async () => {

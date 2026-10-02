@@ -43,6 +43,16 @@ deployed hostname has to be declared in `TRANSLOG_ALLOWED_HOSTS` before the
 server will accept a single state-changing request from it. No client ever
 sees it.
 
+When it is hosted, the console is an authenticated operator desk and nothing
+else: every route sits behind the sign-in page (`TRANSLOG_DASHBOARD_TOKEN`,
+a signed 12-hour HttpOnly session cookie, failed attempts throttled), every
+response carries a strict Content-Security-Policy, frame, referrer and
+permissions headers, `robots.txt` and `X-Robots-Tag` keep it out of search
+engines, and an unknown URL gets a plain not-found page. Static assets
+revalidate with ETags; data responses are never cached. What the system does
+with client and operator data, where it is stored and which third parties
+receive it is inventoried in `docs/data-processing.md`.
+
 The AI has exactly one job: turning unstructured email into structured fields. It
 does not decide whether a shipment is valid, choose an airline, rank rates, approve
 quotations, send anything, or book cargo. Those are deterministic application logic

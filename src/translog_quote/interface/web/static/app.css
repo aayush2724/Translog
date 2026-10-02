@@ -19,7 +19,9 @@
   --stone-strong: #c9c2b2;
   --text: #222d2a;
   --muted: #5c6662;
-  --faint: #767f7a;
+  /* 2026-10-02: was #767f7a, which read at 4.1:1 on paper and 3.6:1 on
+     ivory — below WCAG AA for the small captions it is used on. */
+  --faint: #606965;
   --teal: #287c78;
   --teal-deep: #1f625f;
   --teal-ink: #1c5a57;
@@ -65,6 +67,36 @@ code {
   outline: 2px solid var(--teal);
   outline-offset: 2px;
   border-radius: 4px;
+}
+
+/* Visually hidden until a keyboard user tabs to it, then it sits over the
+   header. Links to #main (which is focusable) so the jump actually lands. */
+.skip-link {
+  position: absolute;
+  top: -4rem;
+  left: 1rem;
+  z-index: 100;
+  padding: 0.55rem 0.9rem;
+  background: var(--ink);
+  color: #fff;
+  border-radius: 6px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.skip-link:focus { top: 0.75rem; }
+#main:focus { outline: none; }
+
+/* Present for assistive technology and form autofill, invisible on screen. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
 }
 
 /* ------------------------------------------------------------- top chrome */
