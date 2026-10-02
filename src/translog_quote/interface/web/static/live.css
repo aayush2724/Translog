@@ -82,7 +82,7 @@
 .empty-sub {
   margin: 0;
   font-size: 0.9rem;
-  color: #7a8598;
+  color: #64748b; /* was #7a8598 (3.7:1) */
 }
 
 /* The simulated-rate disclosure. Deliberately loud, and repeated at every
@@ -252,9 +252,11 @@
 .tl-current .tl-label { color: #b45309; font-weight: 700; }
 .tl-current .tl-when { color: #b45309; }
 
-.tl-pending .tl-mark { color: #cbd5e1; }
-.tl-pending .tl-label { color: #94a3b8; }
-.tl-pending .tl-when { color: #cbd5e1; }
+/* Pending steps are quieter than done ones, but still readable: the label
+   and the status word are text (AA 4.5:1), the marker is a graphic (3:1). */
+.tl-pending .tl-mark { color: #8a93a5; }
+.tl-pending .tl-label { color: #64748b; }
+.tl-pending .tl-when { color: #64748b; }
 
 @media (max-width: 900px) {
   .detail-grid { grid-template-columns: 1fr; }
@@ -271,8 +273,12 @@
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #8a93a5;
+  color: #64748b; /* was #8a93a5 (3.1:1) */
 }
+
+/* The History band's summary carries a real h2 for the outline; it must look
+   exactly like the Active band's label, not like a page heading. */
+.group-head > h2 { display: inline; margin: 0; font: inherit; color: inherit; }
 
 /* Muted, never hidden. An unrecognised message stays readable and openable —
    the operator has to be able to check the classification, not trust it. */
@@ -376,7 +382,7 @@ body { background: var(--wc-bg); color: var(--wc-ink); }
   font-size: 0.82rem;
 }
 .brand-name { color: var(--wc-ink); font-size: 1rem; font-weight: 600; }
-.brand-sub { color: #8a93a5; font-size: 0.66rem; letter-spacing: 0.16em; }
+.brand-sub { color: #64748b; font-size: 0.66rem; letter-spacing: 0.16em; }
 
 .container { max-width: 980px; padding: 2.25rem 1.5rem 4rem; }
 
@@ -400,7 +406,7 @@ body { background: var(--wc-bg); color: var(--wc-ink); }
 h1 { font-size: 1.3rem; font-weight: 600; }
 .page-head { margin-bottom: 1.25rem; }
 .request-title { font-size: 1.05rem; font-weight: 600; }
-.eyebrow { color: #98a1b2; letter-spacing: 0.08em; }
+.eyebrow { color: #64748b; letter-spacing: 0.08em; } /* was #98a1b2 (2.6:1) */
 
 /* ------------------------------------------------ the search strip */
 
@@ -494,7 +500,7 @@ h1 { font-size: 1.3rem; font-weight: 600; }
   flex: none;
 }
 .hue-0 { background: #6d28d9; } .hue-1 { background: #7c3aed; }
-.hue-2 { background: #0e9488; } .hue-3 { background: #db6414; }
+.hue-2 { background: #0b7a70; } .hue-3 { background: #b4500c; } /* white text ≥ 4.5:1 */
 .hue-4 { background: #c2337e; } .hue-5 { background: #4c5b8f; }
 .avatar-dim { opacity: 0.45; width: 1.9rem; height: 1.9rem; font-size: 0.68rem; }
 

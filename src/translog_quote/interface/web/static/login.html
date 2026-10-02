@@ -4,7 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>Translog Express — Sign in</title>
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="description" content="Sign in to the Translog Express quotation desk. Authorised operators only.">
+  <title>Sign in — Translog Express Quotation Desk</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/app.css">
   <link rel="stylesheet" href="/login.css">
@@ -27,12 +29,19 @@
       <p id="login-error" class="login-error" role="alert" aria-live="assertive" hidden></p>
 
       <form id="login-form" novalidate>
+        <!-- Password managers pair a password with a username; this desk has
+             none (the key is the whole secret), so a fixed, visually hidden
+             one keeps saved keys attachable to this site. Not in the tab order
+             and never read as the credential. -->
+        <label class="visually-hidden" for="login-username">Username (not used)</label>
+        <input id="login-username" class="visually-hidden" type="text" name="username"
+               autocomplete="username" value="operator" readonly tabindex="-1">
         <label class="login-field">
           <span class="login-label">Dashboard access key</span>
           <input id="login-password" name="password" type="password"
                  autocomplete="current-password" autocapitalize="none" spellcheck="false"
-                 autofocus required>
-          <span class="login-hint">The shared key for this desk — ask your administrator if you don’t have it.</span>
+                 aria-describedby="login-hint" autofocus required>
+          <span id="login-hint" class="login-hint">The shared key for this desk — ask your administrator if you don’t have it.</span>
         </label>
         <button id="login-submit" class="login-submit" type="submit">Sign in</button>
       </form>

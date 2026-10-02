@@ -84,6 +84,13 @@
   transition: background 0.15s var(--ease-out);
 }
 .login-submit:hover { background: var(--teal-deep); }
+/* The same look on an <a> (the not-found page navigates; it does not submit). */
+.login-link-button {
+  display: block;
+  box-sizing: border-box;
+  text-align: center;
+  text-decoration: none;
+}
 .login-submit:disabled { opacity: 0.6; cursor: progress; }
 
 .login-error {

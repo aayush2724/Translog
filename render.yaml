@@ -62,9 +62,11 @@ services:
       # non-loopback address (HOST above): --live refuses to start without it
       # rather than serve real client data and a working "approve and send"
       # button to anyone who knows the URL. Set a strong shared secret; operators
-      # sign in through the browser's Basic-auth prompt (any username, this value
-      # as the password). The Host allowlist stops a cross-origin browser; this
-      # stops anyone who simply knows the URL.
+      # enter it on the dashboard's own sign-in page (/login), which sets a
+      # signed, HttpOnly session cookie good for 12 hours. Rotating the value
+      # signs everyone out. Failed sign-ins are throttled per client and in
+      # total. The Host allowlist stops a cross-origin browser; this stops
+      # anyone who simply knows the URL.
       - key: TRANSLOG_DASHBOARD_TOKEN
         sync: false
       - key: TRANSLOG_OPENROUTER__API_KEY

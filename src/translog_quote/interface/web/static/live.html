@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="description" content="Translog Express quotation desk: incoming air-freight enquiries, clarifications and quotations awaiting operator approval.">
   <title>Translog Express — Quotation Desk (Live)</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/app.css">
@@ -11,6 +13,9 @@
   <script src="/live.js" defer></script>
 </head>
 <body>
+  <!-- Keyboard users land here first: one Tab reveals a way past the header
+       and the status banners straight to the request list. -->
+  <a class="skip-link" href="#main">Skip to content</a>
   <header class="topbar">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">TE</span>
@@ -36,7 +41,7 @@
        the operator must know that before acting on it. Text set by live.js. -->
   <p id="load-error" class="banner banner-amber top-banner" role="alert" aria-live="assertive" hidden></p>
 
-  <main class="container">
+  <main id="main" class="container" tabindex="-1">
     <section id="view-dashboard">
       <div id="page-head" class="page-head" hidden>
         <h1>Quotation requests</h1>
