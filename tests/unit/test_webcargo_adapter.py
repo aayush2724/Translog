@@ -151,7 +151,10 @@ def test_ensure_authenticated_non_interactive_refuses_an_unauthenticated_session
     with pytest.raises(WebCargoSessionLost):
         adapter.ensure_authenticated(interactive=False)
 
-    assert adapter._manager.state is SessionState.SESSION_EXPIRED  # noqa: SLF001
+    # Refused, not poisoned: the startup probe reports the login page and leaves
+    # the manager READY so the worker's retry can probe again on the same
+    # context (tests/unit/test_worker_startup_auth_retry.py).
+    assert adapter._manager.state is SessionState.READY  # noqa: SLF001
     assert not handle.closed  # refusal doesn't tear down; the process exit will
 
 

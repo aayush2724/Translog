@@ -122,8 +122,10 @@ class WebCargoBrowserAdapter:
 
         ``interactive=True``  — an operator may sign in, in the open window,
         once; only a visible search form counts as success.
-        ``interactive=False`` — an unauthenticated session is refused (marked
-        expired), never logged into automatically and never on a new browser.
+        ``interactive=False`` — an unauthenticated session is refused (raised
+        as `WebCargoSessionLost`), never logged into automatically and never on
+        a new browser. The refusal is reported, NOT recorded on the manager,
+        so the worker's startup probe can be retried on this same context.
         """
         with self._manager.job_page() as page:
             driver = self._wrap_page(page)
@@ -142,12 +144,19 @@ class WebCargoBrowserAdapter:
                         "WebCargo loaded neither the search form nor a login page at "
                         "startup; treating as unreachable rather than needs-login"
                     )
-                reason = (
+                # A real login page at STARTUP is raised, never marked on the
+                # manager. Marking it expired here poisoned the worker's retry:
+                # the second probe met `ensure_ready()`'s fail-fast
+                # `PermanentFailure` instead of probing again, which nothing
+                # caught — an exit-1 crash and a systemd restart loop, never the
+                # exit-78 needs-login path (journal, 2026-09-28/29). Startup
+                # needs no sticky state: once the probes are spent the process
+                # exits 78 anyway. A session lost MID-JOB (`search`) still marks
+                # expired, because there the worker keeps running.
+                raise WebCargoSessionLost(
                     "the WebCargo session is not authenticated at worker startup; "
                     "start the worker with --login so an operator can sign in"
                 )
-                self._manager.mark_session_expired(reason)
-                raise WebCargoSessionLost(reason)
             try:
                 run_operator_login(
                     driver,
