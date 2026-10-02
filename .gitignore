@@ -1,6 +1,4 @@
 # Environment / secrets
-.env
-.env.*
 !.env.example
 # Gmail OAuth client file and authorized-user token (Phase 10.3). Never committed.
 .secrets/
@@ -26,7 +24,6 @@ runs/
 # OS / editor
 .DS_Store
 .idea/
-.vscode/
 
 # Client-provided evaluation data. Real customer correspondence — never committed.
 # The ZIP as delivered, anything extracted from it, and any report derived from it.
@@ -39,3 +36,5 @@ evaluation/ground_truth.json
 
 # Personal documentation
 docs/ai/
+config.bat
+node_modules

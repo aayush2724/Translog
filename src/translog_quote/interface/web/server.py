@@ -12,12 +12,15 @@ the static files are committed source with no templating step to leak into.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import http.cookies
 import json
+import math
 import os
 import threading
 import time
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -36,7 +39,7 @@ from translog_quote.interface.web.session import DemoSequenceError, DemoSession
 from translog_quote.observability import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from translog_quote.config import Settings
     from translog_quote.interface.web.multi_account_session import MultiAccountSession
@@ -96,6 +99,24 @@ _PUBLIC_FILES: dict[str, tuple[str, str]] = {
 #: gated static views serve, named here so the two rejection styles stay in one
 #: place and never diverge.
 _PAGE_PATHS: frozenset[str] = frozenset({"/", "/index.html", "/live.html"})
+
+#: Every path a GET may be routed to, across both modes. Anything else is
+#: answered 404 *before* the auth gate: the tables are public knowledge (they
+#: are this file), so refusing an unknown path reveals nothing, and a person
+#: who mistypes a URL gets a page that says so instead of a sign-in redirect
+#: or a bare JSON body.
+_GET_ROUTES: frozenset[str] = (
+    frozenset(_STATIC_FILES) | frozenset(_LIVE_FILES) | {"/api/state", "/api/live/state"}
+)
+
+#: The whole site is an authenticated operator desk; nothing on it is for a
+#: search engine. `robots.txt` is the polite signal, `X-Robots-Tag` and the
+#: pages' own `<meta name="robots">` are the enforced one.
+_ROBOTS_TXT = b"User-agent: *\nDisallow: /\n"
+
+#: The page a browser navigation to an unknown path receives. Static,
+#: CSP-compliant, no data, and it links back to the desk.
+_NOT_FOUND_PAGE = "not_found.html"
 
 #: Every action a browser may take. Each advances the session through the same
 #: methods the tests drive; the approval boundary lives in the session and the
@@ -222,16 +243,146 @@ _LIVE_ACTIONS: dict[
 }
 
 
+#: Sent on every response, whatever it is. `frame-ancestors 'none'` and the
+#: legacy `X-Frame-Options` close clickjacking (the desk has approve-and-send
+#: buttons); `Permissions-Policy` switches off browser features the page never
+#: uses; the two cross-origin policies keep the document and its assets from
+#: being loaded into another origin's context; `X-Robots-Tag` keeps an
+#: operator desk out of search results even where a page's own meta tag is
+#: not read. `Cache-Control` is set per response (see `_emit_standard_headers`).
 _SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
     (
         "Content-Security-Policy",
         "default-src 'none'; script-src 'self'; style-src 'self'; "
-        "connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'",
+        "connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; "
+        "frame-ancestors 'none'",
     ),
     ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
     ("Referrer-Policy", "no-referrer"),
-    ("Cache-Control", "no-store"),
+    ("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()"),
+    ("Cross-Origin-Opener-Policy", "same-origin"),
+    ("Cross-Origin-Resource-Policy", "same-origin"),
+    ("X-Robots-Tag", "noindex, nofollow"),
 )
+
+#: Data responses are never cached — a snapshot is real client correspondence
+#: and must not survive in a shared browser. Committed static assets may be
+#: *revalidated*: the browser keeps a copy and asks with `If-None-Match`, and
+#: an unchanged file is a 304 with no body.
+_CACHE_NO_STORE = "no-store"
+_CACHE_REVALIDATE = "no-cache"
+
+#: HSTS is only meaningful behind TLS, which a public bind has (the platform
+#: terminates it) and a loopback dev run does not. `run()` enables it for a
+#: public bind; it is never sent to a browser talking plain http://localhost,
+#: where it would be ignored at best.
+_HSTS_HEADER = ("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+_hsts_enabled = False
+
+#: Static assets, read once per process and fingerprinted. They are committed
+#: source, so the fingerprint is stable for the life of the process and a
+#: deploy (a new process) naturally invalidates it.
+_static_assets: dict[str, tuple[bytes, str]] = {}
+_static_assets_lock = threading.Lock()
+
+
+def _static_asset(filename: str) -> tuple[bytes, str]:
+    """The bytes of one whitelisted static file and its strong ETag."""
+    with _static_assets_lock:
+        cached = _static_assets.get(filename)
+        if cached is None:
+            body = (_STATIC_DIR / filename).read_bytes()
+            cached = (body, f'"{hashlib.sha256(body).hexdigest()[:32]}"')
+            _static_assets[filename] = cached
+        return cached
+
+
+#: Sign-in throttling. A shared access key on a public URL with unlimited
+#: attempts is a password a script can guess; a small per-client budget and a
+#: process-wide one bound that. In-memory and per process on purpose — the
+#: dashboard is a single instance — and generous enough that a person who
+#: mistypes a few times is never locked out for long.
+_LOGIN_WINDOW_SECONDS = 300
+_LOGIN_MAX_FAILURES_PER_CLIENT = 5
+_LOGIN_MAX_FAILURES_GLOBAL = 50
+
+
+class LoginThrottle:
+    """Counts failed sign-ins per client and in total over a sliding window.
+
+    `retry_after` says how long a client must wait, or None when it may try.
+    A success clears that client's failures; the global count is untouched
+    by successes so a distributed guess still runs out of budget. The clock
+    is injectable so the window can be tested without sleeping.
+    """
+
+    def __init__(
+        self,
+        *,
+        window_seconds: float = _LOGIN_WINDOW_SECONDS,
+        per_client: int = _LOGIN_MAX_FAILURES_PER_CLIENT,
+        global_limit: int = _LOGIN_MAX_FAILURES_GLOBAL,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._window = window_seconds
+        self._per_client = per_client
+        self._global_limit = global_limit
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._by_client: dict[str, deque[float]] = {}
+        self._all: deque[float] = deque()
+
+    def retry_after(self, client: str) -> int | None:
+        with self._lock:
+            now = self._prune()
+            own = self._by_client.get(client)
+            if own is not None and len(own) >= self._per_client:
+                return max(1, math.ceil(own[0] + self._window - now))
+            if len(self._all) >= self._global_limit:
+                return max(1, math.ceil(self._all[0] + self._window - now))
+            return None
+
+    def record_failure(self, client: str) -> None:
+        with self._lock:
+            now = self._prune()
+            self._by_client.setdefault(client, deque()).append(now)
+            self._all.append(now)
+
+    def record_success(self, client: str) -> None:
+        with self._lock:
+            self._by_client.pop(client, None)
+
+    def _prune(self) -> float:
+        """Drop timestamps outside the window; returns the current time."""
+        now = self._clock()
+        cutoff = now - self._window
+        while self._all and self._all[0] <= cutoff:
+            self._all.popleft()
+        for client in list(self._by_client):
+            own = self._by_client[client]
+            while own and own[0] <= cutoff:
+                own.popleft()
+            if not own:
+                del self._by_client[client]
+        return now
+
+
+_LOGIN_THROTTLE = LoginThrottle()
+
+
+def _client_key(handler: BaseHTTPRequestHandler) -> str:
+    """Who is signing in, for the throttle.
+
+    Behind the hosting platform's proxy the socket peer is the proxy, and the
+    client's address is the one the proxy *appended* to `X-Forwarded-For` —
+    the last entry, which a client cannot forge (anything it sends arrives
+    before it). With no such header (a local run) the peer address is used.
+    The global budget bounds whatever a forged header could still achieve.
+    """
+    forwarded = handler.headers.get("X-Forwarded-For") or ""
+    last = forwarded.rsplit(",", 1)[-1].strip()
+    return last or str(handler.client_address[0])
 
 
 class DemoServer(ThreadingHTTPServer):
@@ -513,6 +664,11 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             payload, status = self._readiness()
             self._send_json(payload, status=status)
             return
+        if path == "/robots.txt":
+            self._send_bytes(
+                _ROBOTS_TXT, "text/plain; charset=utf-8", cache=_CACHE_REVALIDATE
+            )
+            return
 
         # The sign-in surface is served WITHOUT auth — it is how a session is
         # obtained. A closed table, exactly like the gated ones, so this opens
@@ -520,7 +676,14 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         public = _PUBLIC_FILES.get(path)
         if public is not None:
             filename, content_type = public
-            self._send_bytes((_STATIC_DIR / filename).read_bytes(), content_type)
+            self._serve_static(filename, content_type)
+            return
+
+        # An unknown path is a 404 whoever asks: the route tables are this
+        # file, so there is nothing to protect by hiding them, and a mistyped
+        # URL deserves a page that says so rather than a sign-in redirect.
+        if path not in _GET_ROUTES:
+            self._not_found()
             return
 
         if not self._authenticated():
@@ -535,7 +698,7 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/live/state":
             live = self._demo.live
             if live is None:
-                self._send_json({"error": "not found"}, status=404)
+                self._not_found()
                 return
             with self._demo.lock:
                 self._send_json(live_serialize.snapshot(live, selected=_selected(query)))
@@ -544,10 +707,10 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         table = _LIVE_FILES if self._demo.is_live else _STATIC_FILES
         static = table.get(path)
         if static is None:
-            self._send_json({"error": "not found"}, status=404)
+            self._not_found()
             return
         filename, content_type = static
-        self._send_bytes((_STATIC_DIR / filename).read_bytes(), content_type)
+        self._serve_static(filename, content_type)
 
     def _rejects_cross_site(self) -> bool:
         """Whether this request must be refused as not same-origin.
@@ -658,10 +821,27 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True})
             return
 
+        # Checked before the password is even looked at, so a throttled client
+        # learns nothing from the attempt. The wait is told plainly (and in
+        # `Retry-After`) because the person on the other end is usually an
+        # operator with a typo, not an attacker.
+        client = _client_key(self)
+        wait = _LOGIN_THROTTLE.retry_after(client)
+        if wait is not None:
+            _log.warning("sign-in throttled for %s (%ds)", client, wait)
+            self._send_json(
+                {"error": "too many attempts", "retry_after": wait},
+                status=429,
+                extra_headers=(("Retry-After", str(wait)),),
+            )
+            return
+
         password = body.get("password")
         if not isinstance(password, str) or not _password_matches(password, token):
+            _LOGIN_THROTTLE.record_failure(client)
             self._send_json({"error": "invalid credentials"}, status=401)
             return
+        _LOGIN_THROTTLE.record_success(client)
         self._send_json({"ok": True}, set_cookie=_set_session_header(_mint_session(token)))
 
     def _do_logout(self) -> None:
@@ -732,14 +912,55 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
     # ----------------------------------------------------------- responses --
 
     def _send_json(
-        self, payload: dict[str, object], *, status: int = 200, set_cookie: str | None = None
+        self,
+        payload: dict[str, object],
+        *,
+        status: int = 200,
+        set_cookie: str | None = None,
+        extra_headers: Sequence[tuple[str, str]] = (),
     ) -> None:
         self._send_bytes(
             json.dumps(payload).encode("utf-8"),
             "application/json; charset=utf-8",
             status=status,
             set_cookie=set_cookie,
+            extra_headers=extra_headers,
         )
+
+    def _wants_html(self) -> bool:
+        """A browser navigation, as opposed to the page's own `fetch`."""
+        return "text/html" in (self.headers.get("Accept") or "")
+
+    def _not_found(self) -> None:
+        """404 in the shape the caller understands: a page for a navigation,
+        JSON for everything else. Both carry the standard headers."""
+        if self.command == "GET" and self._wants_html():
+            body, _ = _static_asset(_NOT_FOUND_PAGE)
+            self._send_bytes(body, "text/html; charset=utf-8", status=404)
+            return
+        self._send_json({"error": "not found"}, status=404)
+
+    def _serve_static(self, filename: str, content_type: str) -> None:
+        """A whitelisted static file, revalidatable: ETag on the way out,
+        304 when the browser already holds that exact version."""
+        body, etag = _static_asset(filename)
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self._emit_standard_headers(cache=_CACHE_REVALIDATE)
+            self.end_headers()
+            return
+        self._send_bytes(
+            body, content_type, cache=_CACHE_REVALIDATE, extra_headers=(("ETag", etag),)
+        )
+
+    def _emit_standard_headers(self, *, cache: str) -> None:
+        """The headers every response carries, whatever its status."""
+        for header, value in _SECURITY_HEADERS:
+            self.send_header(header, value)
+        self.send_header("Cache-Control", cache)
+        if _hsts_enabled:
+            self.send_header(*_HSTS_HEADER)
 
     def _reject_unauthenticated(self, path: str) -> None:
         """Refuse an unauthenticated GET in the shape the caller understands.
@@ -761,20 +982,27 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         self.send_response(302)
         self.send_header("Location", location)
         self.send_header("Content-Length", "0")
-        for header, value in _SECURITY_HEADERS:
-            self.send_header(header, value)
+        self._emit_standard_headers(cache=_CACHE_NO_STORE)
         self.end_headers()
 
     def _send_bytes(
-        self, body: bytes, content_type: str, *, status: int = 200, set_cookie: str | None = None
+        self,
+        body: bytes,
+        content_type: str,
+        *,
+        status: int = 200,
+        set_cookie: str | None = None,
+        cache: str = _CACHE_NO_STORE,
+        extra_headers: Sequence[tuple[str, str]] = (),
     ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         if set_cookie is not None:
             self.send_header("Set-Cookie", set_cookie)
-        for header, value in _SECURITY_HEADERS:
+        for header, value in extra_headers:
             self.send_header(header, value)
+        self._emit_standard_headers(cache=cache)
         self.end_headers()
         self.wfile.write(body)
 
@@ -848,6 +1076,12 @@ def run(
             print(f"Cannot start the live demo: {exc}")
             return 2
         interval = live_settings.demo.poll_interval_seconds
+
+    # A public bind sits behind the platform's TLS termination; tell browsers
+    # to keep using https for this host. Set only now, after every refusal
+    # above, so a refused start leaves the module exactly as it found it.
+    global _hsts_enabled
+    _hsts_enabled = _binds_publicly(host)
 
     with DemoServer(
         (host, port), settings, live_session=live_session, poll_interval_seconds=interval

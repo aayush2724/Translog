@@ -52,6 +52,15 @@ const POLL_TIMEOUT_MS = 180000;
    rate all arrive through it with nothing to click. */
 const REFRESH_MS = 3000;
 
+/* How long one state read may take before it is abandoned. Generous, because
+   a read waits for the server's lock and the server may be mid-poll (a model
+   call per unread message); bounded, because a read that never returned used
+   to leave `ui.refreshing` set forever and the page silently frozen. */
+const STATE_TIMEOUT_MS = 120000;
+
+/* The document title: the desk by default, the open request when one is. */
+const BASE_TITLE = "Translog Express — Quotation Desk (Live)";
+
 /* ------------------------------------------------------------- utilities */
 
 function el(tag, attrs, ...children) {
@@ -182,6 +191,9 @@ function approverField(...dependents) {
   field = el("input", {
     class: "approver-input",
     type: "text",
+    name: "approver",
+    autocomplete: "name",
+    "aria-label": "Your name, for the record",
     value: ui.approver,
     placeholder: "Your name, for the record",
     onFocus: () => { ui.editing = true; },
@@ -262,8 +274,10 @@ function stateKey(snap) {
 async function readAndRender(force) {
   const query = ui.selected ? `?request_id=${encodeURIComponent(ui.selected)}` : "";
   let text = null;
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), STATE_TIMEOUT_MS);
   try {
-    const response = await fetch(`/api/live/state${query}`);
+    const response = await fetch(`/api/live/state${query}`, { signal: abort.signal });
     if (response.status === 401) {
       /* The session has expired or is absent. There is no browser popup any
          more — the desk sends the operator to its own sign-in page. */
@@ -279,6 +293,8 @@ async function readAndRender(force) {
     ui.disconnected = true;
     renderConnection();
     return;
+  } finally {
+    clearTimeout(timer);
   }
 
   const reconnected = ui.disconnected;
@@ -306,7 +322,12 @@ function watchForChanges() {
      caller — a test, today — can wait for the redraw it caused instead of
      guessing how long one takes. */
   setInterval(() => {
-    if (ui.busy || ui.editing) return null;
+    /* A hidden tab reads nothing: the operator is not looking, the server
+       is polling the mailbox regardless, and a desk left open in a
+       background tab all day should not cost a request every three seconds.
+       It catches up the moment the tab is shown again (see the
+       visibilitychange listener at load). */
+    if (ui.busy || ui.editing || document.hidden) return null;
     /* Catch a name that reached the field with no input event (autofill) even
        when nothing else changed and the view is therefore not rebuilt. */
     if (syncApprover && ui.view === "detail") syncApprover();
@@ -382,7 +403,9 @@ function renderLiveIndicator() {
     return;
   }
   if (!ui.snap) return;
-  const poll = ui.snap.poll;
+  /* An action's response is a snapshot too, but a partial one may lack the
+     poll block; the indicator must never be what stops the page rendering. */
+  const poll = ui.snap.poll || {};
   const failing = Boolean(poll.error);
   indicator.className = failing ? "live live-stalled" : "live";
   document.getElementById("live-label").textContent = failing ? "Reconnecting" : "Live";
@@ -477,7 +500,9 @@ function renderDashboard() {
    rebuilt on every state change, so its open state lives in `ui`, not the DOM. */
 function historyBand(history) {
   const fold = el("details", { class: "history-band", open: ui.historyOpen ? "" : null },
-    el("summary", { class: "group-head" }, `History (${history.length})`),
+    /* A real heading inside the summary, so the outline reads
+       h1 desk → h2 Active / h2 History → h3 each request. */
+    el("summary", { class: "group-head" }, el("h2", null, `History (${history.length})`)),
     el("div", { class: "request-list" }, ...history.map(requestCard)));
   if (ui.historyOpen) fold.open = true;
   fold.addEventListener("toggle", () => { ui.historyOpen = Boolean(fold.open); });
@@ -535,7 +560,8 @@ function requestCard(request) {
              to somebody quoting a shipment. */
           el("p", { class: "eyebrow" },
             [request.request_id, received].filter(Boolean).join("  ·  ")),
-          el("h2", { class: "request-title" }, request.headline),
+          /* An h3: the card sits under the band's h2 ("Active", "History"). */
+          el("h3", { class: "request-title" }, request.headline),
           request.lane ? el("p", { class: "route" }, request.lane) : null,
           el("p", { class: "muted small" },
             [request.weight, request.client_address].filter(Boolean).join(" · "))),
@@ -742,7 +768,8 @@ function goodsTypeHoldCard(detail) {
         "Goods-type catalog not configured — set TRANSLOG_GOODS_TYPE__CATALOG to a " +
         "list of real WebCargo labels so an operator can pick one."));
   }
-  const select = el("select", { class: "gt-select", "aria-label": "WebCargo Goods Type" },
+  const select = el("select",
+    { class: "gt-select", name: "goods_type", "aria-label": "WebCargo Goods Type" },
     ...hold.catalog.map((label) => el("option", { value: label }, label)));
   const use = button("Use this goods type", "approve",
     () => post("goods-type/decide", { goods_type: select.value, by: ui.approver }, "Recording goods type…"),
@@ -913,6 +940,7 @@ function sectionManualReview(detail) {
   /* The one way out of manual review: a named person marks it resolved. It
      moves the request to History and sends nothing to anyone. */
   const note = el("textarea", {
+    name: "resolution_note",
     class: "resolution-input",
     rows: "2",
     placeholder: "Resolution note (optional)",
@@ -1096,6 +1124,11 @@ function render() {
   failure.hidden = !ui.error;
   failure.textContent = ui.error ? `⚠ ${ui.error}` : "";
   renderConnection();
+
+  /* The tab says which request is open, so a desk with several tabs — or a
+     screen reader announcing the page — can tell them apart. */
+  document.title =
+    ui.view === "detail" && ui.selected ? `Request ${ui.selected} — ${BASE_TITLE}` : BASE_TITLE;
 }
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -1111,4 +1144,10 @@ document.addEventListener("DOMContentLoaded", () => {
      already processed by the time the dashboard is opened. */
   refresh(true);
   watchForChanges();
+
+  /* The timer skips hidden tabs; this is the other half — a tab coming back
+     into view redraws at once rather than waiting for the next tick. */
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refresh(true);
+  });
 });
