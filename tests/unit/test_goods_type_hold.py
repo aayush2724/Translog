@@ -46,10 +46,11 @@ _CATALOG = ("0000 - General Cargo", "1234 - Machinery", "5678 - Perishables")
 def _hold_settings(
     *, catalog: tuple[str, ...] = _CATALOG, general_cargo_label: str | None = None
 ) -> Settings:
-    """Browser mode with the General Cargo rule OFF (empty special-handling) so
-    every request holds, and a configured catalog to pick from."""
+    """Browser mode where the fixture's commodity ("Engineering components") is
+    a special-handling hit, so the request genuinely holds, and a configured
+    catalog to pick from."""
     base = _settings(WebCargoMode.BROWSER)
-    update: dict[str, object] = {"special_handling": (), "catalog": catalog}
+    update: dict[str, object] = {"special_handling": ("components",), "catalog": catalog}
     if general_cargo_label is not None:
         update["general_cargo_label"] = general_cargo_label
     return base.model_copy(update={"goods_type": base.goods_type.model_copy(update=update)})
@@ -242,7 +243,7 @@ def test_a_record_change_discards_the_pick_and_holds_again(
 
     # The record changes (e.g. a client reply restated the commodity).
     request.record = request.record.model_copy(
-        update={"commodity": "Something entirely different"}
+        update={"commodity": "Replacement components, restated"}
     )
     session.poll()
 

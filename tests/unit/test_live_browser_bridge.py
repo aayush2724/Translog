@@ -91,10 +91,9 @@ def _settings(mode: WebCargoMode) -> Settings:
                 }
             ),
             "webcargo": base.webcargo.model_copy(update={"mode": mode}),
-            # Enable the General Cargo rule (empty special-handling would hold
-            # every request for an operator). The fixture's cargo_type "Non-Haz"
-            # + is_chemical False + a benign commodity then resolves to General
-            # Cargo, so the bridge reaches the enqueue under test.
+            # The fixture's cargo_type "Non-Haz" + is_chemical False + a benign
+            # commodity resolves to General Cargo, so the bridge reaches the
+            # enqueue under test.
             "goods_type": base.goods_type.model_copy(
                 update={"special_handling": ("battery", "lithium", "perishable")}
             ),

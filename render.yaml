@@ -117,8 +117,9 @@ services:
       # not match, so a wrong value never silently mis-selects.
       - key: TRANSLOG_GOODS_TYPE__GENERAL_CARGO_LABEL
         value: "0000 - General Cargo"
-      # JSON arrays. A populated SPECIAL_HANDLING turns the automatic General
-      # Cargo rule ON: a clear General Cargo / Non-Haz enquiry auto-resolves to
+      # JSON arrays. The automatic General Cargo rule is always on (an unset or
+      # empty SPECIAL_HANDLING uses the same reviewed list built into the code):
+      # a clear General Cargo / Non-Haz enquiry auto-resolves to
       # GENERAL_CARGO_LABEL, while a special-handling word (whole-word match on
       # the commodity), a chemical, or any non-general cargo_type is held for an
       # operator pick. CATALOG is the operator's pick list — every entry MUST be

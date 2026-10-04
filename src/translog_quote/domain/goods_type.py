@@ -7,8 +7,8 @@ enqueued:
 
 - the reviewed General Cargo label, ONLY when the cargo is unambiguously
   general/non-hazardous (exact normalised ``cargo_type`` membership, ``is_chemical``
-  explicitly ``False``, and no special-handling word in the commodity), and only
-  while a special-handling list is configured;
+  explicitly ``False``, and no special-handling word in the commodity — the
+  configured list, or ``DEFAULT_SPECIAL_HANDLING`` when none is configured);
 - otherwise a *hold* — an operator picks the exact label from the reviewed
   catalog. Never a silent default.
 
@@ -35,6 +35,32 @@ _ACCEPTED_CARGO_TYPES: frozenset[str] = frozenset(
         "general cargo non hazardous",
         "non hazardous general cargo",
     }
+)
+
+#: The reviewed special-handling words used when none are configured. An empty
+#: configured list used to switch the General Cargo rule off and hold every
+#: request, which made an unambiguous General Cargo enquiry wait for an operator
+#: whenever the deployment lacked the setting. A configured list replaces this.
+DEFAULT_SPECIAL_HANDLING: tuple[str, ...] = (
+    "battery",
+    "lithium",
+    "airbag",
+    "perfume",
+    "fresh",
+    "frozen",
+    "chilled",
+    "perishable",
+    "pharma",
+    "medicine",
+    "vaccine",
+    "live",
+    "animal",
+    "gold",
+    "jewel",
+    "valuable",
+    "dry ice",
+    "magnet",
+    "aerosol",
 )
 
 #: Characters flattened to spaces before matching, so punctuation and bracketed
@@ -97,14 +123,12 @@ def decide_goods_type(
 ) -> GoodsTypeDecision:
     """Decide the Goods Type, or hold. Never a silent default.
 
-    General Cargo requires ALL of: a configured special-handling list (empty
-    disables the rule entirely — everything holds), ``cargo_type`` normalising
-    to a reviewed accepted phrase, ``is_chemical`` explicitly ``False`` (``None``
-    is not good enough), and no special-handling word in the commodity.
+    General Cargo requires ALL of: ``cargo_type`` normalising to a reviewed
+    accepted phrase, ``is_chemical`` explicitly ``False`` (``None`` is not good
+    enough), and no special-handling word in the commodity. An empty
+    ``special_handling`` means ``DEFAULT_SPECIAL_HANDLING``, never "no words".
     """
-    if not special_handling:
-        # Rule OFF until the business enables the list: hold everything.
-        return GoodsTypeDecision(goods_type=None, source=None)
+    special_handling = special_handling or DEFAULT_SPECIAL_HANDLING
     if is_chemical is not False:
         return GoodsTypeDecision(goods_type=None, source=None)
     if _normalise(cargo_type) not in _ACCEPTED_CARGO_TYPES:

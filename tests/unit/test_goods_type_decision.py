@@ -89,9 +89,28 @@ def test_fresh_mangoes_with_fresh_listed_holds() -> None:
     ).held
 
 
-def test_empty_special_list_holds_even_general_cargo() -> None:
-    # Rule OFF until the business configures the special-handling list.
-    assert _decide(cargo_type="general cargo", special=()).held
+def test_empty_special_list_still_resolves_unambiguous_general_cargo() -> None:
+    # Live case 2026-10-04: General Cargo, not chemical, cotton garments, and no
+    # list on the deployment — it held for an operator. It must not.
+    decision = _decide(
+        commodity="Cotton textile garments (shirts and trousers), packed in cartons",
+        cargo_type="General cargo, non-hazardous",
+        special=(),
+    )
+    assert decision.goods_type == _LABEL and decision.source == "rule"
+
+
+def test_empty_special_list_falls_back_to_the_default_words() -> None:
+    assert _decide(commodity="lithium battery pack", special=()).held
+    assert _decide(commodity="frozen fish", special=()).held
+    assert _decide(commodity="perfume bottles", special=()).held
+    assert _decide(is_chemical=None, special=()).held
+    assert _decide(cargo_type="machinery", special=()).held
+
+
+def test_configured_list_replaces_the_default_words() -> None:
+    assert _decide(commodity="perfume bottles", special=("battery",)).goods_type == _LABEL
+    assert _decide(commodity="spare battery", special=("battery",)).held
 
 
 # --- catalog helpers --------------------------------------------------------------

@@ -500,16 +500,17 @@ class GoodsTypeSettings(BaseModel):
     cargo is unambiguously general/non-hazardous, otherwise an operator picks
     one from the reviewed ``catalog``.
 
-    Both lists are JSON arrays of *exact WebCargo labels*, empty by default so
-    the business enables them deliberately:
+    Both are JSON arrays (``catalog`` of *exact WebCargo labels*), empty by
+    default:
 
         TRANSLOG_GOODS_TYPE__CATALOG='["0000 - General Cargo", "1234 - Machinery"]'
         TRANSLOG_GOODS_TYPE__SPECIAL_HANDLING='["battery", "lithium", "perishable"]'
 
     ``special_handling`` is matched by normalised whole-word/phrase hits against
     the commodity (a false positive only routes to an operator — the safe
-    direction). While it is EMPTY the General Cargo rule is OFF: every shipment
-    goes to an operator decision, never a silent default.
+    direction). While it is EMPTY the domain's reviewed
+    ``DEFAULT_SPECIAL_HANDLING`` list applies, so the General Cargo rule is
+    always on: an unambiguous General Cargo enquiry never waits for an operator.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -529,11 +530,10 @@ class GoodsTypeSettings(BaseModel):
 
     special_handling: tuple[str, ...] = ()
     """Normalised words/phrases that force an operator decision (e.g. battery,
-    perishable). Empty disables the automatic General Cargo rule entirely. A
-    reviewed starter set for the business to consider (NOT enabled here):
-    battery, lithium, airbag, perfume, fresh, frozen, chilled, perishable,
-    pharma, medicine, vaccine, live, animal, gold, jewel, valuable, dry ice,
-    magnet, aerosol."""
+    perishable). Empty means the domain's ``DEFAULT_SPECIAL_HANDLING`` (battery,
+    lithium, airbag, perfume, fresh, frozen, chilled, perishable, pharma,
+    medicine, vaccine, live, animal, gold, jewel, valuable, dry ice, magnet,
+    aerosol); a configured list replaces it."""
 
 
 class Settings(BaseSettings):
