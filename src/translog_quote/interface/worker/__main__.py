@@ -43,6 +43,15 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = bootstrap.load_settings(args.env_file)
 
+    from translog_quote.observability import configure_logging
+
+    # Nothing had ever called this for the worker, so the package logger carried
+    # no handler: every `_log.info` on the worker path (requeues, the pending-
+    # requeue drain, overlay dismissals) was dropped by Python's WARNING-only
+    # fallback, and the journal held only RQ's own lines, warnings and
+    # tracebacks. The web entry point already does this (interface/web/__main__).
+    configure_logging(settings.log_level)
+
     from translog_quote.interface.worker.main import run_worker
 
     # The worker's exit code carries meaning: EXIT_NEEDS_LOGIN (78) tells systemd

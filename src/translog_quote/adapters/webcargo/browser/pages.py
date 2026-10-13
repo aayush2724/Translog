@@ -131,6 +131,11 @@ DATE_TAB = "ul.ant-list-items li.ant-list-item"
 #: never appears, we are not looking at the app we were logged into.
 AUTHENTICATED_MARKER = ORIGIN_INPUT
 
+#: WebCargo's login page, as the startup probe recognises it: a password field.
+#: Probed with a BOUNDED selector wait (`login_page_visible`), never with the
+#: `_JS_LOGIN_CHECK` evaluate below, which also reads it but has no timeout.
+LOGIN_PASSWORD_FIELD = 'input[type="password"]'
+
 
 #: ``WebCargoSessionLost`` now lives in ``translog_quote.errors`` (imported
 #: above and re-exported from this module for existing callers), so the worker's
@@ -433,6 +438,8 @@ class BrowserDriver(Protocol):
     def press(self, selector: str, key: str) -> None: ...
 
     def wait_visible(self, selector: str, timeout_seconds: float) -> bool: ...
+
+    def wait_attached(self, selector: str, timeout_seconds: float) -> bool: ...
 
     def option_texts(self, selector: str) -> list[str]: ...
 
@@ -876,13 +883,27 @@ def is_authenticated(driver: BrowserDriver, *, base_url: str, timeout_seconds: f
     return _search_form_visible(driver, timeout_seconds=timeout_seconds)
 
 
-def login_page_visible(driver: BrowserDriver) -> bool:
+def login_page_visible(driver: BrowserDriver, *, timeout_seconds: float) -> bool:
     """Whether WebCargo has actually rendered its LOGIN page — a password field
     is present — as opposed to the search form, a blank/error/interstitial page,
     or nothing loaded. Read-only; lets the caller tell a real 'needs login' from
-    an unreachable page (which must not write needs_login)."""
-    state = driver.evaluate(_JS_LOGIN_CHECK)
-    return bool(isinstance(state, dict) and state.get("hasPassword"))
+    an unreachable page (which must not write needs_login).
+
+    A BOUNDED wait, never an ``evaluate``. Playwright's ``page.evaluate`` has
+    no timeout: it waits for the frame's execution context, and on a page stuck
+    mid-navigation (the network half-up) it never returns. The worker started
+    2026-10-12 22:53 IST sat in exactly that call for 2 h 22 min — alive,
+    holding the single-worker lock, never registered with RQ, two jobs queued
+    behind it — until the host shut down (journal: the pending ``Page.evaluate``
+    failed only when the browser was torn down). A selector wait runs under
+    Playwright's progress controller, so ``timeout_seconds`` holds even when
+    no execution context ever arrives; the answer is then "no login page",
+    which the caller treats as UNREACHABLE and retries with backoff. Presence
+    (``attached``), not visibility, keeps the exact semantics of the
+    ``querySelector`` check this replaces. ``timeout_seconds`` is the caller's
+    navigation timeout — no new timeout is introduced.
+    """
+    return driver.wait_attached(LOGIN_PASSWORD_FIELD, timeout_seconds=timeout_seconds)
 
 
 def verify_authenticated(driver: BrowserDriver, *, base_url: str, timeout_seconds: float) -> None:

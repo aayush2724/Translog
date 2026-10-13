@@ -68,6 +68,20 @@ class PlaywrightWebCargoDriver:
             return False
         return True
 
+    def wait_attached(self, selector: str, timeout_seconds: float) -> bool:
+        """Whether ``selector`` is in the DOM (visible or not) within the bound.
+
+        Like ``wait_visible``, a Playwright timeout is an answer ("no"), never a
+        crash — and unlike ``evaluate`` the bound holds even when the page never
+        yields an execution context (see ``pages.login_page_visible``)."""
+        try:
+            self._page.wait_for_selector(
+                selector, timeout=timeout_seconds * 1000, state="attached"
+            )
+        except Exception:  # noqa: BLE001 - "did not appear" is an answer, not a crash
+            return False
+        return True
+
     def option_texts(self, selector: str) -> list[str]:
         texts = self._page.locator(selector).all_text_contents()
         return [str(text) for text in texts]

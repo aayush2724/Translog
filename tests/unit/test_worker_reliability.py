@@ -637,20 +637,70 @@ def test_authenticate_with_retry_backs_off_then_raises_unreachable(
         )
 
 
-def test_login_page_visible_reads_the_password_field_not_the_placeholder() -> None:
+def test_login_page_visible_is_a_bounded_wait_for_the_password_field_never_an_evaluate() -> (
+    None
+):
+    """The startup login probe must be bounded. Playwright's ``evaluate`` has no
+    timeout, and on a page stuck mid-navigation it hung the worker for 2 h 22 min
+    (journal, 2026-10-12 22:53 → 2026-10-13 01:15 IST): alive, lock held and
+    refreshed, never registered with RQ, two jobs queued behind it. The probe is
+    a selector wait for the password field with the caller's timeout."""
     from translog_quote.adapters.webcargo.browser import pages
 
     class _Driver:
-        def __init__(self, state: dict[str, bool]) -> None:
-            self._state = state
+        def __init__(self, attached: bool) -> None:
+            self._attached = attached
+            self.waits: list[tuple[str, float]] = []
 
-        def evaluate(self, _script: str, _argument: object = None) -> dict[str, bool]:
-            return self._state
+        def wait_attached(self, selector: str, timeout_seconds: float) -> bool:
+            self.waits.append((selector, timeout_seconds))
+            return self._attached
 
-    assert pages.login_page_visible(_Driver({"hasPassword": True, "hasSearchForm": False})) is True
-    assert (
-        pages.login_page_visible(_Driver({"hasPassword": False, "hasSearchForm": False})) is False
-    )
+        def evaluate(self, _script: str, _argument: object = None) -> object:
+            raise AssertionError("the startup probe must never use the unbounded evaluate")
+
+    login = _Driver(attached=True)
+    assert pages.login_page_visible(login, timeout_seconds=7.5) is True
+    assert login.waits == [(pages.LOGIN_PASSWORD_FIELD, 7.5)]
+
+    blank = _Driver(attached=False)
+    assert pages.login_page_visible(blank, timeout_seconds=7.5) is False
+    assert blank.waits == [(pages.LOGIN_PASSWORD_FIELD, 7.5)]
+
+
+def test_a_page_that_never_answers_the_login_probe_is_unreachable_not_a_hang() -> None:
+    """Composed over the REAL adapter and manager: the half-loaded page renders no
+    search form and the password-field wait elapses (returns False). The probe
+    returns within its bound — the adapter's navigation timeout — and classifies
+    the start as UNREACHABLE (retry with backoff, exit 75), never as needs-login;
+    the manager stays READY for the next probe. An ``evaluate`` here would hang."""
+    from tests.unit.test_browser_manager import FakeHandle, Launcher
+    from tests.unit.test_webcargo_adapter import adapter_over
+    from tests.unit.test_webcargo_extraction import FakeDriver
+
+    from translog_quote.adapters.webcargo.browser import SessionState, pages
+    from translog_quote.errors import WebCargoUnreachable
+
+    class _StuckPage(FakeDriver):
+        def __init__(self) -> None:
+            super().__init__(authenticated=False)
+            self.waits: list[tuple[str, float]] = []
+
+        def wait_attached(self, selector: str, timeout_seconds: float) -> bool:
+            self.waits.append((selector, timeout_seconds))
+            return False  # the bound elapsed; nothing ever rendered
+
+        def evaluate(self, script: str, argument: object = None) -> object:
+            raise AssertionError("an unbounded evaluate would hang here")
+
+    driver = _StuckPage()
+    adapter, _ = adapter_over(Launcher(FakeHandle(1)), [driver])
+
+    with pytest.raises(WebCargoUnreachable):
+        adapter.ensure_authenticated(interactive=False)
+
+    assert driver.waits == [(pages.LOGIN_PASSWORD_FIELD, adapter._navigation_timeout)]  # noqa: SLF001
+    assert adapter._manager.state is SessionState.READY  # noqa: SLF001
 
 
 def test_is_authenticated_propagates_unreachable_from_a_failed_goto() -> None:

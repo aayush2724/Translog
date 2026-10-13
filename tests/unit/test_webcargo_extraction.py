@@ -839,6 +839,11 @@ class FakeDriver:
             return self._commodity_open  # hidden until the Goods Type select is opened
         return bool(self._pending_options)
 
+    def wait_attached(self, selector: str, timeout_seconds: float) -> bool:
+        if selector == pages.LOGIN_PASSWORD_FIELD:
+            return not self.authenticated  # an unauthenticated session renders the login page
+        return self.wait_visible(selector, timeout_seconds)
+
     def option_texts(self, selector: str) -> list[str]:
         return list(self._pending_options)
 

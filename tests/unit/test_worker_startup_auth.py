@@ -13,6 +13,7 @@ All fakes — no Playwright, no Redis, no WebCargo.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -54,7 +55,9 @@ def test_login_flag_runs_the_worker_with_interactive_auth_in_one_process(
     from translog_quote.interface.worker import main as worker_main
 
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(bootstrap, "load_settings", lambda env_file=None: object())
+    monkeypatch.setattr(
+        bootstrap, "load_settings", lambda env_file=None: SimpleNamespace(log_level="INFO")
+    )
     monkeypatch.setattr(
         worker_main,
         "run_worker",
@@ -77,7 +80,9 @@ def test_without_login_the_worker_expects_an_already_authenticated_session(
     from translog_quote.interface.worker import main as worker_main
 
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(bootstrap, "load_settings", lambda env_file=None: object())
+    monkeypatch.setattr(
+        bootstrap, "load_settings", lambda env_file=None: SimpleNamespace(log_level="INFO")
+    )
     monkeypatch.setattr(
         worker_main,
         "run_worker",
@@ -89,3 +94,31 @@ def test_without_login_the_worker_expects_an_already_authenticated_session(
 
     assert entry.main([]) == 0
     assert seen["interactive"] is False
+
+
+def test_the_worker_entry_point_configures_application_logging_before_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without this every `_log.info` on the worker path was dropped — the package
+    logger had no handler — and the journal for the 2026-10-12 22:53 IST start held
+    nothing between systemd's start line and the shutdown traceback. Same wiring
+    as the web entry point: configure from `settings.log_level`, then run."""
+    from translog_quote import observability
+    from translog_quote.interface.worker import __main__ as entry
+    from translog_quote.interface.worker import main as worker_main
+
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        bootstrap, "load_settings", lambda env_file=None: SimpleNamespace(log_level="DEBUG")
+    )
+    monkeypatch.setattr(
+        observability, "configure_logging", lambda level: seen.append((str(level), "configured"))
+    )
+    monkeypatch.setattr(
+        worker_main,
+        "run_worker",
+        lambda settings, *, interactive_login=False: (seen.append(("run", "ran")), 0)[1],
+    )
+
+    assert entry.main([]) == 0
+    assert seen == [("DEBUG", "configured"), ("run", "ran")]
