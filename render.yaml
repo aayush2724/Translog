@@ -21,15 +21,20 @@ services:
     runtime: python
     plan: starter
     buildCommand: "pip install '.[api]'"
-    # Multi-account: stage the two account configs from Secret Files onto the
-    # dedicated dir on the persistent disk BEFORE starting, so ACCOUNTS_DIR globs
-    # only these two files (never the token JSONs in /etc/secrets). The rm makes
-    # the dir deterministic across redeploys; exec keeps Python as PID 1.
+    # Multi-account: stage every account config — the Secret Files named
+    # account-<slot>.json, one per mailbox (slots a..p) — onto the dedicated dir
+    # on the persistent disk BEFORE starting, so ACCOUNTS_DIR globs only those
+    # files (never the token JSONs beside them in /etc/secrets). Adding a
+    # mailbox is three Secret File uploads (account-<slot>.json, <slot>_read.json,
+    # <slot>_send.json) plus a redeploy; nothing here changes. The rm makes the
+    # dir deterministic across redeploys (a removed Secret File drops out);
+    # exec keeps Python as PID 1. With no account-*.json uploaded the cp fails
+    # and the service refuses to start, which is the right answer.
     startCommand: >-
       bash -c 'set -e;
       mkdir -p /var/lib/translog/accounts-config;
       rm -f /var/lib/translog/accounts-config/*.json;
-      cp /etc/secrets/account-a.json /etc/secrets/account-b.json /var/lib/translog/accounts-config/;
+      cp /etc/secrets/account-*.json /var/lib/translog/accounts-config/;
       exec python -m translog_quote.interface.web --live'
     # Liveness only — never /health/ready. /health returns immediately and
     # touches nothing external; /health/ready pings Upstash Redis (browser mode)
@@ -87,7 +92,8 @@ services:
       - key: TRANSLOG_GMAIL__MAX_RESULTS
         value: "5"
       # Multi-account mode: build one LiveSession per *.json in this dir. The
-      # startCommand stages account-a.json/account-b.json here from Secret Files.
+      # startCommand stages every account-<slot>.json Secret File here; see
+      # deploy/accounts.example/README.md §4 for onboarding a mailbox.
       # UNSET this (and revert startCommand) to return to single-account mode.
       - key: TRANSLOG_GMAIL__ACCOUNTS_DIR
         value: /var/lib/translog/accounts-config

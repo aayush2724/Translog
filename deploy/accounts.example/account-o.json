@@ -1,0 +1,9 @@
+{
+  "account_id": "account-o",
+  "address": "REPLACE-with-mailbox-o@example.com",
+  "read_token_path": ".secrets/accounts/o_read.json",
+  "send_token_path": ".secrets/accounts/o_send.json",
+  "approver_address": "REPLACE-with-approver@example.com",
+  "query": "in:inbox -subject:\"[TRANSLOG INTERNAL]\"",
+  "enabled": false
+}

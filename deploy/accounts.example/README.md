@@ -64,27 +64,59 @@ python -m translog_quote.interface.demo gmail-auth-send
 The token file paths must match `read_token_path` / `send_token_path` in the
 account JSON.
 
-## 4. Scaling to 16 (or any N) mailboxes
+## 4. The 16-mailbox fleet: slots `a`..`p`
 
 Nothing in the runtime is written for two accounts — the count is simply "every
-`*.json` in the accounts directory that is `enabled`". To run the intended
-production fleet:
+`*.json` in the accounts directory that is `enabled`". This directory commits
+the full **sixteen-slot structure**, so onboarding a mailbox is mechanical:
 
-1. Drop **one JSON file per mailbox** into the accounts directory — `mbx-01.json`
-   … `mbx-16.json`, or any names you like (the file stem is the `account_id`
-   when the file omits one). Each names its own mailbox address and its own two
-   token paths.
-2. Mint that mailbox's **two tokens** with the commands in §3, overriding
-   `TRANSLOG_GMAIL__TEST_ADDRESS` and the token paths per account, signing in to
-   that mailbox each time. Sixteen mailboxes = sixteen read + sixteen send
-   consents, each into its own file under `.secrets/`.
-3. Start the **one** dashboard with `TRANSLOG_GMAIL__ACCOUNTS_DIR` pointing at
-   the directory. It builds one session per enabled account and presents them as
-   a single unified dashboard.
+| slot | file | state in the template |
+|---|---|---|
+| `a`, `b` | `account-a.json`, `account-b.json` | `enabled: true` — the shape of a live account |
+| `c` … `p` | `account-c.json` … `account-p.json` | `enabled: false` — placeholder address, own token paths; flipped on once its tokens exist |
 
-The loader **refuses** two enabled accounts that share a read or send token file,
-so a copy-paste slip that would make two mailboxes act as one fails loudly at
-start-up rather than silently mis-routing a reply.
+Every slot owns `.secrets/accounts/<slot>_read.json` and `<slot>_send.json`
+locally, or `/etc/secrets/<slot>_read.json` and `<slot>_send.json` on Render,
+so the loader's shared-credential refusal has nothing to trip on as slots are
+enabled one by one. `tests/unit/test_accounts_example.py` keeps this directory
+loadable as exactly those sixteen slots, with only `a` and `b` enabled.
+
+### Onboarding one mailbox (one slot)
+
+```
+deploy/onboard-account.sh <slot> <mailbox@gmail.com> [approver@…]
+```
+
+The helper writes the slot's two config files (`.secrets/accounts-config/` for
+a local run, `.secrets/render-accounts/` for Render), runs the two OAuth
+consents from §3 into the slot's token files — sign in to **that** mailbox both
+times — and verifies that the read token's authorised mailbox is the one named.
+`--reauth` re-mints an existing slot's tokens (after an `invalid_grant`
+revocation); `--no-auth` writes the config files only.
+
+Then, in the Render dashboard, upload three Secret Files and redeploy:
+
+| upload as | from |
+|---|---|
+| `account-<slot>.json` | `.secrets/render-accounts/account-<slot>.json` |
+| `<slot>_read.json` | `.secrets/accounts/<slot>_read.json` |
+| `<slot>_send.json` | `.secrets/accounts/<slot>_send.json` |
+
+`render.yaml`'s start command copies every `/etc/secrets/account-*.json` into
+`ACCOUNTS_DIR`, so a new slot needs no change to the service definition. The
+full fleet is 16 × 3 = 48 Secret Files.
+
+### Before the first consent for a new mailbox
+
+- The Google OAuth app is in **Testing**: each mailbox must be listed under
+  **Test users** on the consent screen (limit 100) or its consent is refused.
+- A Testing app's tokens are revoked by account-level events on Google's side
+  (password change, "remove third-party access", a security check-up) — account
+  `a` lost its tokens twice in October 2026. Symptom: poll error
+  `PermanentFailure` / `invalid_grant`, watermark frozen. Fix: `--reauth` that
+  slot, re-upload its two token files, redeploy.
+- One dashboard polls the accounts **serially** under one lock; with sixteen
+  busy mailboxes the UI lags behind the slowest poll. Known, not yet addressed.
 
 **How routing is guaranteed.** Every request id is namespaced `"<account_id>:…"`,
 so the mailbox a request arrived on is carried in its id, not inferred. A reply,
