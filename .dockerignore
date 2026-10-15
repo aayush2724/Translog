@@ -1,0 +1,33 @@
+# Build context for deploy/railway/Dockerfile.*. Everything a running container
+# does not need stays out of the image — above all every secret and every
+# session artefact. Credentials reach Railway only as service variables.
+.secrets/
+.browser/
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+runs/
+outbox/
+*.log
+docs/ai/
+testcases.zip
+test cases.zip
+evaluation/client_cases/
+evaluation/text/
+evaluation/reports/
+evaluation/ground_truth.json
+.git/
+.github/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.idea/
+.vscode/
+.DS_Store
+tests/
+fixtures/

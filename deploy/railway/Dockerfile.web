@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1
+# Translog dashboard ("translog-web" on Railway).
+#
+# Mirrors the Render service: `pip install '.[api]'` then
+# `python -m translog_quote.interface.web --live`. The entrypoint stands in for
+# Render's Secret Files: it materialises the account configs and OAuth tokens
+# from ONE Railway variable into /etc/secrets, stages the account-*.json files
+# into TRANSLOG_GMAIL__ACCOUNTS_DIR exactly like render.yaml's startCommand, and
+# only then drops to an unprivileged user and starts the server.
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # Railway routes to the container's external interface; the server binds
+    # loopback unless told otherwise (and then refuses --live without a token).
+    HOST=0.0.0.0
+
+# Unprivileged runtime user. /etc/secrets is where the entrypoint writes the
+# decoded secret files (same path Render mounts them at, so the committed
+# account templates' token paths work unchanged). /var/lib/translog is the
+# volume mount: the accounts-config staging dir and the state dir live there.
+RUN useradd --system --create-home --uid 10001 --shell /usr/sbin/nologin translog \
+    && mkdir -p /etc/secrets /var/lib/translog \
+    && chown translog:translog /etc/secrets /var/lib/translog \
+    && chmod 700 /etc/secrets
+
+WORKDIR /app
+COPY pyproject.toml README.md ./
+COPY src ./src
+# The api extra brings redis/rq for enqueueing and polling rate searches; a
+# plain `pip install .` would break enqueue at runtime (see the operator doc).
+RUN pip install '.[api]'
+
+COPY deploy/railway/web-entrypoint.sh /usr/local/bin/translog-web-entrypoint
+RUN chmod 755 /usr/local/bin/translog-web-entrypoint
+
+# Railway supplies PORT; the server reads it. EXPOSE is documentation only.
+EXPOSE 8765
+ENTRYPOINT ["translog-web-entrypoint"]
+CMD ["python", "-m", "translog_quote.interface.web", "--live"]

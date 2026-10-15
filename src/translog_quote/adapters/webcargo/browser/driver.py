@@ -12,13 +12,18 @@ imports this module without having it installed.
 
 The profile directory (`webcargo.user_data_dir`) is what makes the session
 persistent: cookies and storage live there, so the authenticated WebCargo
-session survives worker restarts **provided the directory itself survives**.
+session survives worker restarts **provided the directory itself survives**
+and the profile is set to restore its session cookies at launch (see
+`ensure_session_cookies_restored`, applied before every launch).
 On an ephemeral filesystem it will not — deployments must mount persistent
 storage for it, as documented on the setting.
 """
 
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from translog_quote.errors import PermanentFailure, WebCargoUnreachable
@@ -137,6 +142,67 @@ class PlaywrightHandle:
             self._playwright.stop()
 
 
+#: Chromium's "On startup" preference value for "Continue where you left off".
+#: It is the only setting under which Chromium RESTORES session cookies — the
+#: ones without an expiry — at a launch that follows a clean shutdown; without
+#: it they are discarded, and only a crash-recovery start brings them back.
+#: WebCargo's authentication cookie is a session cookie and the worker's warm
+#: shutdown is always a clean exit, so every orderly restart lost the session
+#: (Railway 2026-10-15, Fedora 2026-10-14) while restarts after crashes kept
+#: it, which made the loss look intermittent. The site's `remember-me` cookie
+#: survives but does not re-authenticate at the app URL, so there is no
+#: fallback. Verified with scratch profiles: default launch and
+#: `--restore-last-session` both drop the cookie; this preference keeps it.
+RESTORE_ON_STARTUP_LAST_SESSION = 1
+
+#: Where Chromium keeps the profile's preferences, relative to the user data dir.
+PREFERENCES_RELATIVE_PATH = Path("Default") / "Preferences"
+
+
+def ensure_session_cookies_restored(user_data_dir: Path) -> Path:
+    """Set ``session.restore_on_startup`` to "continue where you left off" in
+    the profile's Preferences, creating the file when the profile is new.
+
+    Every other preference is preserved: the file is read, this one key is
+    set, and the whole document is written back through a temporary file and
+    an atomic replace, so an interrupted write can never leave Chromium a
+    half-written file to reset. A Preferences file that is not a JSON object
+    is refused rather than overwritten — overwriting would silently discard
+    the rest of the profile's settings. Returns the Preferences path.
+    """
+    prefs = user_data_dir / PREFERENCES_RELATIVE_PATH
+    data: dict[str, Any] = {}
+    if prefs.exists():
+        try:
+            loaded = json.loads(prefs.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PermanentFailure(
+                f"{prefs} is not readable JSON; refusing to overwrite the browser "
+                f"profile's preferences: {exc}"
+            ) from exc
+        if not isinstance(loaded, dict):
+            raise PermanentFailure(
+                f"{prefs} does not hold a JSON object; refusing to overwrite it."
+            )
+        data = loaded
+    session = data.get("session")
+    if session is None:
+        session = {}
+        data["session"] = session
+    elif not isinstance(session, dict):
+        raise PermanentFailure(
+            f"{prefs}: the 'session' preference is not an object; refusing to overwrite it."
+        )
+    if session.get("restore_on_startup") == RESTORE_ON_STARTUP_LAST_SESSION:
+        return prefs
+    session["restore_on_startup"] = RESTORE_ON_STARTUP_LAST_SESSION
+    prefs.parent.mkdir(parents=True, exist_ok=True)
+    tmp = prefs.with_name(prefs.name + ".translog-tmp")
+    tmp.write_text(json.dumps(data), encoding="utf-8")
+    os.replace(tmp, prefs)
+    return prefs
+
+
 def launch_persistent_chromium(settings: Settings, *, headless: bool | None = None) -> (
     PlaywrightHandle
 ):
@@ -156,6 +222,9 @@ def launch_persistent_chromium(settings: Settings, *, headless: bool | None = No
 
     webcargo = settings.webcargo
     webcargo.user_data_dir.mkdir(parents=True, exist_ok=True)
+    # Before the launch, never after: Chromium reads the preference at startup
+    # and decides then whether the saved session cookies come back.
+    ensure_session_cookies_restored(webcargo.user_data_dir)
 
     playwright = sync_playwright().start()
     try:
