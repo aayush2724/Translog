@@ -121,6 +121,15 @@ profile — and therefore the authenticated session — is wiped, and an operato
 must re-authenticate. Mount a disk for it, exactly as the demo already does
 for its state directory in `render.yaml`.
 
+The worker also sets the profile's Chromium preference
+`session.restore_on_startup = 1` ("continue where you left off") before every
+launch. WebCargo's authentication cookie is a *session* cookie, and Chromium
+restores session cookies after a clean shutdown only under that preference;
+without it, every orderly restart (the worker's warm shutdown is one) lost
+the session while restarts after crashes kept it. A profile signed in
+*before* this preference existed must be signed in once more; from then on
+the session survives restarts and redeploys.
+
 ## Deployment topology — Render dashboard → Upstash Redis → Fedora worker
 
 The production POC is a **hybrid**: a lightweight cloud dashboard that never

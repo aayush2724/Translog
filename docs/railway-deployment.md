@@ -30,8 +30,8 @@ worker's first start, and never run both.
 | `deploy/railway/constraints.txt` | pins `playwright==1.62.0` to the base image's browser build |
 | `deploy/railway/web-entrypoint.sh` | materialises the secret files, stages `account-*.json`, drops to user `translog`, starts the server |
 | `deploy/railway/worker-entrypoint.sh` | Xvfb, the worker as a signal-forwarded child, exit-code contract (78 parks, others wait out the lock TTL), login mode |
-| `deploy/railway/web.railway.json` | config-as-code for the web service (healthcheck `/health`, one replica) |
-| `deploy/railway/worker.railway.json` | config-as-code for the worker (no healthcheck, `drainingSeconds` 200, one replica) |
+| `deploy/railway/web.railway.json` | the web service's settings as a reviewable record (healthcheck `/health`, one replica). **Not attachable**: Railway deprecated Config-as-code and services created after 2026-08-28 cannot opt in, so these values are entered in the dashboard (see Services) |
+| `deploy/railway/worker.railway.json` | the worker's settings as a record (no healthcheck, draining 200 s, 50 retries, one replica); same note |
 | `deploy/railway/pack-secret-files.sh` | packs the Secret Files into one variable (`TRANSLOG_SECRET_FILES_TGZ_B64`) |
 | `deploy/railway/pack-browser-profile.sh` | packs the authenticated profile for a one-time volume import |
 | `.dockerignore` | keeps `.secrets/`, `.browser/`, `.env*`, `docs/ai/` and client data out of every image |
@@ -41,14 +41,33 @@ worker's first start, and never run both.
 
 | | `translog-web` | `translog-worker` |
 |---|---|---|
-| Config file path (service → Settings → Config-as-code) | `/deploy/railway/web.railway.json` | `/deploy/railway/worker.railway.json` |
-| Build | Dockerfile `deploy/railway/Dockerfile.web` | Dockerfile `deploy/railway/Dockerfile.worker` |
+| Project | `invigorating-education` (reused; its earlier Railpack service was renamed) | same project |
+| Source | GitHub `aayush2724/Translog`, branch `railway-deployment`, auto-deploy **off** | same repo and branch, auto-deploy off |
+| Build (Settings → Build → Builder) | **Dockerfile**, path `deploy/railway/Dockerfile.web` | **Dockerfile**, path `deploy/railway/Dockerfile.worker` |
+| Deploy settings (Settings → Deploy) | Healthcheck path `/health`, timeout 300; restart On Failure, 10 retries | no healthcheck; restart On Failure, **50** retries |
+| Draining / overlap | variable `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30` | variables `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=200`, `RAILWAY_DEPLOYMENT_OVERLAP_SECONDS=0` |
 | Effective start command (from the image; `startCommand` deliberately unset) | `translog-web-entrypoint python -m translog_quote.interface.web --live` | `translog-worker-entrypoint` → `Xvfb :99` + `python -m translog_quote.interface.worker` |
 | Volume (service → Settings → Volume) | mount `/var/lib/translog` | mount `/data` |
 | Public domain | yes: Generate Domain with target port **8765**, and set `PORT=8765` | none normally; during login mode a domain with target port **8080** and `PORT=8080` |
 | Healthcheck | `GET /health` (liveness only, never `/health/ready`) | none (no HTTP port) |
 | Replicas | 1 | 1 |
 | Region | same for both; Southeast Asia (Singapore) is the nearest to Upstash (AWS Mumbai) and WebCargo's Indian endpoint | same |
+
+**Config-as-code is gone for new services.** Railway's settings page now says
+"Config as Code is deprecated. Existing config files keep working until
+2026-12-01. Starting 2026-08-28, services that have never used Config as Code
+cannot opt in." The replacement, Infrastructure as Code in
+`.railway/railway.ts`, is applied only through the CLI (`railway config
+plan` / `apply`). Until that is adopted, every setting above lives in the
+dashboard; the two JSON files stay in the repo as the reviewed record and are
+pinned by the guard test.
+
+**Staged changes.** The dashboard stages every edit and applies them all with
+one **Deploy** click; the only other option is Discard. Note that the staged
+bar sits exactly where the canvas **Add** button is when the bar is absent, so
+clicking "Add" by position while changes are staged hits **Deploy** instead
+— open the Add menu from the top-right button (visible only when the panel is
+closed) or right-click the canvas.
 
 Why the web service has a volume: Railway refuses overlapping deployments of a
 service with a volume, which is the single-instance guarantee the Render disk
@@ -63,14 +82,16 @@ nothing and costs almost nothing.
 Set them per service. Copy every value from the Render service's Environment
 tab and the Fedora box's `.env.worker`; nothing is re-minted or rotated.
 
-**`translog-web`** — the Render variables, one for one, plus the two marked NEW:
+**`translog-web`** — the Render variables, one for one, plus the two marked NEW.
+Everything except the four credentials was entered on 2026-10-15; the four
+credentials are entered by the operator:
 
 | variable | note |
 |---|---|
 | `HOST` | `0.0.0.0` (already set in the image; harmless to repeat) |
 | `TRANSLOG_ALLOWED_HOSTS` | the service's public domain, e.g. `translog-web-production.up.railway.app`; set after generating the domain, then redeploy |
-| `TRANSLOG_DASHBOARD_TOKEN` | the dashboard access key |
-| `TRANSLOG_OPENROUTER__API_KEY` | |
+| `TRANSLOG_DASHBOARD_TOKEN` | the dashboard access key — **operator enters** |
+| `TRANSLOG_OPENROUTER__API_KEY` | **operator enters** |
 | `TRANSLOG_OPENROUTER__MODEL` | only if Render sets it |
 | `TRANSLOG_GMAIL__TEST_ADDRESS`, `TRANSLOG_GMAIL__SENDER_ADDRESS`, `TRANSLOG_GMAIL__APPROVER_ADDRESS` | as on Render |
 | `TRANSLOG_GMAIL__SEND_ENABLED` | `true` |
@@ -78,14 +99,14 @@ tab and the Fedora box's `.env.worker`; nothing is re-minted or rotated.
 | `TRANSLOG_GMAIL__QUERY` | `in:inbox -subject:"[TRANSLOG INTERNAL]"` |
 | `TRANSLOG_GMAIL__MAX_RESULTS` | `5` |
 | `TRANSLOG_GMAIL__ACCOUNTS_DIR` | `/var/lib/translog/accounts-config` |
-| `TRANSLOG_QUEUE__REDIS_URL` | the Upstash `rediss://…/0` URL, identical on both services |
+| `TRANSLOG_QUEUE__REDIS_URL` | the Upstash `rediss://…/0` URL, identical on both services — **operator enters** |
 | `TRANSLOG_WEBCARGO__MODE` | `browser` |
 | `TRANSLOG_GOODS_TYPE__GENERAL_CARGO_LABEL`, `TRANSLOG_GOODS_TYPE__CATALOG`, `TRANSLOG_GOODS_TYPE__SPECIAL_HANDLING` | as in `render.yaml` |
 | `TRANSLOG_DEMO__STATE_DIR` | `/var/lib/translog/state` |
 | `TRANSLOG_DEMO__STARTUP_MODE` | `operations` |
 | `TRANSLOG_DEMO__OPERATIONS_SINCE` | as on Render (ignored once a watermark exists) |
 | `TRANSLOG_DEMO__DURABLE_BACKEND` | `redis` — as on Render (set in its dashboard, not in `render.yaml`) |
-| `TRANSLOG_SECRET_FILES_TGZ_B64` | NEW — the packed Secret Files, see below |
+| `TRANSLOG_SECRET_FILES_TGZ_B64` | NEW — the packed Secret Files, see below — **operator enters, and only at cut-over** (without it the entrypoint stops before polling) |
 | `TRANSLOG_LOG_LEVEL` | optional |
 | `PORT` | `8765` — set it explicitly and use the same number as the domain's target port; Railway's proxy and healthcheck both go to `PORT` and its injection is not guaranteed |
 
@@ -137,14 +158,10 @@ script, update the variable, redeploy. Nothing else changes.
 In this order. Nothing touches Render or the Fedora worker until step 4, and
 each step says how to undo it.
 
-0. **Get the files to GitHub without touching Render.** `git push` from this
-   machine currently fails (the GNOME ssh-agent refuses to sign; unlock the key
-   with `ssh-add ~/.ssh/id_ed25519` first). Render auto-deploys `main`, so put
-   the Railway work on a branch: `git switch -c railway && git push -u origin railway`.
-   Point both Railway services at the `railway` branch; merge to `main` after
-   the cut-over and switch the services to `main` then. (Pushing to `main`
-   would only redeploy Render with unchanged behaviour, but keep the two
-   changes independent.)
+0. **Get the files to GitHub without touching Render.** Render auto-deploys
+   `main`, so the Railway work lives on the `railway-deployment` branch
+   (pushed 2026-10-15 as 940ab36). Both Railway services track that branch;
+   merge to `main` after the cut-over and switch the services to `main` then.
 1. **Railway account and project.** Hobby plan (Free caps a service at 0.5 GB
    RAM, Trial at 1 GB; headed Chromium peaks near 1 GB). Create an empty
    project and set its region (Southeast Asia is nearest to Upstash in AWS
@@ -152,9 +169,11 @@ each step says how to undo it.
    around $20/month. Keep "App Sleeping" off on both services.
 2. **Service `translog-web`** (it builds immediately on creation; the first
    deploy fails for lack of variables, which is fine and holds no state):
-   New → GitHub repo → `Translog`, branch `railway`. Settings → Config-as-code
-   → `/deploy/railway/web.railway.json`. Settings → Volume → mount
-   `/var/lib/translog`. Networking → Generate Domain, target port 8765.
+   New → GitHub repo → `Translog`, branch `railway-deployment`. Settings →
+   Build → Builder **Dockerfile**, path `deploy/railway/Dockerfile.web`;
+   Deploy → Healthcheck path `/health`; Scale → region. Canvas → Add → Volume
+   → attach, mount `/var/lib/translog`. Networking → Generate Domain, target
+   port 8765. Source → Auto deploys → Disable.
    Variables → the web table above, `PORT=8765`, `TRANSLOG_ALLOWED_HOSTS` =
    the generated domain, `TRANSLOG_SECRET_FILES_TGZ_B64` from the pack script.
    Do not apply/deploy yet.
@@ -173,8 +192,11 @@ each step says how to undo it.
    queue up (the dashboard says "Searching WebCargo…"); that is expected.
    **Undo:** `systemctl --user enable --now translog-webcargo-worker`.
 5. **Service `translog-worker`.** New service from the same repo and branch.
-   Config-as-code → `/deploy/railway/worker.railway.json`. Volume → `/data`.
-   No domain. Variables → the worker table. It deploys, finds no profile,
+   Settings → Build → Builder **Dockerfile**, path
+   `deploy/railway/Dockerfile.worker`; Deploy → Restart policy On Failure,
+   50 retries, no healthcheck; Scale → region. Canvas → Add → Volume →
+   `/data`. No domain. Variables → the worker table. Source → Auto deploys →
+   Disable. It deploys, finds no profile,
    exits 78 and parks. That is the expected first state.
 6. **Bring the session over** — try the cheap route first:
    - *Profile import.* On the laptop: `deploy/railway/pack-browser-profile.sh`
@@ -204,8 +226,8 @@ each step says how to undo it.
    **decline** it (declining sends nothing). Run
    `python -m translog_quote.ops.healthcheck --url https://<web-domain> --env-file .env.worker`
    from the laptop.
-9. **Cut over for good:** merge `railway` into `main`, push, switch both
-   Railway services to `main`. Leave Render suspended (not deleted) for a
+9. **Cut over for good:** merge `railway-deployment` into `main`, push, switch
+   both Railway services to `main`. Leave Render suspended (not deleted) for a
    week as the rollback, then delete it.
 10. **Rollback at any point:** resume Render, remove/stop the Railway worker
     deployment, start the Fedora unit. State is in Upstash, so either side
@@ -227,6 +249,13 @@ therefore takes the old one down cleanly before the new one starts (volume
 services never overlap). If Railway ever SIGKILLs mid-job (draining expired),
 the job stays `processing` until its 600 s `job_timeout` — the documented POC
 limitation, unchanged.
+
+**Session gone after a clean redeploy (2026-10-15).** WebCargo's auth cookie
+is a session cookie and Chromium drops those after a clean shutdown unless the
+profile says "continue where you left off"; the worker now writes that
+preference before every launch (`ensure_session_cookies_restored`). The first
+deploy carrying the fix needs one more login-mode sign-in, because the
+session established before the fix was discarded at the previous restart.
 
 **Chromium left a stale lock** (`SingletonLock` after a hard kill): the
 entrypoint removes it on every start.
