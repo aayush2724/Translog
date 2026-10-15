@@ -1,0 +1,6 @@
+# Pins for the Railway worker image. The base image
+# mcr.microsoft.com/playwright/python:v1.62.0-noble ships the Chromium build
+# that Playwright 1.62.0 expects under /ms-playwright; a newer playwright wheel
+# would look for a different browser build and fail at launch. pyproject keeps
+# the open range (>=1.47) for local installs; this file freezes it for the image.
+playwright==1.62.0

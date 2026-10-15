@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1
+# Translog WebCargo browser worker ("translog-worker" on Railway).
+#
+# One headed Chromium on a virtual display (Xvfb), one persistent profile on
+# the Railway volume, one RQ SimpleWorker behind the single-worker Redis lock —
+# the same process the Fedora systemd unit runs, inside a container. The base
+# image is Playwright's own: Ubuntu 24.04, Python 3.12, and the exact Chromium
+# build Playwright 1.62.0 expects, with every browser system dependency
+# (including Xvfb) preinstalled.
+FROM mcr.microsoft.com/playwright/python:v1.62.0-noble
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # Browser mode only; this image must never serve simulated rates.
+    TRANSLOG_WEBCARGO__MODE=browser \
+    # The persistent profile lives on the volume mounted at /data.
+    TRANSLOG_WEBCARGO__USER_DATA_DIR=/data/webcargo-profile
+
+# xvfb: the virtual display (already in the base image; listed so the
+# dependency is explicit). x11vnc + novnc + websockify: used ONLY in login mode
+# (TRANSLOG_WORKER_LOGIN=1) so an operator can sign in on the live display from
+# a browser; idle otherwise.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends xvfb x11vnc novnc websockify python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --system --create-home --uid 10001 --shell /usr/sbin/nologin translog \
+    && mkdir -p /data \
+    && chown translog:translog /data
+
+# A private virtualenv: the base image's Python packages are Debian-managed
+# (no pip RECORD files), so installing on top of them fails. The venv sees the
+# image's browsers through PLAYWRIGHT_BROWSERS_PATH, which the base image sets.
+ENV PATH=/opt/venv/bin:$PATH
+RUN python3 -m venv /opt/venv
+
+WORKDIR /app
+COPY pyproject.toml README.md deploy/railway/constraints.txt ./
+COPY src ./src
+RUN pip install -c constraints.txt '.[worker]'
+
+COPY deploy/railway/worker-entrypoint.sh /usr/local/bin/translog-worker-entrypoint
+RUN chmod 755 /usr/local/bin/translog-worker-entrypoint
+
+ENTRYPOINT ["translog-worker-entrypoint"]

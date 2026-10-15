@@ -546,4 +546,5 @@ New integrations arrive as an adapter behind an existing port plus one line in
 | [`docs/discovery/`](docs/discovery/) | What was verified about the Freightos and WebCargo APIs, and why the real adapter stays a refusal |
 | [`docs/extraction-contract.md`](docs/extraction-contract.md) | What a model may report, field semantics, missing/negative/ambiguous behaviour, error handling, the injection boundary, worked examples |
 | [`fixtures/emails/README.md`](fixtures/emails/README.md) | Fixture format, scenarios, and what the fixture layer does not do |
+| [`docs/railway-deployment.md`](docs/railway-deployment.md) | Running the dashboard and the WebCargo browser worker as two Railway services: images, variables, volumes, the WebCargo sign-in on a container, cut-over and rollback |
 | [`docs/reference/`](docs/reference/) | Frozen source documents and a note on what is deliberately not committed |

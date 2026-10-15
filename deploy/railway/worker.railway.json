@@ -1,0 +1,15 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "deploy/railway/Dockerfile.worker",
+    "watchPatterns": ["src/**", "pyproject.toml", "README.md", "deploy/railway/**"]
+  },
+  "deploy": {
+    "numReplicas": 1,
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 50,
+    "overlapSeconds": 0,
+    "drainingSeconds": 200
+  }
+}
