@@ -29,9 +29,18 @@ from translog_quote.domain.rates.model import (
     TransitTime,
     TransitUnit,
 )
+from translog_quote.domain.rates.options import RateOptions, rate_options
+from translog_quote.domain.rates.preference import (
+    RatePreference,
+    detect_rate_preference,
+    recommended_strategy,
+)
 from translog_quote.domain.rates.selection import select_rate
 from translog_quote.domain.rates.strategy import (
+    CHEAPEST_ELIGIBLE,
     FASTEST_ELIGIBLE,
+    STRATEGIES,
+    RateStrategy,
     Selection,
     SelectionStrategy,
     SortField,
@@ -41,7 +50,12 @@ from translog_quote.domain.rates.strategy import (
 from translog_quote.domain.rates.transit import UndeterminableTransit, elapsed_transit
 
 __all__ = [
+    "CHEAPEST_ELIGIBLE",
     "FASTEST_ELIGIBLE",
+    "STRATEGIES",
+    "RateOptions",
+    "RatePreference",
+    "RateStrategy",
     "ExcludedRate",
     "ExclusionReason",
     "FilterOutcome",
@@ -60,8 +74,11 @@ __all__ = [
     "UndeterminableTransit",
     "drop_incomplete_rate",
     "drop_restricted_carrier",
+    "detect_rate_preference",
     "drop_unrankable_rate",
     "elapsed_transit",
     "filter_rates",
+    "rate_options",
+    "recommended_strategy",
     "select_rate",
 ]

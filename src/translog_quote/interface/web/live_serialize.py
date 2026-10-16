@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from translog_quote.domain.quotation import SIMULATED_RATE_NOTICE
+from translog_quote.domain.rates import RateStrategy, rate_options
 from translog_quote.domain.workflow import RequestState
 from translog_quote.interface.demo.formatting import FIELD_LABELS, render_transit
 from translog_quote.interface.demo.poc_demo import FIELD_TITLES
@@ -30,13 +31,15 @@ from translog_quote.pipeline.audit import AuditEventType
 
 if TYPE_CHECKING:
     from translog_quote.domain.quotation import ReviewPacket
-    from translog_quote.domain.rates import Rate
+    from translog_quote.domain.rates import Rate, RateOptions, RatePreference, Selection
     from translog_quote.interface.web.live_session import LiveRequest, LiveSession
     from translog_quote.interface.web.multi_account_session import MultiAccountSession
     from translog_quote.pipeline import RateSearchOutcome
     from translog_quote.pipeline.audit import AuditEvent
 
 Json = dict[str, object]
+
+_FASTEST = RateStrategy.FASTEST
 
 #: The disclosure the interface must never render a simulated rate without.
 #: Imported from the domain rather than retyped, so the browser cannot end up
@@ -186,6 +189,15 @@ def rates_json(outcome: RateSearchOutcome) -> Json:
     carrier is absent, and silence there is indistinguishable from a bug.
     """
     selection = outcome.selection
+    # The cheapest eligible rate, from the same eligible set, so the board can
+    # mark it beside the fastest. Null when it is the fastest rate too, or when
+    # prices cannot be compared (see `rate_options`).
+    options = rate_options(outcome.filtered.eligible)
+    cheapest_ref = (
+        options.cheapest.rate.source_ref
+        if options is not None and options.cheapest is not None and not options.same_rate
+        else None
+    )
     return {
         "simulated": outcome.uses_mock_data,
         "banner": SIMULATED_BANNER if outcome.uses_mock_data else None,
@@ -225,11 +237,16 @@ def rates_json(outcome: RateSearchOutcome) -> Json:
             "reason": selection.reason,
             "runners_up": [_rate_json(rate) for rate in selection.runners_up],
         },
-        "strategy": "Fastest eligible transit — ranked by transit time, not price",
+        "cheapest_ref": cheapest_ref,
+        "fastest_is_cheapest": bool(options is not None and options.same_rate),
+        "strategy": "Fastest eligible transit leads; the cheapest eligible rate is marked "
+        "beside it. The operator chooses which one to quote.",
     }
 
 
-def _candidate_scope(*, returned: int, simulated: bool, completeness: str | None) -> str:
+def _candidate_scope(
+    *, returned: int, simulated: bool, completeness: str | None, lead: str = "Fastest"
+) -> str:
     """One accurate sentence about how wide the "fastest eligible" search was.
 
     Never claims the selected rate is globally fastest: it is the fastest of the
@@ -242,26 +259,120 @@ def _candidate_scope(*, returned: int, simulated: bool, completeness: str | None
     plural = "" if returned == 1 else "s"
     if simulated:
         return (
-            f"Fastest eligible among {returned} simulated rate{plural} — "
+            f"{lead} eligible among {returned} simulated rate{plural} — "
             "demonstration data, not a live WebCargo result."
         )
     scope = (
-        f"Fastest eligible among the {returned} rate{plural} WebCargo returned — "
-        "not necessarily the fastest that exists."
+        f"{lead} eligible among the {returned} rate{plural} WebCargo returned — "
+        f"not necessarily the {lead.lower()} that exists."
     )
     if not completeness:
         scope += " WebCargo stated no total, so completeness is unconfirmed."
     return scope
 
 
-def approval_json(packet: ReviewPacket, outcome: RateSearchOutcome, *, approver: str) -> Json:
+#: How the client's own wording is described on the approval card.
+_PREFERENCE_WORDING: dict[str, str] = {
+    "fastest": "The client asked for speed (e.g. fastest / urgent).",
+    "cheapest": "The client asked for the lowest price (e.g. cheapest / best price).",
+    "unclear": "The client mentioned both speed and price; choose the option that fits.",
+}
+_NO_PREFERENCE = "The client did not state a speed or price preference."
+
+
+def _option_json(
+    key: str, label: str, selection: Selection, outcome: RateSearchOutcome, *, recommended: bool
+) -> Json:
+    """One option on the approval card, from fields the rate already holds."""
+    rate = selection.rate
+    return {
+        "key": key,
+        "label": label,
+        "recommended": recommended,
+        "carrier": f"{rate.carrier_name} ({rate.carrier_code})",
+        "service": rate.product,
+        "transit": render_transit(rate.transit),
+        "price": f"{rate.total_amount} {rate.currency}",
+        "departure_date": rate.departure_date_label or outcome.query.date.isoformat(),
+        "reason": selection.reason,
+        "source_ref": rate.source_ref,
+    }
+
+
+def options_json(
+    options: RateOptions | None,
+    outcome: RateSearchOutcome,
+    *,
+    recommended: RateStrategy,
+) -> list[Json]:
+    """The rate options an operator chooses between: one when the fastest rate is
+    also the cheapest (or the cheapest cannot be determined), else two."""
+    if options is None:
+        return []
+    fastest_key, cheapest_key = "fastest", "cheapest"
+    if options.cheapest is None or options.same_rate:
+        label = "Fastest and cheapest" if options.same_rate else "Fastest"
+        return [_option_json(fastest_key, label, options.fastest, outcome, recommended=True)]
+    return [
+        _option_json(
+            fastest_key,
+            "Fastest",
+            options.fastest,
+            outcome,
+            recommended=recommended.value == fastest_key,
+        ),
+        _option_json(
+            cheapest_key,
+            "Cheapest",
+            options.cheapest,
+            outcome,
+            recommended=recommended.value == cheapest_key,
+        ),
+    ]
+
+
+def _late_notice(late: RatePreference | None, recommended_key: str) -> str | None:
+    """What a preference stated after the card was built means for the operator.
+
+    Never changes the preselected option — it tells the person, who decides."""
+    if late is None:
+        return None
+    wording = {
+        "fastest": "now asks for speed (fastest)",
+        "cheapest": "now asks for the lowest price (cheapest)",
+        "unclear": "mentions both speed and price",
+    }[late.value]
+    head = f"The client wrote after these rates were shown and {wording}."
+    if late.value == recommended_key:
+        return f"{head} That matches the preselected option."
+    return (
+        f"{head} The preselected option ({recommended_key}) was not changed — "
+        "check the client's latest message and choose the option to quote."
+    )
+
+
+def approval_json(
+    packet: ReviewPacket,
+    outcome: RateSearchOutcome,
+    *,
+    approver: str,
+    options: RateOptions | None = None,
+    preference: RatePreference | None = None,
+    recommended: RateStrategy | None = None,
+    late_preference: RatePreference | None = None,
+) -> Json:
     """Everything the approval card must show before anyone may click.
 
     The simulated-rate warning is part of the payload rather than a frontend
     decoration: an approver deciding on invented numbers must be told so by the
     same system that produced them.
+
+    The top-level carrier/price fields describe the packet's current selection
+    (the recommended option); ``options`` lists what the operator may choose
+    between, and whichever they pick is what the quotation is built from.
     """
     rate = packet.selection.rate
+    recommended_key = recommended.value if recommended is not None else "fastest"
     return {
         "reference": packet.request_id,
         "simulated": outcome.uses_mock_data,
@@ -288,7 +399,21 @@ def approval_json(packet: ReviewPacket, outcome: RateSearchOutcome, *, approver:
             returned=outcome.returned,
             simulated=outcome.uses_mock_data,
             completeness=outcome.completeness,
+            lead="Cheapest" if recommended_key == "cheapest" else "Fastest",
         ),
+        "options": options_json(
+            options,
+            outcome,
+            recommended=recommended if recommended is not None else _FASTEST,
+        ),
+        "recommended_option": recommended_key,
+        "client_preference": preference.value if preference is not None else None,
+        "client_preference_text": _PREFERENCE_WORDING.get(
+            preference.value if preference is not None else "", _NO_PREFERENCE
+        ),
+        "cheapest_unavailable": options.cheapest_unavailable if options is not None else None,
+        "late_preference": late_preference.value if late_preference is not None else None,
+        "late_preference_notice": _late_notice(late_preference, recommended_key),
         "completeness": outcome.completeness,
         "excluded": [
             {
@@ -317,6 +442,18 @@ def decision_json(request: LiveRequest) -> Json | None:
         "at": request.decision.at.isoformat(),
         "reason": getattr(request.decision, "reason", ""),
         "sent": request.quotation_sent,
+        # Which option was quoted and the rate it carried, so the record says
+        # what the client was actually sent. Null on a decline.
+        "quoted_option": request.quoted_option.value if request.quoted_option else None,
+        "quoted_rate": None
+        if not request.quotation_sent or request.packet is None
+        else (
+            f"{request.packet.selection.rate.carrier_name} "
+            f"({request.packet.selection.rate.carrier_code}) — "
+            f"{request.packet.selection.rate.total_amount} "
+            f"{request.packet.selection.rate.currency}, "
+            f"{render_transit(request.packet.selection.rate.transit)}"
+        ),
         "headline": "APPROVED — quotation sent to the client"
         if approved
         else "DECLINED — quotation not sent",
@@ -761,7 +898,15 @@ def request_detail(session: LiveSession, request: LiveRequest) -> Json:
         "rates": rates_json(request.rates) if request.rates is not None else None,
         "approval": None
         if request.packet is None or request.rates is None
-        else approval_json(request.packet, request.rates, approver=session.approver_address),
+        else approval_json(
+            request.packet,
+            request.rates,
+            approver=session.approver_address,
+            options=request.rate_options,
+            preference=request.rate_preference,
+            recommended=request.recommended_option,
+            late_preference=request.late_preference,
+        ),
         "awaiting_decision": request.awaiting_quotation_decision,
         "decision": decision_json(request),
     }

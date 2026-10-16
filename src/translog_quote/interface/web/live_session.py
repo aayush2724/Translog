@@ -42,11 +42,21 @@ from translog_quote.config import WebCargoMode
 from translog_quote.domain.clarification import UnresolvedPlace
 from translog_quote.domain.quotation import (
     INTERNAL_SUBJECT_PREFIX,
+    Approved,
     ReviewPacket,
     decision_from_choice,
     no_rates_message,
 )
-from translog_quote.domain.rates import FASTEST_ELIGIBLE, ExclusionReason
+from translog_quote.domain.rates import (
+    FASTEST_ELIGIBLE,
+    ExclusionReason,
+    RateOptions,
+    RatePreference,
+    RateStrategy,
+    detect_rate_preference,
+    rate_options,
+    recommended_strategy,
+)
 from translog_quote.domain.shipment import DeliveryType, FieldName
 from translog_quote.domain.validation import validate_shipment
 from translog_quote.domain.workflow import TERMINAL_STATES, RequestState
@@ -268,6 +278,29 @@ class LiveRequest:
     """The operator who picked ``operator_goods_type``, recorded on the audit
     event when the search enqueues under their choice."""
 
+    rate_preference: RatePreference | None = None
+    """The client's stated priority, read from their own words on each message
+    (the latest message that states one wins). Only decides which option the
+    approval card preselects; ``None`` when nothing was stated."""
+
+    rate_options: RateOptions | None = None
+    """The fastest and the cheapest eligible rate, both chosen from the one
+    search's eligible set. Built with ``packet``; ``None`` without one."""
+
+    quoted_option: RateStrategy | None = None
+    """The option the operator approved and the quotation was built from."""
+
+    recommended_at_selection: RateStrategy | None = None
+    """The option recommended when the approval card was built, frozen there.
+    A later client message may change ``rate_preference``, but it never moves
+    the preselected option underneath the operator: it is reported through
+    ``late_preference`` and the person decides."""
+
+    late_preference: RatePreference | None = None
+    """A speed-or-price preference the client stated after the rates were on
+    the approval card (a late message, not extracted). Shown to the operator as
+    a notice; changes nothing on its own. Cleared when a new card is built."""
+
     packet: ReviewPacket | None = None
     decision: ApprovalDecision | None = None
     quotation_sent: bool = False
@@ -318,6 +351,21 @@ class LiveRequest:
     def awaiting_quotation_decision(self) -> bool:
         """A rate is selected and the gate has not yet been answered."""
         return self.packet is not None and self.decision is None
+
+    @property
+    def recommended_option(self) -> RateStrategy:
+        """The option preselected for the operator.
+
+        Cheapest only when the client clearly asked for price *and* a cheapest
+        rate could be determined; otherwise fastest, the existing default.
+        Once the card is built the answer is frozen (`recommended_at_selection`)
+        so a late client message cannot silently change it."""
+        if self.recommended_at_selection is not None:
+            return self.recommended_at_selection
+        strategy = recommended_strategy(self.rate_preference)
+        if self.rate_options is not None and self.rate_options.selection_for(strategy) is None:
+            return RateStrategy.FASTEST
+        return strategy
 
     @property
     def rate_search_pending(self) -> bool:
@@ -768,7 +816,15 @@ class LiveSession:
         request.clarification_sent_by = who
         bootstrap.commit_request(self._working, self._durable, request.request_id)
 
-    def decide(self, request_id: str, *, choice: str, by: str, reason: str = "") -> LiveRequest:
+    def decide(
+        self,
+        request_id: str,
+        *,
+        choice: str,
+        by: str,
+        reason: str = "",
+        option: str | None = None,
+    ) -> LiveRequest:
         """Apply one explicit human decision to the quotation gate.
 
         The browser's click is the decision the `ApprovalPort` exists to carry.
@@ -776,6 +832,13 @@ class LiveSession:
         or a decline by a named person, and `QuotationStage` — unchanged — is
         what actually sends or does not send. Nothing in this method touches
         the email sink.
+
+        ``option`` is the rate the operator chose to quote: ``"fastest"`` or
+        ``"cheapest"``. Omitted, the recommended option (the one the packet was
+        built with) is quoted, so a caller that predates the choice behaves as
+        before. An unknown option, or a cheapest rate that could not be
+        determined, is refused before anything is recorded or sent — never
+        swapped silently for the other rate.
         """
         request = self.requests.get(request_id)
         if request is None:
@@ -787,10 +850,14 @@ class LiveSession:
                 f"{request_id} has already been decided; it will not be decided again."
             )
 
+        chosen = self._chosen_option(request, option)
         decision = decision_from_choice(choice, by=by, at=self._clock.now(), reason=reason)
+        packet = request.packet
+        if isinstance(decision, Approved):
+            packet = self._packet_for_option(request, chosen)
         self._gate.record(decision)
         outcome = self._quotation.run(
-            request.packet,
+            packet,
             client_address=request.client_address,
             is_simulated=request.rates.uses_mock_data if request.rates else True,
             in_reply_to=request.last_message_id,
@@ -799,9 +866,77 @@ class LiveSession:
         request.decision = outcome.decision
         request.quotation_sent = outcome.sent
         request.state = outcome.state
+        if outcome.sent:
+            request.packet = packet
+            request.quoted_option = chosen
         self._mark_settled(request)
         bootstrap.commit_request(self._working, self._durable, request_id)
         return request
+
+    @staticmethod
+    def _chosen_option(request: LiveRequest, option: str | None) -> RateStrategy:
+        """The operator's option, or the recommended one when none was sent."""
+        if option is None or not option.strip():
+            return request.recommended_option
+        try:
+            return RateStrategy(option.strip().lower())
+        except ValueError:
+            raise LiveSequenceError(
+                f"{option!r} is not a rate option; choose 'fastest' or 'cheapest'."
+            ) from None
+
+    def _packet_for_option(self, request: LiveRequest, chosen: RateStrategy) -> ReviewPacket:
+        """The approval packet rebuilt around the chosen option's selection.
+
+        Both options come from the same eligible set (`rate_options`), so the
+        swap can never reach an ineligible rate. Audited, so the trail shows
+        which option the person approved and what it beat on.
+        """
+        packet = request.packet
+        assert packet is not None  # noqa: S101 - decide() checked it
+        options = request.rate_options
+        if options is None:
+            # Built before options existed (or a hand-made packet): only the
+            # packet's own selection is known, which is the fastest.
+            if chosen is not RateStrategy.FASTEST:
+                raise LiveSequenceError("Only the fastest rate is available for this request.")
+            return packet
+        selection = options.selection_for(chosen)
+        if selection is None:
+            raise LiveSequenceError(
+                f"The cheapest rate cannot be quoted: {options.cheapest_unavailable}."
+            )
+        from translog_quote.pipeline.audit import AuditEvent, AuditEventType
+
+        self.audit.record(
+            AuditEvent(
+                request_id=request.request_id,
+                event=AuditEventType.RATE_OPTION_CHOSEN,
+                at=self._clock.now(),
+                detail={
+                    "option": chosen.value,
+                    "recommended": request.recommended_option.value,
+                    "client_preference": request.rate_preference.value
+                    if request.rate_preference
+                    else None,
+                    "carrier": selection.rate.carrier_code,
+                    "total": str(selection.rate.total_amount),
+                    "currency": selection.rate.currency,
+                    "transit_minutes": selection.rate.transit.minutes
+                    if selection.rate.transit
+                    else None,
+                },
+            )
+        )
+        return packet.model_copy(
+            update={
+                "selection": selection,
+                "selected_option": chosen,
+                # The latest stated preference, so the approver's email reflects
+                # a late message the operator acted on.
+                "client_preference": request.rate_preference,
+            }
+        )
 
     def _mark_settled(self, request: LiveRequest) -> None:
         """Stamp *when* a request settled, in the working store and in view.
@@ -1138,7 +1273,9 @@ class LiveSession:
         ):
             # The client wrote again after the request stopped taking answers —
             # often a correction. Not extracted, but shown to the desk.
-            self.requests[routed.request_id].late_messages.append(email)
+            late = self.requests[routed.request_id]
+            late.late_messages.append(email)
+            self._note_late_rate_preference(late, email)
         if routed.ignored and routed.request_id is not None:
             # Unrelated mail (bulk/automated sender, or a first-contact message
             # that stated no shipment detail). The router recorded it as seen;
@@ -1192,6 +1329,7 @@ class LiveSession:
             )
 
         self.requests[routed.request_id] = request
+        self._note_rate_preference(request, email)
 
         # A merged reply is worth keeping whatever happens next; a draft that
         # nobody has approved is not, and persisting it would leave the request
@@ -1203,6 +1341,49 @@ class LiveSession:
             # that it was seen, so it is never extracted again, and leave no
             # request behind for anyone to have to explain.
             bootstrap.commit_thread(self._working, self._durable, routed.request_id)
+
+    def _note_rate_preference(self, request: LiveRequest, email: RawEmail) -> None:
+        """Read the client's speed-or-price wording from this message and keep it.
+
+        The latest message that states a preference wins; one that states none
+        leaves the earlier reading alone. Written onto the stored request every
+        turn because the workflow saves a fresh request each turn (which does not
+        carry it) — without this a restart, or the next reply, would forget it.
+        """
+        stated = detect_rate_preference(email.subject, email.body_text)
+        if stated is not None:
+            request.rate_preference = stated
+        if request.rate_preference is None:
+            return
+        stored = self._working.get_request(request.request_id)
+        if stored is not None and stored.rate_preference is not request.rate_preference:
+            self._working.save_request(
+                stored.model_copy(update={"rate_preference": request.rate_preference})
+            )
+
+    def _note_late_rate_preference(self, request: LiveRequest, email: RawEmail) -> None:
+        """A speed-or-price preference in a late (not extracted) client message.
+
+        Read with the same deterministic detector and saved like any other, so
+        it is on record and survives a restart. If the approval card is already
+        up, it is surfaced as ``late_preference`` for the operator — the
+        preselected option and the packet are left exactly as they were, and
+        nothing is sent. Before the card exists (search still running), it
+        simply becomes the preference the card will be built with. After a
+        decision it changes nothing.
+        """
+        if request.decision is not None:
+            return
+        stated = detect_rate_preference(email.subject, email.body_text)
+        if stated is None:
+            return
+        request.rate_preference = stated
+        if request.packet is not None:
+            request.late_preference = stated
+        stored = self._working.get_request(request.request_id)
+        if stored is not None and stored.rate_preference is not stated:
+            self._working.save_request(stored.model_copy(update={"rate_preference": stated}))
+            bootstrap.commit_request(self._working, self._durable, request.request_id)
 
     def _search_rates_for_validated(self) -> None:
         """Advance rate search for any request that has just validated.
@@ -1399,13 +1580,29 @@ class LiveSession:
         request.rates = outcome
         request.state = outcome.state
         if outcome.selection is not None:
+            # Both options from the one search's eligible set — no second
+            # search. The fastest is the same rate the search already selected
+            # (same domain code, same candidates); the packet starts on the
+            # option recommended from the client's wording, and the operator
+            # may switch before approving.
+            request.rate_options = rate_options(outcome.filtered.eligible)
+            request.recommended_at_selection = None  # a new card: recompute, then freeze
+            request.late_preference = None
+            recommended = request.recommended_option
+            selection = outcome.selection
+            if request.rate_options is not None:
+                selection = request.rate_options.selection_for(recommended) or selection
+                request.recommended_at_selection = recommended
             request.packet = ReviewPacket(
                 request_id=request.request_id,
                 record=request.record,
                 validation=request.validation,
                 clarification_sent=request.clarification_sent_by is not None,
                 rates=outcome.filtered,
-                selection=outcome.selection,
+                selection=selection,
+                options=request.rate_options,
+                selected_option=recommended if request.rate_options is not None else None,
+                client_preference=request.rate_preference,
             )
         elif outcome.state is RequestState.NO_ELIGIBLE_RATE:
             if outcome.returned == 0:
@@ -2007,6 +2204,9 @@ class LiveSession:
             resolved_by=stored.resolved_by,
             resolved_at=stored.resolved_at,
             resolution_note=stored.resolution_note,
+            # The client's speed-or-price wording survives the restart, so the
+            # re-derived approval card recommends the same option as before.
+            rate_preference=stored.rate_preference,
             # When it settled, if this build (or a later one) recorded it. A
             # terminal request from an older store has None and is treated by
             # the dashboard as settled long ago — hidden, not resurrected.

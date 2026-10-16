@@ -12,7 +12,13 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
-from translog_quote.domain.rates import FilterOutcome, Selection
+from translog_quote.domain.rates import (
+    FilterOutcome,
+    RateOptions,
+    RatePreference,
+    RateStrategy,
+    Selection,
+)
 from translog_quote.domain.shipment import ShipmentRecord
 from translog_quote.domain.validation import ValidationResult
 
@@ -34,6 +40,16 @@ class ReviewPacket(BaseModel):
     clarification_sent: bool
     rates: FilterOutcome
     selection: Selection
+
+    options: RateOptions | None = None
+    """The fastest and the cheapest eligible rate this packet chose between, so
+    the review can label the selected rate and its alternative. ``None`` for a
+    packet built without options (the scripted demos); the review then keeps
+    its single-recommendation layout."""
+    selected_option: RateStrategy | None = None
+    """Which of ``options`` ``selection`` is."""
+    client_preference: RatePreference | None = None
+    """The client's stated speed-or-price priority, shown to the approver."""
 
 
 class Approved(BaseModel):
