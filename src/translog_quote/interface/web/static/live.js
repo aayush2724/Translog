@@ -1031,16 +1031,15 @@ function sectionApproval(detail) {
           el("h3", null, "Shipment"),
           kv(detail.shipment.filter((row) => row.value).map((row) => [row.label, row.value]))),
         el("div", null,
-          el("h3", null, "Rate to quote"),
+          el("h3", null, "Client preference"),
           el("p", { class: "preference-note" }, approval.client_preference_text),
           approval.late_preference_notice
             ? el("div", { class: "banner banner-amber late-preference" }, approval.late_preference_notice)
-            : null,
-          optionChooser(approval),
-          approval.cheapest_unavailable
-            ? el("p", { class: "scope-note" },
-                `Cheapest option unavailable: ${approval.cheapest_unavailable}.`)
-            : null,
+            : null)),
+      el("div", { class: "rate-choice-section" },
+        el("h3", null, "Rate to quote"),
+        rateComparison(approval),
+        el("div", null,
           approval.candidate_scope
             ? el("p", { class: "scope-note" }, approval.candidate_scope)
             : null,
@@ -1077,21 +1076,111 @@ function sectionQuotation(detail) {
   );
 }
 
-/* The option currently chosen on a card: the operator's pick when it is still
-   on offer, else the server's recommendation. */
-function chosenOption(approval) {
+/* --- choosing the rate to quote ----------------------------------------------
+   Three columns built from the one search the request already has: CHEAPEST,
+   FASTEST, and up to a handful of OTHER eligible rates. The server decides which
+   rates belong where (all eligible, none repeated); `rateChoices` only arranges
+   them and works out which one is recommended and which one is selected, so the
+   drawing code below has no decisions in it. Choosing changes only what APPROVE
+   sends; nothing is sent until a named person approves. */
+
+/* A selection key: "fastest", "cheapest", or "rate:<source_ref>" for an other rate. */
+const RATE_KEY_PREFIX = "rate:";
+
+function rateChoices(approval, picked) {
   const options = approval.options || [];
-  const picked = ui.rateOption[approval.reference];
-  if (picked && options.some((option) => option.key === picked)) return picked;
-  return approval.recommended_option || "fastest";
+  const byKey = {};
+  options.forEach((option) => { byKey[option.key] = option; });
+  const shared = options.length === 1 && byKey.fastest && /cheapest/i.test(byKey.fastest.label || "");
+  const optionRefs = new Set(options.map((option) => option.source_ref));
+  /* Defensive: an other rate that repeats one of the two options is dropped, so
+     no rate can appear in two columns even if the server ever sent one. */
+  const others = (approval.other_rates || [])
+    .filter((rate) => !optionRefs.has(rate.rate_ref))
+    .map((rate) => Object.assign({ key: RATE_KEY_PREFIX + rate.rate_ref }, rate));
+
+  const available = new Set(options.map((option) => option.key).concat(others.map((rate) => rate.key)));
+  /* The recommendation, mapped onto what is actually on offer: a shared rate is
+     "fastest"; a cheapest that could not be determined falls back to fastest. */
+  let recommended = approval.recommended_option || "fastest";
+  if (!available.has(recommended)) recommended = "fastest";
+  const selected = picked && available.has(picked) ? picked : recommended;
+
+  return {
+    shared,
+    fastest: byKey.fastest || null,
+    cheapest: shared ? null : byKey.cheapest || null,
+    cheapestUnavailable: !shared && !byKey.cheapest ? approval.cheapest_unavailable || null : null,
+    others,
+    othersTotal: approval.other_rates_total || others.length,
+    recommended,
+    selected,
+  };
 }
 
-/* The rate options, each with the facts a choice is made on. One option when
-   the fastest rate is also the cheapest — never the same rate twice. Choosing
-   here only changes what APPROVE will send; nothing is sent until then. */
-function optionChooser(approval) {
+/* What APPROVE posts for a selection key: a named option, or one specific rate. */
+function choiceBody(key) {
+  return key && key.startsWith(RATE_KEY_PREFIX)
+    ? { rate_ref: key.slice(RATE_KEY_PREFIX.length) }
+    : { option: key };
+}
+
+/* What APPROVE says it will send — which column and which rate — so the
+   operator reads the exact rate before clicking. */
+function choiceLabel(choices) {
+  const rate = choices.selected === "fastest" ? choices.fastest
+    : choices.selected === "cheapest" ? choices.cheapest
+    : choices.others.find((other) => other.key === choices.selected);
+  const kind = choices.selected === "fastest" ? (choices.shared ? "fastest and cheapest" : "fastest")
+    : choices.selected === "cheapest" ? "cheapest" : "other rate";
+  return rate ? `${kind}: ${rate.carrier}, ${rate.price}` : kind;
+}
+
+/* The current choices for a card, from the operator's pick (kept on `ui`
+   because the card is rebuilt on every refresh) and the server's data. */
+function currentChoices(approval) {
+  return rateChoices(approval, ui.rateOption[approval.reference]);
+}
+
+/* One rate as a selectable card. `badges` are the column's own label(s). */
+function rateChoiceCard(approval, choices, key, rate, badges, extra) {
+  const selected = choices.selected === key;
+  const recommended = choices.recommended === key;
+  const input = el("input", {
+    type: "radio",
+    name: `rate-choice-${approval.reference}`,
+    value: key,
+    "aria-label": `${badges.join(" and ")}: ${rate.carrier}, ${rate.price}`,
+  });
+  input.checked = selected;
+  input.addEventListener("change", () => {
+    ui.rateOption[approval.reference] = key;
+    render();
+  });
+  return el("label", {
+    class: `rate-choice${recommended ? " rate-choice-recommended" : ""}${selected ? " rate-choice-selected" : ""}`,
+    "data-key": key,
+  },
+    el("div", { class: "rate-choice-head" },
+      input,
+      ...badges.map((badge) => el("span", { class: "rate-choice-label" }, badge)),
+      recommended ? el("span", { class: "rate-choice-flag flag-recommended" }, "RECOMMENDED") : null,
+      selected ? el("span", { class: "rate-choice-flag flag-selected" }, "SELECTED") : null),
+    el("div", { class: "rate-choice-price" }, rate.price),
+    el("dl", { class: "rate-choice-facts" },
+      el("dt", null, "Airline"), el("dd", null, rate.carrier),
+      el("dt", null, "Transit"), el("dd", null, rate.transit || "—"),
+      el("dt", null, "Departs"), el("dd", null, rate.departure_date || "Not stated"),
+      el("dt", null, "Service"), el("dd", null, rate.service || "—")),
+    extra || null);
+}
+
+/* The three columns. A rate that is both fastest and cheapest is shown once,
+   across the first two columns, never twice. */
+function rateComparison(approval) {
   const options = approval.options || [];
   if (!options.length) {
+    /* A card built before options existed: the single recommended rate. */
     return kv([
       ["Reference", approval.reference],
       ["Carrier", approval.carrier],
@@ -1102,51 +1191,60 @@ function optionChooser(approval) {
       ["Why", approval.reason],
     ]);
   }
-  const current = chosenOption(approval);
-  const several = options.length > 1;
-  return el("div", { class: "rate-options", role: several ? "radiogroup" : null, "aria-label": "Rate to quote" },
-    ...options.map((option) => {
-      const chosen = option.key === current;
-      const input = several
-        ? el("input", { type: "radio", name: `rate-option-${approval.reference}`, value: option.key })
-        : null;
-      if (input) {
-        input.checked = chosen;
-        input.addEventListener("change", () => {
-          ui.rateOption[approval.reference] = option.key;
-          render();
-        });
-      }
-      return el(several ? "label" : "div", { class: `rate-option${chosen ? " rate-option-chosen" : ""}` },
-        el("div", { class: "rate-option-head" },
-          input,
-          el("strong", null, option.label),
-          option.recommended && several ? pill("RECOMMENDED", "blue") : null),
-        kv([
-          ["Carrier", option.carrier],
-          ["Service", option.service],
-          ["Departs", option.departure_date],
-          ["Transit", option.transit],
-          ["Price", option.price],
-          ["Why", option.reason],
-        ]));
-    }));
+  const choices = currentChoices(approval);
+  const why = (rate) => (rate.reason ? el("p", { class: "rate-choice-why muted small" }, rate.reason) : null);
+
+  const column = (title, cls, ...body) =>
+    el("section", { class: `rate-col ${cls}`, "aria-label": title }, el("h4", { class: "rate-col-title" }, title), ...body);
+
+  const firstTwo = choices.shared
+    ? [column("Fastest · Cheapest", "rate-col-shared",
+        rateChoiceCard(approval, choices, "fastest", choices.fastest, ["FASTEST", "CHEAPEST"], why(choices.fastest)),
+        el("p", { class: "muted small" }, "The fastest eligible rate is also the cheapest, so it is shown once."))]
+    : [
+        column("Cheapest", "rate-col-cheapest",
+          choices.cheapest
+            ? rateChoiceCard(approval, choices, "cheapest", choices.cheapest, ["CHEAPEST"], why(choices.cheapest))
+            : el("div", { class: "rate-col-empty" },
+                el("strong", null, "Cheapest not available"),
+                el("p", { class: "muted small" },
+                  choices.cheapestUnavailable
+                    ? `${choices.cheapestUnavailable[0].toUpperCase()}${choices.cheapestUnavailable.slice(1)}.`
+                    : "The cheapest rate could not be determined."))),
+        column("Fastest", "rate-col-fastest",
+          rateChoiceCard(approval, choices, "fastest", choices.fastest, ["FASTEST"], why(choices.fastest))),
+      ];
+
+  const more = choices.othersTotal > choices.others.length
+    ? el("p", { class: "muted small" }, `Showing ${choices.others.length} of ${choices.othersTotal} other eligible rates.`)
+    : null;
+  const others = column("Other rates", "rate-col-others",
+    choices.others.length
+      ? el("div", { class: "rate-col-list" },
+          ...choices.others.map((rate) =>
+            rateChoiceCard(approval, choices, rate.key, rate, [rate.tradeoff ? "TRADE-OFF" : "OTHER"])))
+      : el("div", { class: "rate-col-empty" },
+          el("p", { class: "muted small" }, "No other eligible rates in this search.")),
+    more);
+
+  return el("div", { class: "rate-compare" },
+    el("div", { class: "rate-compare-grid", role: "radiogroup", "aria-label": "Rate to quote" },
+      ...firstTwo, others));
 }
 
 /* The quotation gate's controls. Both buttons track the approver field, and
    neither is reachable without a name — the same rule the server enforces, so
    the interface never offers something the backend would refuse. APPROVE
-   carries the chosen option, so the quotation is built from exactly the rate
-   on screen. */
+   carries exactly the selected rate (a named option, or one specific rate), so
+   the quotation is built from the rate on screen. */
 function decisionRow(approval) {
-  const options = (approval && approval.options) || [];
-  const option = approval ? chosenOption(approval) : null;
-  const picked = options.find((candidate) => candidate.key === option);
-  const label = options.length > 1 && picked
-    ? `APPROVE — send ${picked.label.toLowerCase()} quotation`
-    : "APPROVE — send quotation";
+  const hasOptions = Boolean(approval && (approval.options || []).length);
+  const choices = hasOptions ? currentChoices(approval) : null;
+  const label = choices ? `APPROVE — send ${choiceLabel(choices)}` : "APPROVE — send quotation";
   const approve = button(label, "approve",
-    () => post("quotation/decide", { decision: "approve", by: ui.approver, option }, "Sending quotation…"),
+    () => post("quotation/decide",
+      Object.assign({ decision: "approve", by: ui.approver }, choices ? choiceBody(choices.selected) : {}),
+      "Sending quotation…"),
     !canDecide());
   const decline = button("DECLINE — send nothing", "decline",
     () => post("quotation/decide", { decision: "decline", by: ui.approver, reason: ui.declineReason }, "Recording decline…"),

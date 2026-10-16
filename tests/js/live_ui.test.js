@@ -1193,6 +1193,191 @@ check("C6: no narration copy on the clarification or merge cards", () => {
   eq(/mail thread/.test(merged.textContent), false, "merge card");
 });
 
+
+/* --- the rate comparison: CHEAPEST | FASTEST | OTHER RATES ---------------- */
+
+function rateRow(key, label, carrier, price, transit, ref, extra) {
+  return Object.assign({
+    key, label, recommended: false, carrier, service: "GEN", price, transit,
+    departure_date: "28/10/2026", reason: `${carrier} — ${label}`, source_ref: ref,
+  }, extra || {});
+}
+
+function comparisonApproval(overrides) {
+  return Object.assign({
+    reference: "R-9", simulated: false, banner: null, notice: null,
+    review_sent_to: "approvals@translog.example",
+    carrier: "Finnair (AY)", service: "GEN", transit: "32 hours", price: "18499 Rs",
+    departure_date: "30/10/2026", reason: "lowest", excluded: [],
+    candidate_scope: null, completeness: null,
+    client_preference: "cheapest", client_preference_text: "The client asked for the lowest price.",
+    recommended_option: "cheapest", cheapest_unavailable: null,
+    late_preference: null, late_preference_notice: null,
+    options: [
+      rateRow("fastest", "Fastest", "Qatar Airways (QR)", "30420 Rs", "26 hours", "ref:QR"),
+      rateRow("cheapest", "Cheapest", "Finnair (AY)", "18499 Rs", "32 hours", "ref:AY",
+        { recommended: true, departure_date: "30/10/2026" }),
+    ],
+    other_rates: [
+      { rate_ref: "ref:EY", carrier: "Etihad (EY)", service: "GEN", price: "21950 Rs", transit: "30 hours", departure_date: "29/10/2026", tradeoff: true },
+      { rate_ref: "ref:EK", carrier: "Emirates (EK)", service: "GEN", price: "24100 Rs", transit: "28 hours", departure_date: null, tradeoff: false },
+    ],
+    other_rates_total: 2,
+  }, overrides || {});
+}
+
+function detailWith(approval) {
+  return { is_enquiry: true, shipment: [], decision: null, approval };
+}
+
+const cardFor = (section, key) =>
+  section.find((n) => n.tagName === "label" && n.attrs["data-key"] === key);
+const hasClass = (node, cls) => (node.className || "").split(" ").includes(cls);
+
+check("three columns: CHEAPEST, FASTEST and OTHER RATES, in that order", () => {
+  const t = load();
+  const section = t.sectionApproval(detailWith(comparisonApproval()));
+  const titles = section.findAll((n) => n.tagName === "h4").map((n) => n.textContent);
+  eq(JSON.stringify(titles), JSON.stringify(["Cheapest", "Fastest", "Other rates"]), "column titles");
+  eq(Boolean(cardFor(section, "cheapest")), true, "a cheapest card");
+  eq(Boolean(cardFor(section, "fastest")), true, "a fastest card");
+  eq(Boolean(cardFor(section, "rate:ref:EY")), true, "an other-rate card");
+  const text = section.textContent;
+  for (const fact of ["18499 Rs", "Finnair (AY)", "32 hours", "30/10/2026", "21950 Rs", "Etihad (EY)"]) {
+    eq(text.includes(fact), true, `shows ${fact}`);
+  }
+  eq(/Not stated/.test(text), true, "a missing departure says so");
+});
+
+check("a client asking for the cheapest highlights the CHEAPEST card, and it starts selected", () => {
+  const t = load();
+  const section = t.sectionApproval(detailWith(comparisonApproval()));
+  const cheapest = cardFor(section, "cheapest");
+  eq(hasClass(cheapest, "rate-choice-recommended"), true, "cheapest is recommended");
+  eq(hasClass(cheapest, "rate-choice-selected"), true, "cheapest is selected");
+  eq(hasClass(cardFor(section, "fastest"), "rate-choice-recommended"), false, "fastest is not");
+  eq(/RECOMMENDED/.test(cheapest.textContent), true, "a RECOMMENDED badge on it");
+  const approve = section.findAll(isButton)[0];
+  eq(approve.textContent, "APPROVE — send cheapest: Finnair (AY), 18499 Rs", "approve says what it sends");
+});
+
+check("a client asking for speed highlights the FASTEST card", () => {
+  const t = load();
+  const approval = comparisonApproval({ recommended_option: "fastest", client_preference: "fastest" });
+  const section = t.sectionApproval(detailWith(approval));
+  eq(hasClass(cardFor(section, "fastest"), "rate-choice-recommended"), true, "fastest recommended");
+  eq(hasClass(cardFor(section, "fastest"), "rate-choice-selected"), true, "fastest selected");
+  eq(hasClass(cardFor(section, "cheapest"), "rate-choice-recommended"), false, "cheapest not recommended");
+});
+
+check("an unclear preference keeps the fastest default, all three columns still shown", () => {
+  const t = load();
+  const approval = comparisonApproval({ recommended_option: "fastest", client_preference: "unclear" });
+  const section = t.sectionApproval(detailWith(approval));
+  eq(hasClass(cardFor(section, "fastest"), "rate-choice-selected"), true, "fastest selected by default");
+  eq(section.findAll((n) => n.tagName === "h4").length, 3, "three columns");
+});
+
+check("picking an other rate selects it, keeps the recommendation visible, and APPROVE sends that rate", () => {
+  const calls = [];
+  const t = load((url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ requests: [] }) });
+  });
+  const radio = t.sectionApproval(detailWith(comparisonApproval()))
+    .find((n) => isInput(n) && n.attrs.value === "rate:ref:EY");
+  radio.fire("change");
+  eq(t.ui.rateOption["R-9"], "rate:ref:EY", "the pick is remembered across re-renders");
+
+  const section = t.sectionApproval(detailWith(comparisonApproval()));
+  eq(hasClass(cardFor(section, "rate:ref:EY"), "rate-choice-selected"), true, "the other rate is selected");
+  eq(hasClass(cardFor(section, "cheapest"), "rate-choice-selected"), false, "cheapest no longer selected");
+  eq(hasClass(cardFor(section, "cheapest"), "rate-choice-recommended"), true, "but still recommended");
+
+  section.find(isInput).fire("input", { target: { value: "Aayush" } });
+  const approve = section.findAll(isButton)[0];
+  eq(approve.textContent, "APPROVE — send other rate: Etihad (EY), 21950 Rs", "label names the rate");
+  approve.fire("click");
+  eq(calls.length, 1, "one request");
+  eq(calls[0].url, "/api/live/quotation/decide", "endpoint");
+  eq(calls[0].body.rate_ref, "ref:EY", "the exact rate is sent");
+  eq("option" in calls[0].body, false, "no fastest/cheapest option alongside it");
+});
+
+check("picking FASTEST against a CHEAPEST recommendation posts option=fastest", () => {
+  const calls = [];
+  const t = load((url, options) => {
+    calls.push(JSON.parse(options.body));
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ requests: [] }) });
+  });
+  t.ui.rateOption["R-9"] = "fastest";
+  const section = t.sectionApproval(detailWith(comparisonApproval()));
+  section.find(isInput).fire("input", { target: { value: "Aayush" } });
+  section.findAll(isButton)[0].fire("click");
+  eq(calls[0].option, "fastest", "option");
+  eq("rate_ref" in calls[0], false, "no rate_ref");
+});
+
+check("fastest and cheapest being the same rate shows it once, across the first two columns", () => {
+  const t = load();
+  const approval = comparisonApproval({
+    recommended_option: "cheapest",
+    options: [rateRow("fastest", "Fastest and cheapest", "Qatar Airways (QR)", "28801.5 Rs", "21 hours", "ref:QR", { recommended: true })],
+    other_rates: [
+      { rate_ref: "ref:QR", carrier: "Qatar Airways (QR)", service: "GEN", price: "28801.5 Rs", transit: "21 hours", departure_date: "29/10/2026", tradeoff: false },
+      { rate_ref: "ref:QR2", carrier: "Qatar Airways (QR)", service: "GEN", price: "28801.5 Rs", transit: "26 hours", departure_date: "29/10/2026", tradeoff: false },
+    ],
+    other_rates_total: 2,
+  });
+  const section = t.sectionApproval(detailWith(approval));
+  const titles = section.findAll((n) => n.tagName === "h4").map((n) => n.textContent);
+  eq(JSON.stringify(titles), JSON.stringify(["Fastest · Cheapest", "Other rates"]), "one shared column");
+  eq(cardFor(section, "cheapest"), null, "no separate cheapest card");
+  const shared = cardFor(section, "fastest");
+  eq(/FASTEST/.test(shared.textContent) && /CHEAPEST/.test(shared.textContent), true, "both labels on it");
+  eq(hasClass(shared, "rate-choice-recommended"), true, "a cheapest recommendation lands on the shared card");
+  eq(/shown once/.test(section.textContent), true, "the shared status is explained");
+  const otherKeys = section.findAll((n) => n.tagName === "label").map((n) => n.attrs["data-key"]);
+  eq(otherKeys.includes("rate:ref:QR"), false, "the shared rate is not repeated under other rates");
+  eq(otherKeys.includes("rate:ref:QR2"), true, "a genuinely different rate still is");
+});
+
+check("a cheapest that cannot be determined is explained, and a stale cheapest pick falls back", () => {
+  const t = load();
+  t.ui.rateOption["R-9"] = "cheapest";  // e.g. picked before a refresh changed the data
+  const approval = comparisonApproval({
+    recommended_option: "fastest",
+    options: [rateRow("fastest", "Fastest", "Qatar Airways (QR)", "30420 Rs", "26 hours", "ref:QR", { recommended: true })],
+    cheapest_unavailable: "rates are quoted in different currencies (Rs, USD), so their prices cannot be compared",
+  });
+  const section = t.sectionApproval(detailWith(approval));
+  const text = section.textContent;
+  eq(/Cheapest not available/.test(text), true, "says it is not available");
+  eq(/different currencies \(Rs, USD\)/.test(text), true, "and why");
+  eq(cardFor(section, "cheapest"), null, "no cheapest card is invented");
+  eq(hasClass(cardFor(section, "fastest"), "rate-choice-selected"), true, "selection falls back to fastest");
+  eq(section.findAll(isButton)[0].textContent, "APPROVE — send fastest: Qatar Airways (QR), 30420 Rs", "approve label");
+});
+
+check("no other eligible rates shows an empty state, not an empty column", () => {
+  const t = load();
+  const section = t.sectionApproval(detailWith(comparisonApproval({ other_rates: [], other_rates_total: 0 })));
+  eq(/No other eligible rates in this search/.test(section.textContent), true, "empty state");
+});
+
+check("when more other rates exist than are listed, the card says how many", () => {
+  const t = load();
+  const section = t.sectionApproval(detailWith(comparisonApproval({ other_rates_total: 10 })));
+  eq(/Showing 2 of 10 other eligible rates/.test(section.textContent), true, "count shown");
+});
+
+check("an other-rate pick that is no longer offered falls back to the recommendation", () => {
+  const t = load();
+  t.ui.rateOption["R-9"] = "rate:ref:GONE";
+  const section = t.sectionApproval(detailWith(comparisonApproval()));
+  eq(hasClass(cardFor(section, "cheapest"), "rate-choice-selected"), true, "recommended selected");
+});
+
 (async () => {
   for (const [name, fn] of asyncChecks) {
     try {

@@ -175,6 +175,9 @@ def _live_decide(session: LiveSession | MultiAccountSession, body: dict[str, obj
         # Which eligible rate to quote ("fastest" / "cheapest"). Absent means
         # the recommended option; anything else is refused by the session.
         option=_str_or_none(body.get("option")),
+        # One specific eligible rate from the "other rates" column, by its
+        # source_ref. The session refuses anything not in the search's eligible set.
+        rate_ref=_str_or_none(body.get("rate_ref")),
     )
 
 

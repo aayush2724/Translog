@@ -74,6 +74,11 @@ class RateStrategy(StrEnum):
 
     FASTEST = "fastest"
     CHEAPEST = "cheapest"
+    OTHER = "other"
+    """An eligible rate the operator picked from the other rates of the same
+    search — neither the fastest nor the cheapest. Never recommended and never
+    ranked by a strategy; it names the operator's choice, which is carried by
+    the rate's ``source_ref``."""
 
 
 STRATEGIES: dict[RateStrategy, SelectionStrategy] = {

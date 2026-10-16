@@ -599,17 +599,76 @@ h1 { font-size: 1.3rem; font-weight: 600; }
    otherwise resurrect an empty #action-error strip when there is no error. */
 [hidden] { display: none !important; }
 
-/* Fastest / cheapest choice on the approval card. */
+/* Choosing the rate to quote: CHEAPEST | FASTEST | OTHER RATES. Three columns
+   when the card is wide enough, stacked when it is not (a container query, so
+   it follows the card's own width rather than the window's). */
 .preference-note { margin: 0.2rem 0 0.6rem; font-size: 0.9rem; }
-.rate-options { display: grid; gap: 0.6rem; }
-.rate-option {
+.rate-choice-section { margin-top: 1rem; }
+.rate-compare { container-type: inline-size; margin: 0.4rem 0 0.8rem; }
+.rate-compare-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  align-items: start;
+}
+.rate-col { display: grid; gap: 0.5rem; min-width: 0; }
+.rate-col-shared { grid-column: span 2; }
+.rate-col-title {
+  margin: 0;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #6b7385;
+}
+.rate-col-list { display: grid; gap: 0.5rem; max-height: 34rem; overflow-y: auto; padding-right: 2px; }
+.rate-col-empty {
+  border: 1px dashed var(--wc-line);
+  border-radius: 8px;
+  padding: 0.7rem 0.75rem;
+  background: var(--wc-card);
+}
+.rate-col-empty p { margin: 0.25rem 0 0; }
+.rate-choice {
   display: block;
   border: 1px solid var(--wc-line);
   background: var(--wc-card);
   border-radius: 8px;
-  padding: 0.6rem 0.75rem;
+  padding: 0.6rem 0.7rem;
   cursor: pointer;
+  min-width: 0;
 }
-.rate-option-chosen { border-color: var(--wc-accent); background: var(--wc-accent-soft); box-shadow: 0 0 0 1px var(--wc-accent); }
-.rate-option-head { display: flex; align-items: center; gap: 0.5rem; }
-.rate-option .kv { margin-top: 0.4rem; }
+.rate-choice:hover { border-color: #cfd3df; box-shadow: var(--wc-shadow-lift); }
+/* Recommended: the accent border and a soft fill, visible before anyone clicks. */
+.rate-choice-recommended { border: 2px solid var(--wc-accent); background: var(--wc-accent-soft); }
+/* Selected: what APPROVE will send. A heavier ring, so it reads as the choice
+   even when it is not the recommendation. */
+.rate-choice-selected { border: 2px solid #0f766e; box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.2); }
+.rate-choice-head { display: flex; align-items: center; flex-wrap: wrap; gap: 0.35rem; }
+.rate-choice-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  background: #eef0f5;
+  color: var(--wc-ink);
+}
+.rate-choice-flag { font-size: 0.64rem; font-weight: 700; letter-spacing: 0.05em; padding: 0.1rem 0.4rem; border-radius: 999px; }
+.flag-recommended { background: var(--wc-accent); color: #fff; }
+.flag-selected { background: #0f766e; color: #fff; }
+.rate-choice-price { font-size: 1.05rem; font-weight: 700; margin: 0.35rem 0 0.2rem; }
+.rate-choice-facts {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.1rem 0.5rem;
+  margin: 0;
+  font-size: 0.8rem;
+}
+.rate-choice-facts dt { color: #6b7385; }
+.rate-choice-facts dd { margin: 0; overflow-wrap: anywhere; }
+.rate-choice-why { margin: 0.35rem 0 0; }
+@container (max-width: 520px) {
+  .rate-compare-grid { grid-template-columns: 1fr; }
+  .rate-col-shared { grid-column: auto; }
+  .rate-col-list { max-height: none; overflow: visible; }
+}

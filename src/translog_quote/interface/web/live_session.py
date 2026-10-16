@@ -53,9 +53,11 @@ from translog_quote.domain.rates import (
     RateOptions,
     RatePreference,
     RateStrategy,
+    Selection,
     detect_rate_preference,
     rate_options,
     recommended_strategy,
+    select_rate,
 )
 from translog_quote.domain.shipment import DeliveryType, FieldName
 from translog_quote.domain.validation import validate_shipment
@@ -824,6 +826,7 @@ class LiveSession:
         by: str,
         reason: str = "",
         option: str | None = None,
+        rate_ref: str | None = None,
     ) -> LiveRequest:
         """Apply one explicit human decision to the quotation gate.
 
@@ -839,6 +842,12 @@ class LiveSession:
         before. An unknown option, or a cheapest rate that could not be
         determined, is refused before anything is recorded or sent — never
         swapped silently for the other rate.
+
+        ``rate_ref`` picks one specific rate from the same search instead (the
+        dashboard's "other rates" column): it must be the ``source_ref`` of
+        exactly one *eligible* rate of this request's search, so an excluded
+        rate can never be quoted this way. It is refused alongside a
+        ``fastest``/``cheapest`` option, since the two would disagree.
         """
         request = self.requests.get(request_id)
         if request is None:
@@ -850,11 +859,11 @@ class LiveSession:
                 f"{request_id} has already been decided; it will not be decided again."
             )
 
-        chosen = self._chosen_option(request, option)
+        chosen = self._chosen_option(request, option, rate_ref)
         decision = decision_from_choice(choice, by=by, at=self._clock.now(), reason=reason)
         packet = request.packet
         if isinstance(decision, Approved):
-            packet = self._packet_for_option(request, chosen)
+            packet, chosen = self._packet_for_option(request, chosen, rate_ref)
         self._gate.record(decision)
         outcome = self._quotation.run(
             packet,
@@ -874,38 +883,92 @@ class LiveSession:
         return request
 
     @staticmethod
-    def _chosen_option(request: LiveRequest, option: str | None) -> RateStrategy:
+    def _chosen_option(
+        request: LiveRequest, option: str | None, rate_ref: str | None = None
+    ) -> RateStrategy:
         """The operator's option, or the recommended one when none was sent."""
-        if option is None or not option.strip():
+        named = option.strip().lower() if option and option.strip() else None
+        if rate_ref and rate_ref.strip():
+            if named not in (None, RateStrategy.OTHER.value):
+                raise LiveSequenceError(
+                    "Choose either the fastest/cheapest option or a specific rate, not both."
+                )
+            return RateStrategy.OTHER
+        if named is None:
             return request.recommended_option
         try:
-            return RateStrategy(option.strip().lower())
+            chosen = RateStrategy(named)
         except ValueError:
             raise LiveSequenceError(
                 f"{option!r} is not a rate option; choose 'fastest' or 'cheapest'."
             ) from None
+        if chosen is RateStrategy.OTHER:
+            raise LiveSequenceError("Choosing another rate needs the rate itself (rate_ref).")
+        return chosen
 
-    def _packet_for_option(self, request: LiveRequest, chosen: RateStrategy) -> ReviewPacket:
-        """The approval packet rebuilt around the chosen option's selection.
+    @staticmethod
+    def _selection_for_rate(request: LiveRequest, rate_ref: str) -> Selection:
+        """The one eligible rate of this request's search named by ``rate_ref``.
 
-        Both options come from the same eligible set (`rate_options`), so the
-        swap can never reach an ineligible rate. Audited, so the trail shows
-        which option the person approved and what it beat on.
+        Looked up in the search's *eligible* set only — the same set both
+        options come from — so a filtered-out rate cannot be quoted. A ref that
+        matches no eligible rate, or more than one, is refused rather than
+        guessed. The reason says it was the operator's choice, so the review
+        email cannot present it as a ranking result.
+        """
+        eligible = request.rates.filtered.eligible if request.rates is not None else ()
+        matches = [rate for rate in eligible if rate.source_ref == rate_ref]
+        if len(matches) != 1:
+            raise LiveSequenceError(
+                "That rate is not one of this search's eligible rates; nothing was sent."
+            )
+        rate = matches[0]
+        rest = select_rate(tuple(r for r in eligible if r is not rate), FASTEST_ELIGIBLE)
+        return Selection(
+            rate=rate,
+            reason=f"{rate.carrier_name} {rate.product} — chosen by the operator "
+            "from the other eligible rates",
+            runners_up=(rest.rate, *rest.runners_up) if rest is not None else (),
+        )
+
+    def _packet_for_option(
+        self, request: LiveRequest, chosen: RateStrategy, rate_ref: str | None = None
+    ) -> tuple[ReviewPacket, RateStrategy]:
+        """The approval packet rebuilt around the chosen option's selection,
+        and the option it really is.
+
+        Both options come from the same eligible set (`rate_options`), and an
+        "other" rate is looked up in that set too, so the swap can never reach
+        an ineligible rate. A specific rate that turns out to be the fastest or
+        the cheapest is recorded as that option. Audited, so the trail shows
+        which rate the person approved and what it beat on.
         """
         packet = request.packet
         assert packet is not None  # noqa: S101 - decide() checked it
         options = request.rate_options
-        if options is None:
+        if chosen is RateStrategy.OTHER:
+            assert rate_ref is not None  # noqa: S101 - _chosen_option guarantees it
+            picked = self._selection_for_rate(request, rate_ref)
+            selection: Selection | None = picked
+            if options is not None and picked.rate == options.fastest.rate:
+                chosen, selection = RateStrategy.FASTEST, options.fastest
+            elif (
+                options is not None
+                and options.cheapest is not None
+                and picked.rate == options.cheapest.rate
+            ):
+                chosen, selection = RateStrategy.CHEAPEST, options.cheapest
+        elif options is None:
             # Built before options existed (or a hand-made packet): only the
             # packet's own selection is known, which is the fastest.
             if chosen is not RateStrategy.FASTEST:
                 raise LiveSequenceError("Only the fastest rate is available for this request.")
-            return packet
-        selection = options.selection_for(chosen)
+            return packet, chosen
+        else:
+            selection = options.selection_for(chosen)
         if selection is None:
-            raise LiveSequenceError(
-                f"The cheapest rate cannot be quoted: {options.cheapest_unavailable}."
-            )
+            unavailable = options.cheapest_unavailable if options is not None else None
+            raise LiveSequenceError(f"The cheapest rate cannot be quoted: {unavailable}.")
         from translog_quote.pipeline.audit import AuditEvent, AuditEventType
 
         self.audit.record(
@@ -915,6 +978,7 @@ class LiveSession:
                 at=self._clock.now(),
                 detail={
                     "option": chosen.value,
+                    "rate_ref": selection.rate.source_ref,
                     "recommended": request.recommended_option.value,
                     "client_preference": request.rate_preference.value
                     if request.rate_preference
@@ -928,7 +992,7 @@ class LiveSession:
                 },
             )
         )
-        return packet.model_copy(
+        updated = packet.model_copy(
             update={
                 "selection": selection,
                 "selected_option": chosen,
@@ -937,6 +1001,7 @@ class LiveSession:
                 "client_preference": request.rate_preference,
             }
         )
+        return updated, chosen
 
     def _mark_settled(self, request: LiveRequest) -> None:
         """Stamp *when* a request settled, in the working store and in view.

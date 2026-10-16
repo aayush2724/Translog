@@ -55,7 +55,9 @@ class RateOptions(BaseModel):
         """
         if strategy is RateStrategy.FASTEST:
             return self.fastest
-        return self.cheapest
+        if strategy is RateStrategy.CHEAPEST:
+            return self.cheapest
+        return None  # OTHER is a specific rate, not one of the two options
 
 
 def _cheapest_unavailable(eligible: tuple[Rate, ...]) -> str | None:
