@@ -151,9 +151,10 @@ def test_an_other_offer_lists_its_other_dates_and_quotes_the_earliest() -> None:
     assert listed[0].also_departs == ("31/10/2026",)
 
 
-def test_two_same_fare_flights_on_one_day_stay_separate() -> None:
-    """Routing and departure time are not on a Rate, so two same-key rows on the
-    same date may be different flights: both stay visible."""
+def test_two_same_fare_flights_on_one_day_are_one_offer() -> None:
+    """Departure time is not on a Rate, so two same-key flights on one date
+    cannot be told apart on a card: they are one offer, quoted by the first
+    row in the provider's order, and add no extra date."""
     fast = _r("QR", "GEN", "30000", 1200, "28/10/2026", "fast")
     cheap = _r("AY", "GEN", "18000", 3000, "28/10/2026", "cheap")
     morning = _r("EK", "GEN", "24000", 1800, "29/10/2026", "ek-am")
@@ -162,10 +163,129 @@ def test_two_same_fare_flights_on_one_day_stay_separate() -> None:
     eligible = (fast, cheap, morning, evening)
     listed, total = other_offers(rate_options(eligible), eligible)
 
-    assert total == 2
-    assert {offer.rate.source_ref for offer in listed} == {"ek-am", "ek-pm"}
-    # Neither is a rival to the other (same offer), so both remain trade-offs.
-    assert all(offer.tradeoff for offer in listed)
+    assert total == 1
+    assert listed[0].rate.source_ref == "ek-am"
+    assert [rate.source_ref for rate in listed[0].also] == ["ek-pm"]
+    assert listed[0].also_departs == ()  # the second flight is on the card's own date
+    # Its own second flight is not a rival: it is still a genuine trade-off.
+    assert listed[0].tradeoff is True
+
+
+# Live test 7 (DEL-SIN 150 kg): Qatar's 03:45 and 09:55 flights, same fare and
+# 26h 30m transit, on three dates — the fastest offer.
+QR_28_AM = _r("QR", "QR General", "35100", 1590, "28/10/2026", "qr#8")
+QR_28_PM = _r("QR", "QR General", "35100", 1590, "28/10/2026", "qr#9")
+QR_29_AM = _r("QR", "QR General", "35100", 1590, "29/10/2026", "qr#23")
+QR_29_PM = _r("QR", "QR General", "35100", 1590, "29/10/2026", "qr#24")
+QR_30_AM = _r("QR", "QR General", "35100", 1590, "30/10/2026", "qr#36")
+QR_30_PM = _r("QR", "QR General", "35100", 1590, "30/10/2026", "qr#37")
+QR_SLOWER = _r("QR", "QR General", "35100", 1960, "28/10/2026", "qr#10")  # 32h 40m routing
+AY_CHEAP = _r("Finnair", "General Cargo", "20070", 1940, "31/10/2026", "ay#40")
+AY_CHEAP_2ND = _r("Finnair", "General Cargo", "20070", 1940, "31/10/2026", "ay#41")
+LIVE_7 = (
+    QR_28_AM,
+    QR_28_PM,
+    QR_SLOWER,
+    QR_29_AM,
+    QR_29_PM,
+    QR_30_AM,
+    QR_30_PM,
+    AY_CHEAP,
+    AY_CHEAP_2ND,
+)
+
+
+def test_a_second_same_day_flight_of_the_fastest_never_appears_as_another_card() -> None:
+    options = rate_options(LIVE_7)
+    assert options is not None
+    assert options.fastest.rate == QR_28_AM  # provider order breaks the full tie
+
+    listed, total = other_offers(options, LIVE_7)
+
+    refs = {offer.rate.source_ref for offer in listed}
+    assert not refs & {"qr#8", "qr#9", "qr#23", "qr#24", "qr#36", "qr#37"}
+    assert not refs & {"ay#40", "ay#41"}  # the cheapest's second flight neither
+    assert refs == {"qr#10"}  # the genuinely different (slower) Qatar routing stays
+    assert total == 1
+    assert offer_for(QR_28_AM, LIVE_7).also_departs == ("29/10/2026", "30/10/2026")
+    assert offer_for(AY_CHEAP, LIVE_7).also_departs == ()
+
+
+def test_an_offer_with_flights_on_several_days_lists_each_other_date_once() -> None:
+    fast = _r("QR", "GEN", "30000", 1200, "28/10/2026", "fast")
+    cheap = _r("AY", "GEN", "18000", 3000, "28/10/2026", "cheap")
+    rows = (
+        _r("EK", "GEN", "24000", 1800, "31/10/2026", "ek-31"),
+        _r("EK", "GEN", "24000", 1800, "29/10/2026", "ek-29-a"),
+        _r("EK", "GEN", "24000", 1800, "30/10/2026", "ek-30-a"),
+        _r("EK", "GEN", "24000", 1800, "29/10/2026", "ek-29-b"),
+        _r("EK", "GEN", "24000", 1800, "30/10/2026", "ek-30-b"),
+    )
+    eligible = (fast, cheap, *rows)
+
+    listed, total = other_offers(rate_options(eligible), eligible)
+
+    assert total == 1
+    offer = listed[0]
+    # Earliest date, then the provider's order within it: deterministic.
+    assert offer.rate.source_ref == "ek-29-a"
+    assert offer.also_departs == ("30/10/2026", "31/10/2026")
+    # Same answer whatever order the other days arrive in.
+    reordered = (fast, cheap, rows[2], rows[0], rows[4], rows[1], rows[3])
+    again, _ = other_offers(rate_options(reordered), reordered)
+    assert again[0].rate.source_ref == "ek-29-a"
+    assert again[0].also_departs == ("30/10/2026", "31/10/2026")
+
+
+def test_grouped_rows_are_never_rivals_but_a_genuinely_different_offer_is() -> None:
+    fast = _r("QR", "GEN", "30000", 1200, "28/10/2026", "fast")
+    cheap = _r("AY", "GEN", "18000", 3000, "28/10/2026", "cheap")
+    middle_am = _r("EK", "GEN", "24000", 1800, "29/10/2026", "ek-am")
+    middle_pm = _r("EK", "GEN", "24000", 1800, "29/10/2026", "ek-pm")
+    middle_next_day = _r("EK", "GEN", "24000", 1800, "30/10/2026", "ek-30")
+    eligible = (fast, cheap, middle_am, middle_pm, middle_next_day)
+
+    listed, _ = other_offers(rate_options(eligible), eligible)
+    assert [(o.rate.source_ref, o.tradeoff) for o in listed] == [("ek-am", True)]
+
+    # A different airline tying it on price and transit does make it a non-trade-off.
+    rival = _r("SQ", "GEN", "24000", 1800, "29/10/2026", "sq")
+    eligible = (*eligible, rival)
+    listed, _ = other_offers(rate_options(eligible), eligible)
+    assert {o.rate.source_ref: o.tradeoff for o in listed} == {"ek-am": False, "sq": False}
+
+
+def test_the_representative_is_what_the_operator_quotes(
+    settings: Settings, sink: CollectingEmailSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.unit.test_rate_strategy_options import APPROVER, CHEAP, FAST, _quotation_body
+
+    # INR like the shared FAST/CHEAP fixtures, so prices are comparable.
+    am = _r("EK", "GEN", "24000", 1800, "20/09/2026", "ref:EK-am", currency="INR", name="Emirates")
+    pm = _r("EK", "GEN", "24000", 1800, "20/09/2026", "ref:EK-pm", currency="INR", name="Emirates")
+    fast_pm = FAST.model_copy(update={"source_ref": "ref:QR-pm"})
+    session = _session(settings, sink, monkeypatch, rates=(FAST, fast_pm, CHEAP, am, pm))
+    request = only_request(session)
+
+    card = live_serialize.approval_json(
+        request.packet,  # type: ignore[attr-defined]
+        request.rates,  # type: ignore[attr-defined]
+        approver="x",
+        options=request.rate_options,  # type: ignore[attr-defined]
+        recommended=request.recommended_option,  # type: ignore[attr-defined]
+    )
+    assert [r["rate_ref"] for r in card["other_rates"]] == ["ref:EK-am"]  # type: ignore[attr-defined]
+    assert card["other_rates"][0]["also_departs"] == []  # type: ignore[index]
+
+    decided = session.decide(
+        request.request_id,  # type: ignore[attr-defined]
+        choice="approve",
+        by=APPROVER,
+        rate_ref="ref:EK-am",
+    )
+
+    assert decided.packet.selection.rate.source_ref == "ref:EK-am"  # type: ignore[union-attr]
+    assert "Emirates (EK)" in _quotation_body(sink)
 
 
 def test_a_different_airline_at_the_same_price_is_kept() -> None:

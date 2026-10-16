@@ -10,9 +10,21 @@ What makes two rates the same offer is decided from what a ``Rate`` actually
 carries (see ``adapters/webcargo/browser/mapper.py``): airline code, service
 (``product``), price, currency and transit. Routing ("Via") and departure
 time are not on a ``Rate``; transit is the evidence of routing that is, so a
-different transit is a different offer. Two same-key rows on the *same* date
-are kept apart too — they may be different flights or routings that day, and
-nothing on the rate can tell them apart, so merging them would hide one.
+different transit is a different offer.
+
+Rows with the same key are one offer *whatever their date or time*, including
+two flights on the same day. Live data showed why: Qatar runs 03:45 and 09:55
+departures at the same fare and the same 26h 30m transit, and with the time
+absent from the rate the second flight rendered as a card identical to the
+Fastest one. Nothing quoted to the client differs between such rows.
+
+Known limitation, by design of the data: because departure time is not on a
+``Rate``, the rows in one offer cannot be told apart, so one of them is chosen
+deterministically to represent it — the earliest date tab, then the provider's
+own row order (WebCargo lists a day's flights in departure order). Selecting
+the card quotes that row; a second same-day flight is not separately
+selectable. Departure times are never inferred. Showing them would need the
+WebCargo adapter to carry the time onto ``Rate`` (a worker change).
 
 Pure and deterministic: grouping never changes membership (every eligible
 rate is in exactly one offer), never invents a rate, and orders offers by
@@ -42,15 +54,25 @@ class Offer:
     rate: Rate
     """The representative — what selecting the card quotes."""
     also: tuple[Rate, ...] = ()
-    """The same offer departing on other dates, earliest first. Listed, not
-    separately selectable: picking the card quotes ``rate``."""
+    """The other rows of the same offer — other dates, and other flights on the
+    same date — earliest first. Listed, not separately selectable: picking the
+    card quotes ``rate``."""
     tradeoff: bool = False
     """No other offer is at least as cheap *and* at least as fast. A tie on
     both counts as beaten (see `_weakly_dominated`)."""
 
     @property
     def also_departs(self) -> tuple[str, ...]:
-        return tuple(rate.departure_date_label for rate in self.also if rate.departure_date_label)
+        """The other dates this offer departs, each once, never the card's own
+        date (a second flight that day adds no date to show)."""
+        seen = {self.rate.departure_date_label}
+        days: list[str] = []
+        for rate in self.also:
+            label = rate.departure_date_label
+            if label and label not in seen:
+                seen.add(label)
+                days.append(label)
+        return tuple(days)
 
 
 def _offer_key(rate: Rate) -> tuple[object, ...]:
@@ -76,22 +98,14 @@ def _departure(rate: Rate) -> date | None:
 def group_offers(eligible: tuple[Rate, ...]) -> list[list[Rate]]:
     """Every eligible rate in exactly one group of equivalent rates.
 
-    A rate joins the first earlier group with the same key that does not
-    already have a rate on its date; otherwise it starts a new group. Groups
-    keep the provider's order of first appearance.
+    One group per offer key, whatever the date or the (unrecorded) time of
+    departure — so two same-day flights at the same fare and transit are one
+    group. Groups, and the rows inside them, keep the provider's order.
     """
-    groups: list[list[Rate]] = []
+    groups: dict[tuple[object, ...], list[Rate]] = {}
     for rate in eligible:
-        key = _offer_key(rate)
-        for group in groups:
-            if _offer_key(group[0]) == key and all(
-                member.departure_date_label != rate.departure_date_label for member in group
-            ):
-                group.append(rate)
-                break
-        else:
-            groups.append([rate])
-    return groups
+        groups.setdefault(_offer_key(rate), []).append(rate)
+    return list(groups.values())
 
 
 def _by_departure(rates: list[Rate]) -> list[Rate]:
@@ -167,9 +181,11 @@ def other_offers(
     if options.cheapest is None:
         return sorted(offers, key=by_transit)[:limit], len(offers)
 
-    # One representative per group, the option offers included, so an offer is
-    # judged only against genuinely different offers — never against itself on
-    # another day, nor against a second same-day flight with the same key.
+    # One representative per group, the option offers included, and never the
+    # offer's own group: an offer is judged only against genuinely different
+    # offers — never against its own rows on another day or another same-day
+    # flight, which share its key and would otherwise "tie" it out of being a
+    # trade-off.
     representatives = [group[0] for group in groups]
     marked = [
         Offer(
@@ -177,7 +193,7 @@ def other_offers(
             also=offer.also,
             tradeoff=not _weakly_dominated(
                 offer.rate,
-                [rep for rep in representatives if _offer_key(rep) != _offer_key(offer.rate)],
+                [rival for rival in representatives if _offer_key(rival) != _offer_key(offer.rate)],
             ),
         )
         for offer in offers
