@@ -67,19 +67,37 @@ rm -f "$PROFILE_DIR/SingletonLock" "$PROFILE_DIR/SingletonSocket" "$PROFILE_DIR/
 
 # --- virtual display ---------------------------------------------------------
 export DISPLAY=":$DISPLAY_NUMBER"
+# Railway restarts this service in the same container, and /tmp survives the
+# restart. A display left by the previous run (killed before it could tidy up)
+# leaves /tmp/.X99-lock naming a PID that the new run may well reuse — Xvfb then
+# refuses with "server already active" and exits, while the stale socket below
+# still exists and would pass the readiness check. This container runs exactly
+# one Xvfb, started here, so anything already there is stale: remove it.
+rm -f "/tmp/.X${DISPLAY_NUMBER}-lock" "/tmp/.X11-unix/X$DISPLAY_NUMBER"
 Xvfb "$DISPLAY" -screen 0 1280x720x24 -nolisten tcp >/dev/null 2>&1 &
 XVFB_PID=$!
 for _ in $(seq 1 50); do
   [ -e "/tmp/.X11-unix/X$DISPLAY_NUMBER" ] && break
+  kill -0 "$XVFB_PID" 2>/dev/null || break
   sleep 0.1
 done
-[ -e "/tmp/.X11-unix/X$DISPLAY_NUMBER" ] || { log "Xvfb did not come up on $DISPLAY"; exit 1; }
+# Ready means the socket exists AND the server that made it is still running.
+if [ ! -e "/tmp/.X11-unix/X$DISPLAY_NUMBER" ] || ! kill -0 "$XVFB_PID" 2>/dev/null; then
+  log "Xvfb did not come up on $DISPLAY"
+  exit 1
+fi
 
 CHILD=""
 STOP_REQUESTED=""
 cleanup() {
   [ -n "$CHILD" ] && kill -TERM "$CHILD" 2>/dev/null || true
   kill -TERM "$XVFB_PID" 2>/dev/null || true
+  # Give Xvfb a moment to remove its own lock and socket before the container
+  # stops; the start-up cleanup above covers the case where it cannot.
+  for _ in $(seq 1 20); do
+    kill -0 "$XVFB_PID" 2>/dev/null || break
+    sleep 0.1
+  done
 }
 forward() {
   # SIGTERM/SIGINT from Railway -> the Python worker's warm shutdown. The flag
