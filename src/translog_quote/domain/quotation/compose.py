@@ -82,12 +82,18 @@ def _render(field: str, value: object) -> str:
 
 
 def _transit(selection: Selection) -> str:
-    """ "1 day", not "1 days". This string reaches a client."""
+    """The transit as a person reads it. This string reaches a client.
+
+    Delegates to ``TransitTime.spelled`` — the one place a duration becomes
+    words, which the dashboard already uses — so a WebCargo minute-precision
+    duration reads "32h 20m", never "1940 minutes", and "1 day" stays singular.
+    Only the wording changes; the stored value is untouched. A missing transit
+    says so rather than printing a number.
+    """
     transit = selection.rate.transit
     if transit is None:  # pragma: no cover - filtering removes unrankable rates
         return _UNAVAILABLE
-    unit = transit.unit.value
-    return f"{transit.value} {unit.rstrip('s') if transit.value == 1 else unit}"
+    return transit.spelled
 
 
 def _price(selection: Selection) -> str:

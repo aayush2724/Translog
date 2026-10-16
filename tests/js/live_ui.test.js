@@ -1378,6 +1378,21 @@ check("an other-rate pick that is no longer offered falls back to the recommenda
   eq(hasClass(cardFor(section, "cheapest"), "rate-choice-selected"), true, "recommended selected");
 });
 
+
+check("an offer running on other days lists them on its card, without extra cards", () => {
+  const t = load();
+  const approval = comparisonApproval();
+  approval.options[0].also_departs = ["29/10/2026", "30/10/2026"];
+  approval.other_rates[0].also_departs = ["31/10/2026"];
+  const section = t.sectionApproval(detailWith(approval));
+
+  const fastest = cardFor(section, "fastest");
+  eq(/Also departs 29\/10\/2026, 30\/10\/2026/.test(fastest.textContent), true, "fastest card lists its other dates");
+  eq(/Also departs 31\/10\/2026/.test(cardFor(section, "rate:ref:EY").textContent), true, "other offer too");
+  eq(/Also departs/.test(cardFor(section, "rate:ref:EK").textContent), false, "no row when there are none");
+  eq(section.findAll((n) => n.tagName === "label").length, 4, "still one card per offer");
+});
+
 (async () => {
   for (const [name, fn] of asyncChecks) {
     try {

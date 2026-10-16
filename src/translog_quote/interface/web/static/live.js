@@ -1170,8 +1170,14 @@ function rateChoiceCard(approval, choices, key, rate, badges, extra) {
     el("dl", { class: "rate-choice-facts" },
       el("dt", null, "Airline"), el("dd", null, rate.carrier),
       el("dt", null, "Transit"), el("dd", null, rate.transit || "—"),
-      el("dt", null, "Departs"), el("dd", null, rate.departure_date || "Not stated"),
+      el("dt", null, "Departs"), el("dd", null, el("span", { class: "nowrap" }, rate.departure_date || "Not stated")),
       el("dt", null, "Service"), el("dd", null, rate.service || "—")),
+    /* The same offer on other days: one card, its other dates listed here.
+       Selecting the card quotes the departure shown above. */
+    (rate.also_departs || []).length
+      ? el("p", { class: "rate-choice-also muted small" }, "Also departs ",
+          ...rate.also_departs.map((day, i) => [i ? ", " : "", el("span", { class: "nowrap" }, day)]))
+      : null,
     extra || null);
 }
 

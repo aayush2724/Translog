@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 from translog_quote.domain.quotation import SIMULATED_RATE_NOTICE
 from translog_quote.domain.rates import RateStrategy, rate_options
+from translog_quote.domain.rates.offers import offer_for, other_offers
 from translog_quote.domain.workflow import RequestState
 from translog_quote.interface.demo.formatting import FIELD_LABELS, render_transit
 from translog_quote.interface.demo.poc_demo import FIELD_TITLES
@@ -283,8 +284,11 @@ _NO_PREFERENCE = "The client did not state a speed or price preference."
 def _option_json(
     key: str, label: str, selection: Selection, outcome: RateSearchOutcome, *, recommended: bool
 ) -> Json:
-    """One option on the approval card, from fields the rate already holds."""
+    """One option on the approval card, from fields the rate already holds,
+    plus the other dates the same offer departs (listed on this card, never as
+    separate "other rates")."""
     rate = selection.rate
+    offer = offer_for(rate, outcome.filtered.eligible)
     return {
         "key": key,
         "label": label,
@@ -296,83 +300,8 @@ def _option_json(
         "departure_date": rate.departure_date_label or outcome.query.date.isoformat(),
         "reason": selection.reason,
         "source_ref": rate.source_ref,
+        "also_departs": list(offer.also_departs),
     }
-
-
-#: How many "other" eligible rates the approval card lists beside the two options.
-OTHER_RATES_LIMIT = 8
-
-
-def _display_key(rate: Rate) -> tuple[object, ...]:
-    """What the operator sees of a rate. Two rates equal on all of it are the
-    same offer to a reader, so only one is listed."""
-    return (
-        rate.carrier_code,
-        rate.product,
-        rate.total_amount,
-        rate.currency,
-        rate.transit.minutes if rate.transit is not None else None,
-        rate.departure_date_label,
-    )
-
-
-def _dominated(rate: Rate, others: list[Rate]) -> bool:
-    """Some other rate is at least as cheap and at least as fast, and better on one."""
-    assert rate.transit is not None and rate.total_amount is not None  # noqa: S101 - eligible
-    for other in others:
-        if other is rate or other.transit is None or other.total_amount is None:
-            continue
-        cheaper_or_equal = other.total_amount <= rate.total_amount
-        faster_or_equal = other.transit.minutes <= rate.transit.minutes
-        strictly = (
-            other.total_amount < rate.total_amount or other.transit.minutes < rate.transit.minutes
-        )
-        if cheaper_or_equal and faster_or_equal and strictly:
-            return True
-    return False
-
-
-def other_rates(
-    options: RateOptions | None, eligible: tuple[Rate, ...], *, limit: int = OTHER_RATES_LIMIT
-) -> tuple[list[tuple[Rate, bool]], int]:
-    """Up to ``limit`` more eligible rates from the same search, and how many exist.
-
-    Never the fastest or the cheapest rate (they have their own columns) and
-    never a repeat of what is already shown. "Trade-off" rates come first:
-    those no other rate beats on both price and transit, i.e. the real
-    middle-ground choices; then the rest by price. When prices cannot be
-    compared (mixed currencies) nothing is ranked by price — the list keeps the
-    fastest-first order and no rate is marked as a trade-off.
-    """
-    if options is None:
-        return [], 0
-    shown = [options.fastest.rate]
-    if options.cheapest is not None:
-        shown.append(options.cheapest.rate)
-    seen = {_display_key(rate) for rate in shown}
-    candidates: list[Rate] = []
-    for rate in eligible:
-        key = _display_key(rate)
-        if key in seen:
-            continue
-        seen.add(key)
-        candidates.append(rate)
-
-    def by_transit(rate: Rate) -> tuple[int, str]:
-        return (rate.transit.minutes if rate.transit else 0, rate.carrier_code)
-
-    if options.cheapest is None:  # prices are not comparable
-        ordered = [(rate, False) for rate in sorted(candidates, key=by_transit)]
-        return ordered[:limit], len(candidates)
-
-    def by_price(rate: Rate) -> tuple[object, ...]:
-        return (rate.total_amount, *by_transit(rate))
-
-    pool = list(eligible)
-    tradeoffs = sorted((r for r in candidates if not _dominated(r, pool)), key=by_price)
-    rest = sorted((r for r in candidates if _dominated(r, pool)), key=by_price)
-    ordered = [(rate, True) for rate in tradeoffs] + [(rate, False) for rate in rest]
-    return ordered[:limit], len(candidates)
 
 
 def options_json(
@@ -428,19 +357,22 @@ def _late_notice(late: RatePreference | None, recommended_key: str) -> str | Non
 
 
 def _other_rates_json(options: RateOptions | None, outcome: RateSearchOutcome) -> Json:
-    listed, total = other_rates(options, outcome.filtered.eligible)
+    """The "Other rates" column: one card per distinct offer (see
+    `domain.rates.offers`), its other departure dates listed on the card."""
+    listed, total = other_offers(options, outcome.filtered.eligible)
     return {
         "other_rates": [
             {
-                "rate_ref": rate.source_ref,
-                "carrier": f"{rate.carrier_name} ({rate.carrier_code})",
-                "service": rate.product,
-                "transit": render_transit(rate.transit),
-                "price": f"{rate.total_amount} {rate.currency}",
-                "departure_date": rate.departure_date_label or None,
-                "tradeoff": tradeoff,
+                "rate_ref": offer.rate.source_ref,
+                "carrier": f"{offer.rate.carrier_name} ({offer.rate.carrier_code})",
+                "service": offer.rate.product,
+                "transit": render_transit(offer.rate.transit),
+                "price": f"{offer.rate.total_amount} {offer.rate.currency}",
+                "departure_date": offer.rate.departure_date_label or None,
+                "also_departs": list(offer.also_departs),
+                "tradeoff": offer.tradeoff,
             }
-            for rate, tradeoff in listed
+            for offer in listed
         ],
         "other_rates_total": total,
     }
