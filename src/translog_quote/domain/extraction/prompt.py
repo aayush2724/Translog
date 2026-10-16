@@ -179,7 +179,9 @@ Fields, with the exact representation required:
                      any default date.
 
 Include a short `evidence` quote from the email for every field you mark
-`stated`, `denied` or `ambiguous`.
+`stated`, `denied` or `ambiguous`. For `weight_kg` and `ship_date` the evidence
+must contain the number or date exactly as the email writes it, character for
+character (for example "1.200 kg" or "05/11/2026") - it is checked after you.
 
 Two rules about the shape of each field, which are enforced and will reject the
 whole response if broken:

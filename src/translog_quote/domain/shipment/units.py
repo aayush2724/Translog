@@ -134,3 +134,33 @@ def is_unit_note(note: str | None) -> bool:
 def quoted_from_note(note: str) -> str:
     """The client's own wording carried in a `unit_note`, or ``""``."""
     return note.split(": ", 1)[1] if ": " in note else ""
+
+
+#: A weight written as "1.200" or "2.500" — a dot followed by exactly three
+#: digits — is how much of Europe writes 1,200 and 2,500. Read naively it is
+#: 1.2 kg and 2.5 kg: a thousand-fold under-declaration that prices wrong and
+#: raises no alarm. Never guessed either way: the client is asked which they
+#: meant. ("1.5" or "12.25" are ordinary decimals and are not touched.)
+SEPARATOR_MARKER = "written with a dot that may be a thousands separator"
+
+_DOT_THOUSANDS = re.compile(r"(?<![\d.,])(\d{1,3}(?:\.\d{3})+)(?![\d.,])")
+
+
+def dot_thousands_in(text: str | None, value: float) -> str | None:
+    """The number in ``text`` written like "1.200" that a model read as
+    ``value`` (1.2), or ``None`` when there is no such number."""
+    if not text:
+        return None
+    for match in _DOT_THOUSANDS.finditer(text):
+        written = match.group(1)
+        if math.isclose(float(written), value):
+            return written
+    return None
+
+
+def thousands_readings(written: str) -> tuple[str, str]:
+    """The two readings of a "1.200"-style number, as client-facing text:
+    ("1,200", "1.2")."""
+    as_thousands = f"{int(written.replace('.', '')):,}"
+    as_decimal = f"{float(written):g}"
+    return as_thousands, as_decimal

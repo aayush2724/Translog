@@ -14,8 +14,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from translog_quote.domain.extraction.ship_date import DATE_ORDER_MARKER
 from translog_quote.domain.shipment import FieldName
-from translog_quote.domain.shipment.units import UNIT_MISSING_MARKER, quoted_from_note
+from translog_quote.domain.shipment.units import (
+    SEPARATOR_MARKER,
+    UNIT_MISSING_MARKER,
+    quoted_from_note,
+    thousands_readings,
+)
 
 if TYPE_CHECKING:
     from datetime import date
@@ -24,8 +30,10 @@ if TYPE_CHECKING:
 MISSING_QUESTIONS: dict[FieldName, str] = {
     FieldName.ORIGIN: "The origin — the city or airport the cargo ships from",
     FieldName.DESTINATION: "The destination — the city or airport the cargo is going to",
-    FieldName.WEIGHT_KG: "The total shipment weight in kg",
-    FieldName.DIMENSIONS_IN: "The package dimensions in inches (length x width x height)",
+    FieldName.WEIGHT_KG: "The total shipment weight and its unit (for example kg)",
+    FieldName.DIMENSIONS_IN: (
+        "The package dimensions (length x width x height) and their unit, for example cm or inches"
+    ),
     FieldName.COMMODITY: "The commodity being shipped",
     FieldName.CARGO_TYPE: "The cargo type — for example general cargo, non-hazardous, or hazardous",
     FieldName.IS_CHEMICAL: "Whether the cargo is a chemical product",
@@ -39,8 +47,10 @@ MISSING_QUESTIONS: dict[FieldName, str] = {
 #: What to ask when the client stated something we cannot use as-is. The ask is
 #: for the same fact in the form the quote needs — never a conversion on our side.
 AMBIGUOUS_QUESTIONS: dict[FieldName, str] = {
-    FieldName.WEIGHT_KG: "The total shipment weight in kg",
-    FieldName.DIMENSIONS_IN: "The package dimensions in inches (length x width x height)",
+    FieldName.WEIGHT_KG: "The total shipment weight and its unit (for example kg)",
+    FieldName.DIMENSIONS_IN: (
+        "The package dimensions (length x width x height) and their unit, for example cm or inches"
+    ),
     FieldName.PCS: "The total number of pieces for this shipment",
     FieldName.ORIGIN: "The single origin airport or city for this shipment",
     FieldName.DESTINATION: "The single destination airport or city for this shipment",
@@ -90,8 +100,7 @@ INVALID_QUESTIONS: dict[FieldName, str] = {
         "Please reply with the correct number of pieces."
     ),
     FieldName.WEIGHT_KG: (
-        "The gross weight must be greater than 0 kg. "
-        "Please reply with the correct gross weight."
+        "The gross weight must be greater than 0 kg. Please reply with the correct gross weight."
     ),
     FieldName.DIMENSIONS_IN: (
         "Each dimension must be greater than 0. Please reply with the correct dimensions."
@@ -114,8 +123,7 @@ def unit_question(field: FieldName, note: str) -> str:
     if field is FieldName.WEIGHT_KG:
         lead = f"The unit of the weight you gave ({seen})" if seen else "The unit of the weight"
         return (
-            f"{lead}. Please reply with the weight and its unit, "
-            'for example "100 kg" or "220 lb".'
+            f'{lead}. Please reply with the weight and its unit, for example "100 kg" or "220 lb".'
         )
     example = seen if (missing and seen) else "40 x 30 x 24"
     lead = (
@@ -127,6 +135,39 @@ def unit_question(field: FieldName, note: str) -> str:
         f"{lead}. Please reply with the dimensions and their unit, "
         f'for example "{example} cm" or "{example} inches".'
     )
+
+
+def separator_question(note: str) -> str:
+    """Ask which of the two readings of a "1.200 kg"-style weight was meant."""
+    written = quoted_from_note(note)
+    as_thousands, as_decimal = thousands_readings(written)
+    return (
+        f'The total shipment weight — you wrote "{written} kg". Please confirm whether '
+        f"that is {as_thousands} kg or {as_decimal} kg."
+    )
+
+
+def date_order_question(note: str) -> str:
+    """Ask which way round a numeric date like 05/11/2026 was meant."""
+    from datetime import date
+
+    written = quoted_from_note(note)
+    parts = [int(p) for p in written.replace(".", "/").replace("-", "/").split("/")]
+    first, second, year = parts
+    day_first = date(year, second, first)
+    month_first = date(year, first, second)
+    return (
+        f"The shipment date — you wrote {written}. Please confirm whether that is "
+        f"{day_first.day} {day_first:%B %Y} or {month_first.day} {month_first:%B %Y}."
+    )
+
+
+def is_separator_note(note: str | None) -> bool:
+    return bool(note) and SEPARATOR_MARKER in (note or "")
+
+
+def is_date_order_note(note: str | None) -> bool:
+    return bool(note) and DATE_ORDER_MARKER in (note or "")
 
 
 #: What to ask when a stated place cannot be resolved to a single airport without

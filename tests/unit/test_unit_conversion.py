@@ -295,3 +295,71 @@ def test_genuinely_different_values_still_conflict() -> None:
     existing = _record(weight_kg=500.0)
     incoming = to_extracted_fields(ExtractionResult(weight_kg=ExtractedValue[float].stated(700.0)))
     assert len(merge_shipment(existing, incoming).conflicts) == 1
+
+
+# --- edge cases found in the offline sweep (16 Oct 2026) ------------------------
+
+
+def test_a_european_thousands_separator_is_asked_about_never_guessed() -> None:
+    """ "1.200 kg" read as 1.2 kg is a thousand-fold under-declaration that
+    prices wrong silently. The weight becomes a correctable field instead."""
+    result = _extract(
+        {"weight_kg": {"status": "stated", "value": 1.2, "unit": "kg", "evidence": "1.200 kg"}}
+    )
+    assert result.weight_kg.status is FieldStatus.INVALID
+    assert result.weight_kg.value is None
+
+
+@pytest.mark.parametrize(
+    ("evidence", "value"), [("1.5 kg", 1.5), ("12.25 kg", 12.25), ("1,200 kg", 1200)]
+)
+def test_ordinary_decimals_and_comma_thousands_are_untouched(evidence: str, value: float) -> None:
+    result = _extract(
+        {"weight_kg": {"status": "stated", "value": value, "unit": "kg", "evidence": evidence}}
+    )
+    assert result.weight_kg.is_stated
+    assert result.weight_kg.value == value
+
+
+def test_the_separator_question_offers_both_readings() -> None:
+    result = _extract(
+        {"weight_kg": {"status": "stated", "value": 2.5, "unit": "kgs", "evidence": "2.500 kgs"}}
+    )
+    wf, _sink = workflow(complete(weight_kg=result.weight_kg))
+    out = wf.handle(REQ, email("2.500 kgs", n=1))
+    assert out.clarification is not None
+    assert 'you wrote "2.500 kg"' in out.clarification.body_text
+    assert "2,500 kg or 2.5 kg" in out.clarification.body_text
+
+
+def test_a_date_that_reads_either_way_round_is_confirmed() -> None:
+    result = _extract(
+        {"ship_date": {"status": "stated", "value": "2026-11-05", "evidence": "05/11/2026"}}
+    )
+    assert result.ship_date.status is FieldStatus.AMBIGUOUS
+    wf, _sink = workflow(complete(ship_date=result.ship_date))
+    out = wf.handle(REQ, email("Ship date: 05/11/2026", n=1))
+    assert out.clarification is not None
+    assert "5 November 2026 or 11 May 2026" in out.clarification.body_text
+
+
+@pytest.mark.parametrize(
+    ("evidence", "iso"),
+    [
+        ("27/10/2026", "2026-10-27"),
+        ("10/27/2026", "2026-10-27"),
+        ("11/11/2026", "2026-11-11"),
+        ("27 October 2026", "2026-10-27"),
+    ],
+)
+def test_dates_with_only_one_reading_are_untouched(evidence: str, iso: str) -> None:
+    result = _extract({"ship_date": {"status": "stated", "value": iso, "evidence": evidence}})
+    assert result.ship_date.is_stated
+
+
+def test_missing_dimension_and_weight_questions_ask_for_the_unit() -> None:
+    from translog_quote.domain.clarification.questions import missing_question
+
+    assert "and their unit" in missing_question(FieldName.DIMENSIONS_IN)
+    assert "in inches" not in missing_question(FieldName.DIMENSIONS_IN)
+    assert "its unit" in missing_question(FieldName.WEIGHT_KG)

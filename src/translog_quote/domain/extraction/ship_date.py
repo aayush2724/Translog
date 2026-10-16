@@ -21,11 +21,11 @@ is the backstop for any past date that reaches validation by another path.
 
 from __future__ import annotations
 
+import re
+from datetime import date
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from datetime import date
-
     from translog_quote.domain.extraction.model import ExtractionResult
 
 
@@ -68,3 +68,31 @@ def resolve_ship_date(extraction: ExtractionResult, *, today: date) -> Extractio
     return extraction.model_copy(
         update={"ship_date": stated.model_copy(update={"value": resolved})}
     )
+
+
+#: A numeric date whose first two parts are both 12 or less ("05/11/2026") reads
+#: as 5 November day-first and 11 May month-first. Day-first is the Indian
+#: default, but a client who writes month-first would be quoted for the wrong
+#: day with no warning, so such a date is confirmed with the client instead.
+DATE_ORDER_MARKER = "written with day and month that could be either way round"
+
+_NUMERIC_DATE = re.compile(r"(?<!\d)(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4})(?!\d)")
+
+
+def ambiguous_day_month(text: str | None, stated: date) -> tuple[str, date, date] | None:
+    """When ``text`` holds a numeric date that could be either order and one of
+    its readings is ``stated``, return (as written, day-first, month-first)."""
+    if not text:
+        return None
+    for match in _NUMERIC_DATE.finditer(text):
+        first, second, year = (int(g) for g in match.groups())
+        if first > 12 or second > 12 or first == second:
+            continue
+        try:
+            day_first = date(year, second, first)
+            month_first = date(year, first, second)
+        except ValueError:
+            continue
+        if stated in (day_first, month_first):
+            return match.group(0), day_first, month_first
+    return None

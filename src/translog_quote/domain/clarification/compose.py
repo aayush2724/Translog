@@ -22,8 +22,12 @@ from translog_quote.domain.clarification.model import (
 from translog_quote.domain.clarification.questions import (
     ambiguous_question,
     conflict_question,
+    date_order_question,
     invalid_question,
+    is_date_order_note,
+    is_separator_note,
     missing_question,
+    separator_question,
     unit_question,
 )
 from translog_quote.domain.extraction import ExtractionResult, FieldStatus
@@ -107,12 +111,20 @@ def identify_unresolved(
             continue
 
         if status is FieldStatus.AMBIGUOUS:
+            detail = _ambiguity_detail(extraction, issue.field)
+            # A numeric date that reads either way round gets both readings
+            # quoted back, so the client only has to pick one.
+            question = (
+                date_order_question(detail)
+                if is_date_order_note(detail)
+                else ambiguous_question(issue.field)
+            )
             unresolved.append(
                 UnresolvedField(
                     field=issue.field,
                     reason=UnresolvedReason.AMBIGUOUS,
-                    question=ambiguous_question(issue.field),
-                    detail=_ambiguity_detail(extraction, issue.field),
+                    question=question,
+                    detail=detail,
                 )
             )
             continue
@@ -127,11 +139,12 @@ def identify_unresolved(
             # is also INVALID: the client knows the unit, so ask for it — with
             # their own numbers quoted back — rather than for "a valid value".
             note = _ambiguity_detail(extraction, issue.field)
-            question = (
-                unit_question(issue.field, note)
-                if is_unit_note(note)
-                else invalid_question(issue.field)
-            )
+            if is_separator_note(note):
+                question = separator_question(note)
+            elif is_unit_note(note):
+                question = unit_question(issue.field, note)
+            else:
+                question = invalid_question(issue.field)
             unresolved.append(
                 UnresolvedField(
                     field=issue.field,

@@ -271,6 +271,18 @@ in a unit the code will not convert ("tons": short, long or metric?), are
 clarification that quotes their numbers back — never guessed, and never handed
 to a person merely for lacking a unit.
 
+**Two silent misreadings that are now asked about (decided 2026-10-16).**
+A weight written with a dot and exactly three digits after it ("1.200 kg",
+"2.500 kgs") is a European thousands separator as often as a decimal; read as
+1.2 kg it under-declares a thousand-fold. It is `INVALID` and the client is
+asked "1,200 kg or 1.2 kg?" ("1.5", "12.25" and "1,200" are unaffected). A
+numeric date whose day and month are both 12 or less ("05/11/2026") is
+`AMBIGUOUS` and the client is asked "5 November 2026 or 11 May 2026?"; a date
+with only one valid reading ("27/10/2026", "10/27/2026") is taken as stated.
+Both checks run in code against the `evidence` quote, which the model is told to
+copy character for character. The missing-field questions for weight and
+dimensions now ask for the value *and its unit*.
+
 ## 12. The prompt-injection boundary
 
 The client email is **data**. It is written by a third party, and this system

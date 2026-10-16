@@ -18,6 +18,7 @@ for JSON, and the contract is enforced here regardless of what comes back.
 from __future__ import annotations
 
 import json
+from datetime import date
 from typing import TYPE_CHECKING, Any
 
 from translog_quote.domain.extraction import (
@@ -25,6 +26,7 @@ from translog_quote.domain.extraction import (
     FieldStatus,
     build_extraction_messages,
 )
+from translog_quote.domain.extraction.ship_date import DATE_ORDER_MARKER, ambiguous_day_month
 from translog_quote.domain.shipment import units
 from translog_quote.errors import ContractViolation
 from translog_quote.observability import get_logger
@@ -207,6 +209,7 @@ class OpenRouterExtractionAdapter:
             )
 
         _normalise_units(payload)
+        _flag_ambiguous_day_month(payload)
         _mark_impossible_values_invalid(payload)
 
         try:
@@ -279,7 +282,15 @@ def _normalise_units(payload: dict[str, Any]) -> None:
         if isinstance(value, int | float) and not isinstance(value, bool):
             seen = _number_text(value)
             canon = units.weight_unit(raw) if isinstance(raw, str) else None
-            if canon is not None:
+            written = units.dot_thousands_in(weight.get("evidence"), float(value))
+            if written is not None:
+                # "1.200 kg" read as 1.2: maybe 1,200. Asked, never guessed.
+                payload["weight_kg"] = {
+                    "status": "invalid",
+                    "evidence": weight.get("evidence"),
+                    "note": units.unit_note("Weight", units.SEPARATOR_MARKER, written),
+                }
+            elif canon is not None:
                 payload["weight_kg"] = {**weight, "value": units.to_kg(value, canon)}
                 if canon != "kg":
                     _log.info("extraction: weight converted from %s %s to kg", seen, raw)
@@ -324,6 +335,36 @@ def _normalise_units(payload: dict[str, Any]) -> None:
         "status": "invalid",
         "evidence": dims.get("evidence"),
         "note": units.unit_note("Dimensions", marker, shown),
+    }
+
+
+def _flag_ambiguous_day_month(payload: dict[str, Any]) -> None:
+    """Turn a stated numeric date that could be either day/month order
+    ("05/11/2026") into an AMBIGUOUS field, in place.
+
+    The model reads such dates day-first, which is right for most clients and
+    silently wrong for one who writes month-first. An ambiguous shipment date is
+    re-asked (never handed to a person), and the clarification quotes both
+    readings so the client only has to pick one.
+    """
+    cell = payload.get("ship_date")
+    if not (isinstance(cell, dict) and cell.get("status") == "stated"):
+        return
+    value = cell.get("value")
+    if not isinstance(value, str):
+        return
+    try:
+        stated = date.fromisoformat(value)
+    except ValueError:
+        return
+    found = ambiguous_day_month(cell.get("evidence"), stated)
+    if found is None:
+        return
+    written, _day_first, _month_first = found
+    payload["ship_date"] = {
+        "status": "ambiguous",
+        "evidence": cell.get("evidence"),
+        "note": f"Ship date {DATE_ORDER_MARKER}: {written}",
     }
 
 
