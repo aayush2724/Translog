@@ -18,6 +18,7 @@ selectors they use.
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from typing import TYPE_CHECKING, Protocol
@@ -195,6 +196,31 @@ async () => {
   return {ok: true, unit: selects[0].innerText.trim()};
 }
 """
+
+#: WebCargo's own computed gross weight, from the "Shipment total: 4 Units |
+#: 0.32 CBM | G.W. 200 kg | V.W. … | C.W. …" bar under the cargo rows. This is
+#: what the search is priced on, so it is the authority on whether the weight
+#: went in as a shipment total. ``null`` when the bar is not found.
+_JS_SHIPMENT_GROSS_WEIGHT = """
+() => {
+  const bar = [...document.querySelectorAll('div,section,p,span')]
+    .filter(e => e.offsetWidth > 0)
+    .map(e => (e.innerText || '').replace(/\\s+/g, ' ').trim())
+    .filter(t => /Shipment total/i.test(t) && /G\\.W\\./.test(t) && t.length < 300)
+    .sort((a, b) => a.length - b.length)[0];
+  if (!bar) return null;
+  const m = bar.match(/G\\.W\\.\\s*([\\d.,]+)\\s*kg/i);
+  return m ? parseFloat(m[1].replace(/,/g, '')) : null;
+}
+"""
+
+#: The "Total" half of the "Weight: Unit | Total" switch, by WebCargo's own test
+#: attribute. WebCargo DEFAULTS to Unit: the entered figure is per piece and is
+#: multiplied by Units (a 200 kg total for 4 pieces is searched and priced as
+#: 800 kg). The unit dropdown reads "KG" in both modes, so it cannot tell them
+#: apart — and a scripted ``element.click()`` on this button is ignored (verified
+#: live), so it is clicked through the driver like a person would.
+WEIGHT_TOTAL_BUTTON = 'button[data-cy="totalWeight"]'
 
 _JS_SET_WEIGHT_TOTAL_KG = """
 async () => {
@@ -1001,9 +1027,12 @@ def run_rate_search(
     _select_goods_type(driver, query.goods_type, timeout_seconds=navigation_timeout_seconds)
 
     driver.fill(UNITS_INPUT, _figure(query.pieces))
-    driver.fill(LENGTH_INPUT, _figure(query.dimensions_in.length))
-    driver.fill(WIDTH_INPUT, _figure(query.dimensions_in.width))
-    driver.fill(HEIGHT_INPUT, _figure(query.dimensions_in.height))
+    # WebCargo keeps whole inches only and rounds a decimal to the NEAREST one
+    # (verified live: 15.2 -> 15, 19.7 -> 20), which can enter a box smaller
+    # than it is. Each side is rounded UP here instead, so it never shrinks.
+    driver.fill(LENGTH_INPUT, _whole_inches(query.dimensions_in.length))
+    driver.fill(WIDTH_INPUT, _whole_inches(query.dimensions_in.width))
+    driver.fill(HEIGHT_INPUT, _whole_inches(query.dimensions_in.height))
 
     unit_state = driver.evaluate(_JS_SET_DIMENSION_UNIT)
     _require_ok(unit_state, expect_unit="IN", what="dimension unit")
@@ -1011,6 +1040,7 @@ def run_rate_search(
     weight_state = driver.evaluate(_JS_SET_WEIGHT_TOTAL_KG)
     _require_ok(weight_state, expect_unit="KG", what="weight unit")
     driver.fill(WEIGHT_INPUT, _figure(query.weight_kg))
+    _require_total_gross_weight(driver, query.weight_kg)
 
     # Foreign origins (e.g. LHR) can leave the required IATA field empty, which
     # blocks Search & Book; India origins auto-populate it and are left untouched.
@@ -1103,6 +1133,40 @@ def _log_search_summary(driver: BrowserDriver, query: RateQuery) -> None:
         _figure(query.weight_kg),
         query.pieces,
     )
+
+
+def _gross_weight_matches(seen: object, weight_kg: float) -> bool:
+    if not isinstance(seen, int | float) or isinstance(seen, bool):
+        return False
+    return abs(float(seen) - weight_kg) <= max(1.0, 0.01 * weight_kg)
+
+
+def _require_total_gross_weight(driver: BrowserDriver, weight_kg: float) -> None:
+    """Make WebCargo's own gross weight equal the shipment total before Search.
+
+    Verified live (2026-10-16): the form defaults to "Weight: Unit", so the
+    entered total was multiplied by the piece count and every multi-piece search
+    was priced on that inflated weight — while the old check passed, because the
+    unit dropdown reads "KG" in both modes. The "Shipment total" bar's G.W. is
+    what WebCargo prices, so it decides: click Total until it matches (twice at
+    most), or refuse the search. A refusal fails the job to the operator; it is
+    never a client email."""
+    seen: object = None
+    for _ in range(3):
+        seen = driver.evaluate(_JS_SHIPMENT_GROSS_WEIGHT)
+        if _gross_weight_matches(seen, weight_kg):
+            return
+        driver.click(WEIGHT_TOTAL_BUTTON)
+    raise ContractViolation(
+        f"WebCargo reads the gross weight as {seen!r} kg, not the shipment total "
+        f"{_figure(weight_kg)} kg, after switching the weight to Total; refusing to "
+        "search on a weight the shipment does not have"
+    )
+
+
+def _whole_inches(value: float) -> str:
+    """A side in whole inches, rounded UP (a tiny epsilon keeps 20.0000001 at 20)."""
+    return str(max(1, math.ceil(float(value) - 1e-9)))
 
 
 def _figure(value: float) -> str:

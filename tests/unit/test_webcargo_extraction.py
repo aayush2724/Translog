@@ -754,6 +754,8 @@ class FakeDriver:
         iata_needs_selection: bool = False,
         iata_options: list[str] | None = None,
         marketing_overlay: bool = False,
+        starts_per_unit: bool = False,
+        total_toggle_works: bool = True,
     ) -> None:
         self.rows = rows if rows is not None else []
         count = stated_count if stated_count is not None else len(self.rows)
@@ -791,6 +793,12 @@ class FakeDriver:
             "bodyTextSample": "Your results are loading",
         }
         self.calls: list[tuple[str, str]] = []
+        # "Weight: Unit | Total" model: in Unit mode WebCargo's gross weight is
+        # the entered figure times Units.
+        self.per_unit = starts_per_unit
+        self.total_toggle_works = total_toggle_works
+        self._units = 1.0
+        self._weight = 0.0
         self._pending_options: list[str] = []
         # DatePicker model: readonly display starts on a default; typing into
         # the calendar input + Enter commits the new value.
@@ -817,12 +825,18 @@ class FakeDriver:
             self._commodity_open = True  # opening the select reveals its search field
         if selector == pages.IATA_SELECT:
             self._pending_options = list(self.iata_options)  # opening reveals its options
+        if selector == pages.WEIGHT_TOTAL_BUTTON and self.total_toggle_works:
+            self.per_unit = False  # the switch moves to Total
 
     def fill(self, selector: str, text: str) -> None:
         self.calls.append(("fill", f"{selector}={text}"))
         if selector == pages.CALENDAR_INPUT:
             self._date_pending = text
             return
+        if selector == pages.UNITS_INPUT:
+            self._units = float(text)
+        if selector == pages.WEIGHT_INPUT:
+            self._weight = float(text)
         self._pending_options = self.options.get(text, [])
 
     def press(self, selector: str, key: str) -> None:
@@ -890,6 +904,8 @@ class FakeDriver:
             return self.phrase
         if "captureLegs" in script:  # _JS_EXTRACT_ALL
             return self.rows
+        if "G\\.W\\." in script:  # _JS_SHIPMENT_GROSS_WEIGHT
+            return self._weight * (self._units if self.per_unit else 1)
         if "hs-web-interactives" in script:  # _JS_DISMISS_MARKETING_OVERLAY
             present = self._marketing_overlay
             self._marketing_overlay = False  # removing the anchor clears the scrim
@@ -1482,3 +1498,32 @@ def test_two_consecutive_empty_sightings_are_a_genuine_empty() -> None:
 def test_an_interrupted_empty_must_be_seen_twice_again() -> None:
     driver = _SequencedResults(_EMPTY, _LOADING, _EMPTY, _SETTLED)
     assert pages._await_results(driver, timeout_seconds=5, poll_interval_seconds=0) is True  # type: ignore[arg-type]
+
+
+# --- the weight goes in as a shipment total (2026-10-16 live finding) -------------
+
+
+def test_a_per_unit_default_is_switched_to_total_before_searching() -> None:
+    driver = FakeDriver(rows=[], stated_count=0, starts_per_unit=True)
+    search_with(driver)
+    assert driver.per_unit is False  # WebCargo's gross weight now equals the total
+
+
+def test_a_weight_that_will_not_go_in_as_a_total_refuses_the_search() -> None:
+    driver = FakeDriver(starts_per_unit=True, total_toggle_works=False)
+    with pytest.raises(ContractViolation, match="not the shipment total"):
+        search_with(driver)
+    assert not any(c == ("click", pages.SEARCH_BUTTON) for c in driver.calls)
+
+
+def test_decimal_inches_are_rounded_up_never_to_the_nearest() -> None:
+    """WebCargo keeps whole inches and rounds to the NEAREST (15.2 -> 15, live)."""
+    driver = FakeDriver(rows=[], stated_count=0)
+    query = QUERY.model_copy(
+        update={"dimensions_in": CargoDimensions(length=19.7, width=15.2, height=15.0)}
+    )
+    search_with(driver, query)
+    fills = dict(c[1].rsplit("=", 1) for c in driver.calls if c[0] == "fill" and "=" in c[1])
+    assert fills[pages.LENGTH_INPUT] == "20"
+    assert fills[pages.WIDTH_INPUT] == "16"
+    assert fills[pages.HEIGHT_INPUT] == "15"

@@ -388,3 +388,12 @@ def test_no_heartbeat_thread_leaks_after_shutdown() -> None:
 
     assert not beat.is_alive()
     assert all(t.name != "worker-lock-heartbeat" for t in threading.enumerate())
+
+
+def test_the_search_revision_is_part_of_the_job_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Results cached under an older way of entering the search are never reused."""
+    from translog_quote.interface.jobs import model
+
+    current = request().idempotency_key()
+    monkeypatch.setattr(model, "SEARCH_REVISION", model.SEARCH_REVISION - 1)
+    assert request().idempotency_key() != current

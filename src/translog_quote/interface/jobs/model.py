@@ -64,6 +64,11 @@ def job_state_from_rq_status(status: str) -> JobState:
     return state
 
 
+#: Bump when the browser search changes what WebCargo is asked, so results
+#: cached under the old behaviour are never reused (see ``idempotency_key``).
+SEARCH_REVISION = 2
+
+
 class RateSearchJobRequest(BaseModel):
     """What a caller asks for. Validated at the API edge, replayed verbatim by
     the worker — the queue carries this shape and nothing looser.
@@ -116,7 +121,12 @@ class RateSearchJobRequest(BaseModel):
         the model definition, which is what makes the serialisation — and
         therefore the digest — stable.
         """
-        digest = hashlib.sha256(self.model_dump_json().encode("utf-8")).hexdigest()
+        # The revision prefix retires every result searched before a change to
+        # HOW the search is entered: a byte-identical request inside the 24 h
+        # result TTL would otherwise reuse a result priced the old way. Bumped to
+        # 2 on 2026-10-16 when the weight stopped going in per piece.
+        payload = f"{SEARCH_REVISION}:{self.model_dump_json()}"
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         # A dash, not a colon: RQ permits only letters, numbers, underscores
         # and dashes in a job id (verified against a live queue).
         return f"rate-search-{digest}"
