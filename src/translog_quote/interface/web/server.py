@@ -172,6 +172,9 @@ def _live_decide(session: LiveSession | MultiAccountSession, body: dict[str, obj
         choice=str(body.get("decision", "")),
         by=str(body.get("by", "")),
         reason=str(body.get("reason", "")),
+        # Which eligible rate to quote ("fastest" / "cheapest"). Absent means
+        # the recommended option; anything else is refused by the session.
+        option=_str_or_none(body.get("option")),
     )
 
 

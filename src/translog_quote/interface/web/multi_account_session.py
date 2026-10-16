@@ -174,8 +174,18 @@ class MultiAccountSession:
             )
         self._owner(request_id).approve_clarification(by=by, request_id=request_id)
 
-    def decide(self, request_id: str, *, choice: str, by: str, reason: str = "") -> LiveRequest:
-        return self._owner(request_id).decide(request_id, choice=choice, by=by, reason=reason)
+    def decide(
+        self,
+        request_id: str,
+        *,
+        choice: str,
+        by: str,
+        reason: str = "",
+        option: str | None = None,
+    ) -> LiveRequest:
+        return self._owner(request_id).decide(
+            request_id, choice=choice, by=by, reason=reason, option=option
+        )
 
     def decide_goods_type(self, request_id: str, *, goods_type: str, by: str) -> None:
         self._owner(request_id).decide_goods_type(request_id, goods_type=goods_type, by=by)

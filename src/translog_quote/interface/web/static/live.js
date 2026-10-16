@@ -18,6 +18,10 @@ const ui = {
   selected: null,
   approver: "",
   declineReason: "",
+  /* The rate option ("fastest" / "cheapest") the operator picked on each
+     approval card, by reference. Kept here because the card is rebuilt on every
+     refresh; absent means the server's recommended option. */
+  rateOption: {},
   busy: false,
   busyLabel: null,
   refreshing: false,
@@ -865,8 +869,11 @@ function sectionRates(detail) {
     selection
       ? el("div", { class: "rate-board" },
           ...[...rates.eligible]
-            .sort((a, b) => (a.source_ref === selection.source_ref ? -1 : b.source_ref === selection.source_ref ? 1 : 0))
-            .map((rate) => rateCard(rate, rate.source_ref === selection.source_ref ? selection : null)))
+            .sort((a, b) => boardRank(a, rates) - boardRank(b, rates))
+            .map((rate) => rateCard(
+              rate,
+              rate.source_ref === selection.source_ref ? selection : null,
+              boardTag(rate, rates))))
       : el("p", { class: "muted" }, "No eligible rate — nothing will be quoted."),
     rates.excluded.length
       ? el("details", {
@@ -911,9 +918,26 @@ function excludedRateFacts(row) {
   ].filter(Boolean).join(" · ");
 }
 
-function rateCard(rate, chosen) {
-  return el("div", { class: `rate-card${chosen ? " rate-selected" : ""}` },
-    chosen ? el("span", { class: "rate-ribbon" }, "SELECTED") : null,
+/* Fastest first, then the cheapest, then the rest in the order received. */
+function boardRank(rate, rates) {
+  if (rate.source_ref === rates.selection.source_ref) return 0;
+  if (rate.source_ref === rates.cheapest_ref) return 1;
+  return 2;
+}
+
+/* Which of the two options a rate is, if either. The approval card is where
+   the operator chooses; the board only marks the candidates. */
+function boardTag(rate, rates) {
+  if (rate.source_ref === rates.selection.source_ref) {
+    return rates.fastest_is_cheapest ? "FASTEST · CHEAPEST" : "FASTEST";
+  }
+  if (rate.source_ref === rates.cheapest_ref) return "CHEAPEST";
+  return null;
+}
+
+function rateCard(rate, chosen, tag) {
+  return el("div", { class: `rate-card${tag ? " rate-selected" : ""}` },
+    tag ? el("span", { class: "rate-ribbon" }, tag) : null,
     el("div", { class: "rate-main" },
       carrierAvatar(rate.carrier_code, false),
       el("div", { class: "rate-carrier" },
@@ -1007,16 +1031,16 @@ function sectionApproval(detail) {
           el("h3", null, "Shipment"),
           kv(detail.shipment.filter((row) => row.value).map((row) => [row.label, row.value]))),
         el("div", null,
-          el("h3", null, "Selected service"),
-          kv([
-            ["Reference", approval.reference],
-            ["Carrier", approval.carrier],
-            ["Service", approval.service],
-            ["Departs", approval.departure_date],
-            ["Transit", approval.transit],
-            ["Price", approval.price],
-            ["Why", approval.reason],
-          ]),
+          el("h3", null, "Rate to quote"),
+          el("p", { class: "preference-note" }, approval.client_preference_text),
+          approval.late_preference_notice
+            ? el("div", { class: "banner banner-amber late-preference" }, approval.late_preference_notice)
+            : null,
+          optionChooser(approval),
+          approval.cheapest_unavailable
+            ? el("p", { class: "scope-note" },
+                `Cheapest option unavailable: ${approval.cheapest_unavailable}.`)
+            : null,
           approval.candidate_scope
             ? el("p", { class: "scope-note" }, approval.candidate_scope)
             : null,
@@ -1029,7 +1053,7 @@ function sectionApproval(detail) {
                 el("ul", { class: "issue-list" },
                   ...approval.excluded.map((row) => el("li", null, `${row.carrier_name} — ${row.detail}`))))
             : null)),
-      decisionRow(),
+      decisionRow(approval),
       el("p", { class: "action-note" }, "A name is required for either choice. There is no default and no timeout: if nobody decides, nothing is sent."))
   );
 }
@@ -1045,17 +1069,84 @@ function sectionQuotation(detail) {
       ["Decided by", decision.by],
       ["Decided at", fmtStamp(decision.at) || "—"],
       ["Reason", decision.reason || "—"],
+      ["Rate quoted", decision.quoted_rate
+        ? `${decision.quoted_option ? `${decision.quoted_option[0].toUpperCase()}${decision.quoted_option.slice(1)}: ` : ""}${decision.quoted_rate}`
+        : "—"],
       ["Email to client", decision.sent ? "Sent" : "Not sent"],
     ])
   );
 }
 
+/* The option currently chosen on a card: the operator's pick when it is still
+   on offer, else the server's recommendation. */
+function chosenOption(approval) {
+  const options = approval.options || [];
+  const picked = ui.rateOption[approval.reference];
+  if (picked && options.some((option) => option.key === picked)) return picked;
+  return approval.recommended_option || "fastest";
+}
+
+/* The rate options, each with the facts a choice is made on. One option when
+   the fastest rate is also the cheapest — never the same rate twice. Choosing
+   here only changes what APPROVE will send; nothing is sent until then. */
+function optionChooser(approval) {
+  const options = approval.options || [];
+  if (!options.length) {
+    return kv([
+      ["Reference", approval.reference],
+      ["Carrier", approval.carrier],
+      ["Service", approval.service],
+      ["Departs", approval.departure_date],
+      ["Transit", approval.transit],
+      ["Price", approval.price],
+      ["Why", approval.reason],
+    ]);
+  }
+  const current = chosenOption(approval);
+  const several = options.length > 1;
+  return el("div", { class: "rate-options", role: several ? "radiogroup" : null, "aria-label": "Rate to quote" },
+    ...options.map((option) => {
+      const chosen = option.key === current;
+      const input = several
+        ? el("input", { type: "radio", name: `rate-option-${approval.reference}`, value: option.key })
+        : null;
+      if (input) {
+        input.checked = chosen;
+        input.addEventListener("change", () => {
+          ui.rateOption[approval.reference] = option.key;
+          render();
+        });
+      }
+      return el(several ? "label" : "div", { class: `rate-option${chosen ? " rate-option-chosen" : ""}` },
+        el("div", { class: "rate-option-head" },
+          input,
+          el("strong", null, option.label),
+          option.recommended && several ? pill("RECOMMENDED", "blue") : null),
+        kv([
+          ["Carrier", option.carrier],
+          ["Service", option.service],
+          ["Departs", option.departure_date],
+          ["Transit", option.transit],
+          ["Price", option.price],
+          ["Why", option.reason],
+        ]));
+    }));
+}
+
 /* The quotation gate's controls. Both buttons track the approver field, and
    neither is reachable without a name — the same rule the server enforces, so
-   the interface never offers something the backend would refuse. */
-function decisionRow() {
-  const approve = button("APPROVE — send quotation", "approve",
-    () => post("quotation/decide", { decision: "approve", by: ui.approver }, "Sending quotation…"),
+   the interface never offers something the backend would refuse. APPROVE
+   carries the chosen option, so the quotation is built from exactly the rate
+   on screen. */
+function decisionRow(approval) {
+  const options = (approval && approval.options) || [];
+  const option = approval ? chosenOption(approval) : null;
+  const picked = options.find((candidate) => candidate.key === option);
+  const label = options.length > 1 && picked
+    ? `APPROVE — send ${picked.label.toLowerCase()} quotation`
+    : "APPROVE — send quotation";
+  const approve = button(label, "approve",
+    () => post("quotation/decide", { decision: "approve", by: ui.approver, option }, "Sending quotation…"),
     !canDecide());
   const decline = button("DECLINE — send nothing", "decline",
     () => post("quotation/decide", { decision: "decline", by: ui.approver, reason: ui.declineReason }, "Recording decline…"),

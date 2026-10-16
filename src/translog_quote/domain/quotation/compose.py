@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 from translog_quote.domain.email import OutboundMessage
 from translog_quote.domain.quotation.model import Approved, Quotation, ReviewPacket
+from translog_quote.domain.rates import RatePreference, RateStrategy
 from translog_quote.domain.shipment import CargoDimensions, DeliveryType
 
 if TYPE_CHECKING:
@@ -106,6 +107,78 @@ def _shipment_block(record: ShipmentRecord, *, indent: str = "  ") -> str:
 
 # --- internal: the review request ----------------------------------------------
 
+_OPTION_TITLES: dict[RateStrategy, str] = {
+    RateStrategy.FASTEST: "FASTEST",
+    RateStrategy.CHEAPEST: "CHEAPEST",
+}
+
+_PREFERENCE_LINES: dict[RatePreference, str] = {
+    RatePreference.FASTEST: "asked for speed (e.g. fastest / urgent)",
+    RatePreference.CHEAPEST: "asked for the lowest price (e.g. cheapest / best price)",
+    RatePreference.UNCLEAR: "mentioned both speed and price",
+}
+
+
+def _rate_block(selection: Selection) -> list[str]:
+    """One rate as the approver reads it. A missing departure says so."""
+    rate = selection.rate
+    return [
+        f"  Airline : {rate.carrier_name} ({rate.carrier_code})",
+        f"  Service : {rate.product}",
+        f"  Departs : {rate.departure_date_label or 'Not stated by the provider'}",
+        f"  Transit : {_transit(selection)}",
+        f"  Price   : {_price(selection)}",
+        f"  Why     : {selection.reason}",
+    ]
+
+
+def _option_blocks(packet: ReviewPacket) -> list[str]:
+    """The selected rate and its alternative, each labelled.
+
+    The alternative is the other of the two options. When both are the same
+    rate there is none, and when the cheapest could not be determined (e.g.
+    mixed currencies) the reason is stated instead of a figure.
+    """
+    options = packet.options
+    chosen = packet.selected_option
+    assert options is not None  # noqa: S101 - caller checked
+    assert chosen is not None  # noqa: S101 - caller checked
+    preference = packet.client_preference
+    lines = [
+        "Client preference: "
+        + (_PREFERENCE_LINES[preference] if preference is not None else "not stated"),
+        "",
+    ]
+    if options.same_rate:
+        return [
+            *lines,
+            "SELECTED RATE — FASTEST AND CHEAPEST",
+            "-" * 60,
+            *_rate_block(packet.selection),
+            "",
+            "ALTERNATIVE: none — the fastest eligible rate is also the cheapest.",
+        ]
+    other = RateStrategy.CHEAPEST if chosen is RateStrategy.FASTEST else RateStrategy.FASTEST
+    alternative = options.selection_for(other)
+    lines += [
+        f"SELECTED RATE — {_OPTION_TITLES[chosen]}",
+        "-" * 60,
+        *_rate_block(packet.selection),
+        "",
+    ]
+    if alternative is None:
+        lines.append(
+            f"ALTERNATIVE ({_OPTION_TITLES[other]}): not available — "
+            f"{options.cheapest_unavailable or 'it could not be determined'}."
+        )
+    else:
+        lines += [
+            f"ALTERNATIVE ELIGIBLE RATE — {_OPTION_TITLES[other]} (not selected)",
+            "-" * 60,
+            *_rate_block(alternative),
+        ]
+    return lines
+
 
 def compose_review_subject(packet: ReviewPacket) -> str:
     record = packet.record
@@ -136,14 +209,19 @@ def compose_review_body(packet: ReviewPacket, *, is_simulated: bool) -> str:
         "-" * 60,
         _shipment_block(packet.record),
         "",
-        "RECOMMENDED RATE",
-        "-" * 60,
-        f"  Carrier : {selection.rate.carrier_name} ({selection.rate.carrier_code})",
-        f"  Service : {selection.rate.product}",
-        f"  Transit : {_transit(selection)}",
-        f"  Price   : {_price(selection)}",
-        f"  Why     : {selection.reason}",
     ]
+    if packet.options is not None and packet.selected_option is not None:
+        lines += _option_blocks(packet)
+    else:
+        lines += [
+            "RECOMMENDED RATE",
+            "-" * 60,
+            f"  Carrier : {selection.rate.carrier_name} ({selection.rate.carrier_code})",
+            f"  Service : {selection.rate.product}",
+            f"  Transit : {_transit(selection)}",
+            f"  Price   : {_price(selection)}",
+            f"  Why     : {selection.reason}",
+        ]
 
     if selection.runners_up:
         lines += ["", "ELIGIBLE, NOT CHOSEN", "-" * 60]

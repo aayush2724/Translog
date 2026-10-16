@@ -157,19 +157,25 @@ def test_decide_routes_to_the_owning_account(
 ) -> None:
     settings = _multi_settings(tmp_path, ("alpha", True), ("beta", True))
     ms = MultiAccountSession.build(settings)
-    calls: dict[str, tuple[str, str]] = {}
+    calls: dict[str, tuple[str, str, str | None]] = {}
     for account_id, sess in ms.sessions.items():
 
         def record(
-            request_id: str, *, choice: str, by: str, reason: str = "", _a: str = account_id
+            request_id: str,
+            *,
+            choice: str,
+            by: str,
+            reason: str = "",
+            option: str | None = None,
+            _a: str = account_id,
         ) -> object:
-            calls["decide"] = (_a, request_id)
+            calls["decide"] = (_a, request_id, option)
             return object()
 
         monkeypatch.setattr(sess, "decide", record)
 
-    ms.decide("beta:R-9", choice="approve", by="op")
-    assert calls["decide"] == ("beta", "beta:R-9")
+    ms.decide("beta:R-9", choice="approve", by="op", option="cheapest")
+    assert calls["decide"] == ("beta", "beta:R-9", "cheapest")
 
 
 def test_approve_and_goods_type_route_to_the_owning_account(

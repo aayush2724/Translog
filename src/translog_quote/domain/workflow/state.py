@@ -12,6 +12,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
+from translog_quote.domain.rates.preference import RatePreference
 from translog_quote.domain.shipment import ShipmentRecord
 
 
@@ -199,6 +200,12 @@ class QuotationRequest(BaseModel):
     request written before these fields existed loads unchanged."""
     resolved_at: datetime | None = None
     resolution_note: str | None = None
+
+    rate_preference: RatePreference | None = None
+    """The client's stated priority (speed or price) as last read from their
+    own words, so the option the dashboard recommends survives a restart. Only
+    a recommendation — the operator chooses the rate. ``None`` when nothing was
+    stated, and for a request written before this field existed."""
 
     manual_review_notes: tuple[str, ...] = ()
     """Why the request was handed to a person, as shown to the operator —

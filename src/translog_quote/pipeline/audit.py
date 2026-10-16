@@ -40,6 +40,7 @@ class AuditEventType(StrEnum):
     RATES_FILTERED = "rates_filtered"
     GOODS_TYPE_DECIDED = "goods_type_decided"
     RATE_SELECTED = "rate_selected"
+    RATE_OPTION_CHOSEN = "rate_option_chosen"
     NO_RATES_NOTICE_SENT = "no_rates_notice_sent"
     APPROVAL_REQUESTED = "approval_requested"
     APPROVAL_DECIDED = "approval_decided"
