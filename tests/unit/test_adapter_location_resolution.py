@@ -50,6 +50,7 @@ def _adapter(manager: _FakeManager) -> WebCargoBrowserAdapter:
         search_timeout_seconds=5,
         navigation_timeout_seconds=5,
         resolver=CanonicalLocationResolver(),
+        count_stable_seconds=0.0,
     )
 
 

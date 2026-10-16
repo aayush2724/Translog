@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 from translog_quote.adapters.routing import StatedLocationResolver
 from translog_quote.adapters.webcargo.browser.mapper import ADAPTER_ID, map_records
 from translog_quote.adapters.webcargo.browser.pages import (
+    COUNT_STABLE_SECONDS,
     is_authenticated,
     login_page_visible,
     run_rate_search,
@@ -57,6 +58,7 @@ class WebCargoBrowserAdapter:
         navigation_timeout_seconds: float,
         resolver: LocationResolverPort | None = None,
         capture_legs: bool = False,
+        count_stable_seconds: float = COUNT_STABLE_SECONDS,
     ) -> None:
         self._manager = manager
         self._base_url = base_url
@@ -67,6 +69,9 @@ class WebCargoBrowserAdapter:
         # provider injects CanonicalLocationResolver via the composition root.
         self._resolver = resolver if resolver is not None else StatedLocationResolver()
         self._capture_legs = capture_legs
+        # How long WebCargo's rate count must hold still before rows are read
+        # (see `pages.COUNT_STABLE_SECONDS`). Overridable for the test fakes.
+        self._count_stable_seconds = count_stable_seconds
 
     def _resolved(self, query: RateQuery) -> RateQuery:
         """Resolve the stated places to what WebCargo's autocomplete recognises.
@@ -94,6 +99,7 @@ class WebCargoBrowserAdapter:
                     search_timeout_seconds=self._search_timeout,
                     navigation_timeout_seconds=self._navigation_timeout,
                     capture_legs=self._capture_legs,
+                    count_stable_seconds=self._count_stable_seconds,
                 )
             except WebCargoSessionLost as expiry:
                 # Fail this job with the reason and make every later job

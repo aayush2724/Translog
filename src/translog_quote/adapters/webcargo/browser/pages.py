@@ -975,6 +975,16 @@ def _dismiss_marketing_overlay(driver: BrowserDriver) -> None:
         _log.info("Removed an intercepting HubSpot marketing overlay before the search form")
 
 
+#: How long the Full-list total must stay unchanged before the rows are read,
+#: and the most time spent waiting for it to stop changing. Some airlines'
+#: rates arrive after the page first looks complete: a live Chennai-Dubai search
+#: (2026-10-16) was harvested at 58 rates while the same search, re-run by hand,
+#: settled at 76 — Qatar identical, Etihad 22 rows (one date) vs 40 (four dates,
+#: including the client's own date at the same lowest price).
+COUNT_STABLE_SECONDS = 5.0
+COUNT_SETTLE_MAX_SECONDS = 30.0
+
+
 def run_rate_search(
     driver: BrowserDriver,
     query: RateQuery,
@@ -984,6 +994,8 @@ def run_rate_search(
     navigation_timeout_seconds: float,
     capture_legs: bool = False,
     poll_interval_seconds: float = 1.0,
+    count_stable_seconds: float = COUNT_STABLE_SECONDS,
+    count_settle_max_seconds: float = COUNT_SETTLE_MAX_SECONDS,
 ) -> WebCargoResultSet:
     """One complete search on an already-authenticated session.
 
@@ -1066,7 +1078,12 @@ def run_rate_search(
     if not (isinstance(full_list, dict) and full_list.get("ok")):
         raise ContractViolation(f"could not reach the Full list view: {full_list!r}")
 
-    phrase = driver.evaluate(_JS_LOWEST_PHRASE)
+    phrase = _await_stable_count(
+        driver,
+        stable_seconds=count_stable_seconds,
+        max_seconds=count_settle_max_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
     if not isinstance(phrase, str) or not phrase:
         raise ContractViolation(
             "the Full-list 'Showing the N lowest rates' total was not found; "
@@ -1276,6 +1293,59 @@ def _await_results(
                 f"(last state: {state!r}); diagnostics: {_settle_timeout_diagnostics(driver)}"
             )
         time.sleep(poll_interval_seconds)
+
+
+def _await_stable_count(
+    driver: BrowserDriver,
+    *,
+    stable_seconds: float,
+    max_seconds: float,
+    poll_interval_seconds: float,
+) -> object:
+    """The Full-list "Showing the N lowest rates" phrase once N has stopped
+    changing for ``stable_seconds``.
+
+    Returns whatever the first read returned when it has no count (the caller
+    refuses that, as before). If N is still moving at ``max_seconds`` the latest
+    phrase is returned with a warning: the completeness guard downstream still
+    requires every stated row to be captured, so a late change can only make
+    the search fail loudly, never present a partial set as complete."""
+    phrase = driver.evaluate(_JS_LOWEST_PHRASE)
+    if not isinstance(phrase, str) or _count_from(phrase) is None or stable_seconds <= 0:
+        return phrase
+    count = _count_from(phrase)
+    first_count = count
+    started = time.monotonic()
+    stable_since = started
+    while True:
+        now = time.monotonic()
+        if now - stable_since >= stable_seconds:
+            break
+        if now - started >= max_seconds:
+            _log.warning(
+                "WebCargo rate count still changing after %.0fs (now %s); reading it as is",
+                max_seconds,
+                count,
+            )
+            break
+        time.sleep(poll_interval_seconds)
+        latest = driver.evaluate(_JS_LOWEST_PHRASE)
+        latest_count = _count_from(latest) if isinstance(latest, str) else None
+        if latest_count is None:
+            stable_since = time.monotonic()  # mid-refresh: not stable yet
+            continue
+        if latest_count != count:
+            _log.info("WebCargo rate count changed from %s to %s; waiting", count, latest_count)
+            count, phrase = latest_count, latest
+            stable_since = time.monotonic()
+    if count != first_count:
+        _log.info(
+            "WebCargo rate count settled at %s (first read %s) after %.1fs",
+            count,
+            first_count,
+            time.monotonic() - started,
+        )
+    return phrase
 
 
 def _count_from(phrase: str) -> int | None:

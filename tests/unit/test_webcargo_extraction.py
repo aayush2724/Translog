@@ -922,6 +922,7 @@ def search_with(driver: FakeDriver, query: RateQuery = QUERY) -> object:
         search_timeout_seconds=0.05,
         navigation_timeout_seconds=1,
         poll_interval_seconds=0.001,
+        count_stable_seconds=0.0,
     )
 
 
@@ -1433,6 +1434,7 @@ def test_per_job_navigation_uses_the_canonical_rand_free_url() -> None:
         search_timeout_seconds=0.05,
         navigation_timeout_seconds=1,
         poll_interval_seconds=0.001,
+        count_stable_seconds=0.0,
     )
 
     gotos = [detail for kind, detail in driver.calls if kind == "goto"]
@@ -1527,3 +1529,61 @@ def test_decimal_inches_are_rounded_up_never_to_the_nearest() -> None:
     assert fills[pages.LENGTH_INPUT] == "20"
     assert fills[pages.WIDTH_INPUT] == "16"
     assert fills[pages.HEIGHT_INPUT] == "15"
+
+
+# --- the rate count must stop changing before rows are read (2026-10-16) ---------
+
+
+class _GrowingCount:
+    """The Full-list phrase as late airlines arrive: 58, 58, 76, then steady."""
+
+    def __init__(self, *counts: int) -> None:
+        self._counts = list(counts)
+
+    def evaluate(self, script: str, argument: object = None) -> object:
+        count = self._counts.pop(0) if len(self._counts) > 1 else self._counts[0]
+        return f"Showing the {count} lowest rates"
+
+
+def test_the_count_is_read_only_once_it_stops_changing() -> None:
+    driver = _GrowingCount(58, 58, 76, 76, 76)
+    phrase = pages._await_stable_count(
+        driver,  # type: ignore[arg-type]
+        stable_seconds=0.02,
+        max_seconds=5,
+        poll_interval_seconds=0.005,
+    )
+    assert phrase == "Showing the 76 lowest rates"
+
+
+def test_a_count_that_never_settles_is_read_at_the_cap() -> None:
+    class _Always:
+        n = 0
+
+        def evaluate(self, script: str, argument: object = None) -> object:
+            self.n += 1
+            return f"Showing the {self.n} lowest rates"
+
+    phrase = pages._await_stable_count(
+        _Always(),  # type: ignore[arg-type]
+        stable_seconds=1,
+        max_seconds=0.05,
+        poll_interval_seconds=0.005,
+    )
+    assert isinstance(phrase, str) and phrase.startswith("Showing the ")
+
+
+def test_no_count_is_returned_unchanged_for_the_caller_to_refuse() -> None:
+    class _Missing:
+        def evaluate(self, script: str, argument: object = None) -> object:
+            return None
+
+    assert (
+        pages._await_stable_count(
+            _Missing(),  # type: ignore[arg-type]
+            stable_seconds=5,
+            max_seconds=30,
+            poll_interval_seconds=0.001,
+        )
+        is None
+    )

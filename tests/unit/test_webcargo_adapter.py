@@ -42,6 +42,7 @@ def adapter_over(
             wrap_page=wrap,
             search_timeout_seconds=0.05,
             navigation_timeout_seconds=1,
+            count_stable_seconds=0.0,
         ),
         handed,
     )
