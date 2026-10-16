@@ -801,3 +801,156 @@ def test_a_missing_departure_is_stated_not_invented() -> None:
 
     assert "Departs : Not stated by the provider" in body
     assert "Departs : 20/09/2026" in body  # the cheapest alternative has one
+
+
+# --- the "other rates" column and quoting one of them ---------------------------
+
+SLOW_MID = _rate("SQ", "26000", 40)  # dominated by MIDDLE (EK 25000, 30h): never a trade-off
+TRADE = _rate("TK", "21000", 36)  # between cheapest and fastest on both axes: a trade-off
+DUP_OF_CHEAP = CHEAP.model_copy(update={"source_ref": "ref:EY-again"})  # same offer, new ref
+
+
+def test_other_rates_never_repeat_the_two_options_or_each_other() -> None:
+    eligible = (FAST, CHEAP, MIDDLE, SLOW_MID, TRADE, DUP_OF_CHEAP)
+    options = rate_options(eligible)
+
+    listed, total = live_serialize.other_rates(options, eligible)
+
+    refs = [rate.source_ref for rate, _ in listed]
+    assert "ref:QR" not in refs and "ref:EY" not in refs  # the two options
+    assert "ref:EY-again" not in refs  # an identical offer to the cheapest
+    assert refs == ["ref:TK", "ref:EK", "ref:SQ"]  # trade-offs first, then by price
+    assert [tradeoff for _, tradeoff in listed] == [True, True, False]
+    assert total == 3
+
+
+def test_other_rates_are_capped_and_the_total_is_reported() -> None:
+    many = tuple(_rate(f"C{i}", str(20000 + i * 100), 30 + i) for i in range(12))
+    eligible = (FAST, CHEAP, *many)
+
+    listed, total = live_serialize.other_rates(rate_options(eligible), eligible, limit=8)
+
+    assert len(listed) == 8
+    assert total == 12
+
+
+def test_other_rates_with_uncomparable_prices_are_not_ranked_by_price() -> None:
+    usd = _rate("UA", "350", 29, currency="USD")
+    eligible = (FAST, CHEAP, usd, MIDDLE)
+    options = rate_options(eligible)
+    assert options is not None and options.cheapest is None
+
+    listed, _ = live_serialize.other_rates(options, eligible)
+
+    # Fastest-first, nothing marked as a price trade-off, cheapest not withheld.
+    assert [rate.carrier_code for rate, _ in listed] == ["UA", "EK", "EY"]
+    assert not any(tradeoff for _, tradeoff in listed)
+
+
+def test_no_other_rates_is_an_empty_list() -> None:
+    eligible = (FAST, CHEAP)
+    assert live_serialize.other_rates(rate_options(eligible), eligible) == ([], 0)
+
+
+def test_the_approval_payload_carries_the_other_rates(
+    settings: Settings, sink: CollectingEmailSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = _session(settings, sink, monkeypatch, rates=(MIDDLE, CHEAP, FAST, TRADE))
+
+    card = _approval(session)
+
+    assert [r["rate_ref"] for r in card["other_rates"]] == ["ref:TK", "ref:EK"]  # type: ignore[attr-defined]
+    first = card["other_rates"][0]  # type: ignore[index]
+    assert first["carrier"] == "Carrier TK (TK)"
+    assert first["price"] == "21000 INR"
+    assert first["departure_date"] == "20/09/2026"
+    assert card["other_rates_total"] == 2
+
+
+def test_the_operator_can_quote_one_of_the_other_rates(
+    settings: Settings, sink: CollectingEmailSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = _session(settings, sink, monkeypatch, enquiry_words="cheapest please")
+    request_id = only_request(session).request_id  # type: ignore[attr-defined]
+
+    request = session.decide(request_id, choice="approve", by=APPROVER, rate_ref="ref:EK")
+
+    assert request.quoted_option is RateStrategy.OTHER
+    body = _quotation_body(sink)
+    assert "Carrier EK (EK)" in body
+    assert "25000 INR" in body
+    review = _review(sink)
+    assert "SELECTED RATE — OTHER ELIGIBLE RATE (operator's choice)" in review
+    assert "FOR COMPARISON — FASTEST (not selected)" in review
+    assert "FOR COMPARISON — CHEAPEST (not selected)" in review
+    assert "chosen by the operator" in review
+    chosen = [e for e in session.audit.events if e.event is AuditEventType.RATE_OPTION_CHOSEN]  # type: ignore[union-attr]
+    assert chosen[-1].detail["option"] == "other"
+    assert chosen[-1].detail["rate_ref"] == "ref:EK"
+    assert chosen[-1].detail["recommended"] == "cheapest"
+
+
+def test_an_excluded_rate_can_never_be_quoted_by_reference(
+    settings: Settings, sink: CollectingEmailSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rate filtering removed (no transit) is not in the eligible set, so its
+    ref is refused — and nothing is recorded or sent."""
+    unrankable = _rate("ZZ", "100", None)
+    session = _session(settings, sink, monkeypatch, rates=(FAST, CHEAP, unrankable))
+    request_id = only_request(session).request_id  # type: ignore[attr-defined]
+    before = len(sink.sent)
+
+    for ref in ("ref:ZZ", "ref:not-a-rate"):
+        with pytest.raises(LiveSequenceError, match="not one of this search's eligible rates"):
+            session.decide(request_id, choice="approve", by=APPROVER, rate_ref=ref)
+
+    assert len(sink.sent) == before
+    assert only_request(session).decision is None  # type: ignore[attr-defined]
+
+
+def test_a_rate_and_a_named_option_together_are_refused(
+    settings: Settings, sink: CollectingEmailSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = _session(settings, sink, monkeypatch)
+    request_id = only_request(session).request_id  # type: ignore[attr-defined]
+
+    with pytest.raises(LiveSequenceError, match="not both"):
+        session.decide(
+            request_id, choice="approve", by=APPROVER, option="cheapest", rate_ref="ref:EK"
+        )
+    with pytest.raises(LiveSequenceError, match="needs the rate itself"):
+        session.decide(request_id, choice="approve", by=APPROVER, option="other")
+
+    assert only_request(session).decision is None  # type: ignore[attr-defined]
+
+
+def test_a_reference_to_the_fastest_rate_is_recorded_as_fastest(
+    settings: Settings, sink: CollectingEmailSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = _session(settings, sink, monkeypatch)
+    request_id = only_request(session).request_id  # type: ignore[attr-defined]
+
+    request = session.decide(request_id, choice="approve", by=APPROVER, rate_ref="ref:QR")
+
+    assert request.quoted_option is RateStrategy.FASTEST
+    assert "SELECTED RATE — FASTEST" in _review(sink)
+
+
+def test_the_rate_reference_travels_over_http(
+    settings: Settings, sink: CollectingEmailSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = _session(settings, sink, monkeypatch)
+    request_id = only_request(session).request_id  # type: ignore[attr-defined]
+
+    _LIVE_ACTIONS["quotation/decide"](
+        session,
+        {"request_id": request_id, "decision": "approve", "by": APPROVER, "rate_ref": "ref:EK"},
+    )
+
+    assert "Carrier EK (EK)" in _quotation_body(sink)
+
+
+def test_other_is_never_a_ranked_option() -> None:
+    options = rate_options((FAST, CHEAP))
+    assert options is not None
+    assert options.selection_for(RateStrategy.OTHER) is None

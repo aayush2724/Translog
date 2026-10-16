@@ -149,6 +149,8 @@ def _option_blocks(packet: ReviewPacket) -> list[str]:
         + (_PREFERENCE_LINES[preference] if preference is not None else "not stated"),
         "",
     ]
+    if chosen is RateStrategy.OTHER:
+        return [*lines, *_other_rate_blocks(packet)]
     if options.same_rate:
         return [
             *lines,
@@ -176,6 +178,45 @@ def _option_blocks(packet: ReviewPacket) -> list[str]:
             f"ALTERNATIVE ELIGIBLE RATE — {_OPTION_TITLES[other]} (not selected)",
             "-" * 60,
             *_rate_block(alternative),
+        ]
+    return lines
+
+
+def _other_rate_blocks(packet: ReviewPacket) -> list[str]:
+    """An operator-chosen rate that is neither the fastest nor the cheapest,
+    with both options shown for comparison so the approver sees what it was
+    chosen over."""
+    options = packet.options
+    assert options is not None  # noqa: S101 - caller checked
+    lines = [
+        "SELECTED RATE — OTHER ELIGIBLE RATE (operator's choice)",
+        "-" * 60,
+        *_rate_block(packet.selection),
+        "",
+    ]
+    if options.same_rate:
+        return [
+            *lines,
+            "FOR COMPARISON — FASTEST AND CHEAPEST (not selected)",
+            "-" * 60,
+            *_rate_block(options.fastest),
+        ]
+    lines += [
+        "FOR COMPARISON — FASTEST (not selected)",
+        "-" * 60,
+        *_rate_block(options.fastest),
+        "",
+    ]
+    if options.cheapest is None:
+        lines.append(
+            "FOR COMPARISON — CHEAPEST: not available — "
+            f"{options.cheapest_unavailable or 'it could not be determined'}."
+        )
+    else:
+        lines += [
+            "FOR COMPARISON — CHEAPEST (not selected)",
+            "-" * 60,
+            *_rate_block(options.cheapest),
         ]
     return lines
 

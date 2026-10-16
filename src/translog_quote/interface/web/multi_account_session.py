@@ -182,9 +182,10 @@ class MultiAccountSession:
         by: str,
         reason: str = "",
         option: str | None = None,
+        rate_ref: str | None = None,
     ) -> LiveRequest:
         return self._owner(request_id).decide(
-            request_id, choice=choice, by=by, reason=reason, option=option
+            request_id, choice=choice, by=by, reason=reason, option=option, rate_ref=rate_ref
         )
 
     def decide_goods_type(self, request_id: str, *, goods_type: str, by: str) -> None:
