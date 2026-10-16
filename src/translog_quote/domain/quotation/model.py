@@ -22,6 +22,10 @@ from translog_quote.domain.rates import (
 from translog_quote.domain.shipment import ShipmentRecord
 from translog_quote.domain.validation import ValidationResult
 
+#: The longest note an approving person may add to a quotation (to the client or
+#: internal). Enforced by the session before anything is recorded or sent.
+NOTE_MAX_CHARS = 1000
+
 
 class ReviewPacket(BaseModel):
     """Everything the quotation maker sees before deciding.
@@ -50,6 +54,13 @@ class ReviewPacket(BaseModel):
     """Which of ``options`` ``selection`` is."""
     client_preference: RatePreference | None = None
     """The client's stated speed-or-price priority, shown to the approver."""
+    client_note: str = ""
+    """An optional note the approving person writes to the client. Sent in the
+    quotation under "NOTE FROM TRANSLOG", after the figures, exactly as typed —
+    never generated. Empty: the quotation is sent as before."""
+    internal_note: str = ""
+    """An optional note for the approver email and the audit only. Never part
+    of anything sent to the client."""
 
 
 class Approved(BaseModel):

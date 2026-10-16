@@ -427,60 +427,8 @@ h1 { font-size: 1.3rem; font-weight: 600; }
 }
 .strategy-note { margin: 0.1rem 0 0.6rem; font-size: 0.8rem; color: #6a7490; }
 
-/* ------------------------------------------------ the rate board */
-
-.rate-board { display: grid; gap: 0.7rem; margin: 0.4rem 0 0.9rem; }
-
-.rate-card {
-  position: relative;
-  display: grid;
-  grid-template-columns: minmax(11rem, 1.3fr) 1fr auto;
-  align-items: center;
-  gap: 1rem;
-  padding: 0.85rem 1.1rem;
-  border: 1px solid var(--wc-line);
-  border-radius: 12px;
-  background: var(--wc-card);
-  transition: box-shadow 0.2s var(--ease-out), border-color 0.2s;
-}
-.rate-card:hover { box-shadow: var(--wc-shadow-lift); border-color: #d9dce6; }
-.rate-card.rate-selected {
-  border: 1px solid var(--wc-accent);
-  background: #fcfbff;
-}
-.rate-ribbon {
-  position: absolute;
-  top: -0.62rem;
-  left: 0.9rem;
-  padding: 0.12rem 0.65rem;
-  border-radius: 999px;
-  background: var(--wc-accent);
-  color: #fff;
-  font-size: 0.64rem;
-  font-weight: 750;
-  letter-spacing: 0.09em;
-}
-.rate-main { display: flex; align-items: center; gap: 0.75rem; min-width: 0; }
-.rate-carrier { display: flex; flex-direction: column; line-height: 1.3; min-width: 0; }
-.rate-name { font-weight: 650; color: var(--wc-ink); }
-.rate-product { font-size: 0.76rem; color: #6a7490; }
-.rate-mid { display: flex; flex-direction: column; gap: 0.3rem; align-items: flex-start; }
-.rate-why { font-size: 0.74rem; color: #4a5675; }
-.transit-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0.18rem 0.6rem;
-  border-radius: 999px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--wc-accent-deep);
-  background: var(--wc-accent-soft);
-}
-.rate-price { text-align: right; white-space: nowrap; }
-.price-amount { font-size: 1.15rem; font-weight: 750; color: var(--wc-ink); }
-.price-currency { margin-left: 0.3rem; font-size: 0.74rem; font-weight: 650; color: #6a7490; }
-
+/* Carrier mark, used by the excluded-rate rows. (The old list of every rate
+   was removed; the approval card's three columns replace it.) */
 .carrier-avatar {
   display: inline-flex;
   align-items: center;
@@ -669,8 +617,83 @@ h1 { font-size: 1.3rem; font-weight: 600; }
 .rate-choice-why { margin: 0.35rem 0 0; }
 .rate-choice-also { margin: 0.35rem 0 0; }
 .rate-choice .nowrap { white-space: nowrap; }
+/* One airline at one price, offered several ways: the shared facts once, then
+   a row per variant naming what differs. */
+.rate-family { border: 1px solid var(--wc-line); background: var(--wc-card); border-radius: 8px; padding: 0.6rem 0.7rem; }
+.rate-family-selected { border: 2px solid #0f766e; box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.2); }
+.rate-family-airline { font-size: 0.82rem; font-weight: 600; }
+.rate-family-note { margin: 0.25rem 0 0.4rem; }
+.rate-variants { display: grid; gap: 0.3rem; }
+.rate-variant {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.4rem;
+  align-items: start;
+  padding: 0.35rem 0.4rem;
+  border: 1px solid var(--wc-line);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+.rate-variant:hover { border-color: #cfd3df; }
+.rate-variant-selected { border-color: #0f766e; background: rgba(15, 118, 110, 0.08); }
+.rate-variant-facts { display: grid; gap: 0.05rem; min-width: 0; }
+.rate-variant-service { font-weight: 600; }
+.rate-variant .nowrap { white-space: nowrap; }
 @container (max-width: 520px) {
   .rate-compare-grid { grid-template-columns: 1fr; }
   .rate-col-shared { grid-column: auto; }
   .rate-col-list { max-height: none; overflow: visible; }
+}
+
+/* Per-kg rate under the price, as WebCargo printed it. */
+.rate-choice-perkg { margin: -0.1rem 0 0.25rem; }
+/* "Show N more" inside an airline-and-price family. */
+.variant-toggle {
+  margin-top: 0.35rem;
+  padding: 0.2rem 0.5rem;
+  border: 1px dashed var(--wc-line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--wc-accent-deep);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+/* Optional notes and the client email preview, just above the decision. */
+.notes-section { margin-top: 1rem; display: grid; gap: 0.6rem; }
+.note-field { display: grid; gap: 0.25rem; }
+.note-label { font-size: 0.82rem; font-weight: 600; }
+.note-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--wc-line);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 0.86rem;
+  resize: vertical;
+}
+.note-count { justify-self: end; }
+.preview-panel { display: grid; gap: 0.4rem; }
+.preview-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.email-preview { border: 1px solid var(--wc-line); border-radius: 8px; padding: 0.6rem 0.75rem; background: #fbfbfd; }
+.email-preview-head { margin: 0 0 0.2rem; color: #4a5675; }
+.email-preview-body {
+  margin: 0.4rem 0 0;
+  white-space: pre-wrap;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  max-height: 26rem;
+  overflow: auto;
+}
+.preview-stale { margin: 0 0 0.4rem; color: #92400e; font-size: 0.8rem; }
+.preview-error { color: #b42318; font-size: 0.82rem; }
+/* The decision stays in reach while the columns are scrolled. */
+.approval-card .decision-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  padding: 0.6rem 0;
+  background: var(--wc-card);
+  border-top: 1px solid var(--wc-line);
 }

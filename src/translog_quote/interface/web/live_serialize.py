@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from translog_quote.domain.quotation import SIMULATED_RATE_NOTICE
+from translog_quote.domain.quotation import NOTE_MAX_CHARS, SIMULATED_RATE_NOTICE
 from translog_quote.domain.rates import RateStrategy, rate_options
 from translog_quote.domain.rates.offers import offer_for, other_offers
 from translog_quote.domain.workflow import RequestState
@@ -298,6 +298,9 @@ def _option_json(
         "transit": render_transit(rate.transit),
         "price": f"{rate.total_amount} {rate.currency}",
         "departure_date": rate.departure_date_label or outcome.query.date.isoformat(),
+        "departure_time": rate.departure_time_label or None,
+        "arrival": rate.arrival_label or None,
+        "per_kg": rate.rate_per_kg_label or None,
         "reason": selection.reason,
         "source_ref": rate.source_ref,
         "also_departs": list(offer.also_departs),
@@ -369,6 +372,9 @@ def _other_rates_json(options: RateOptions | None, outcome: RateSearchOutcome) -
                 "transit": render_transit(offer.rate.transit),
                 "price": f"{offer.rate.total_amount} {offer.rate.currency}",
                 "departure_date": offer.rate.departure_date_label or None,
+                "departure_time": offer.rate.departure_time_label or None,
+                "arrival": offer.rate.arrival_label or None,
+                "per_kg": offer.rate.rate_per_kg_label or None,
                 "also_departs": list(offer.also_departs),
                 "tradeoff": offer.tradeoff,
             }
@@ -440,6 +446,7 @@ def approval_json(
         ),
         "cheapest_unavailable": options.cheapest_unavailable if options is not None else None,
         "late_preference": late_preference.value if late_preference is not None else None,
+        "note_max_chars": NOTE_MAX_CHARS,
         **_other_rates_json(options, outcome),
         "late_preference_notice": _late_notice(late_preference, recommended_key),
         "completeness": outcome.completeness,
@@ -473,6 +480,9 @@ def decision_json(request: LiveRequest) -> Json | None:
         # Which option was quoted and the rate it carried, so the record says
         # what the client was actually sent. Null on a decline.
         "quoted_option": request.quoted_option.value if request.quoted_option else None,
+        # What the approving person wrote, as sent / as kept internally.
+        "client_note": request.packet.client_note if request.packet and approved else None,
+        "internal_note": request.packet.internal_note if request.packet and approved else None,
         "quoted_rate": None
         if not request.quotation_sent or request.packet is None
         else (
@@ -714,7 +724,8 @@ def _headline(request: LiveRequest) -> str:
     while subject.lower().startswith("re:"):
         subject = subject[3:].strip()
     head, separator, _ = subject.partition(" - ")
-    return (head if separator else subject) or request.request_id
+    # No subject at all: say so, with the short id so the card stays identifiable.
+    return (head if separator else subject) or f"(no subject) · {request.request_id.split(':')[-1]}"
 
 
 #: States a demonstration request is still "new" in: nothing has been sent for

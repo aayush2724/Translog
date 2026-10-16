@@ -35,6 +35,31 @@ _DURATION = re.compile(r"^\s*(\d+)\s*h(?:\s*([0-5]?\d)\s*m)?\s*$")
 #: group 2 the currency token exactly as displayed.
 _MONEY = re.compile(r"([0-9][0-9.,]*)\s*([A-Za-z]{1,5})\s*$")
 
+#: The time of day closing WebCargo's departure cell ("Wed 28 Oct - 03:45").
+#: Anything else maps to "" — a time is never guessed.
+_DEPARTURE_TIME = re.compile(r"(?:^|\s)([0-2]?\d:[0-5]\d)\s*$")
+
+
+#: A per-kg figure as WebCargo prints it: "167.65 Rs/kg", possibly preceded by a
+#: label, or as the first segment of the price block ("400.00 Rs/kg/ 40,000 Rs").
+_PER_KG = re.compile(r"([0-9][0-9.,]*\s*[A-Za-z]{1,5}\s*/\s*kg)", re.IGNORECASE)
+
+
+def per_kg_of(record: WebCargoRateRecord) -> str:
+    """The per-kg rate WebCargo printed, verbatim, or "" if it printed none."""
+    for text in (record.rate, record.price):
+        match = _PER_KG.search(text)
+        if match:
+            return re.sub(r"\s*/\s*", "/", match.group(1).strip())
+    return ""
+
+
+def departure_time_of(departure: str) -> str:
+    """The departure's time of day as WebCargo printed it, or "" if it shows none."""
+    match = _DEPARTURE_TIME.search(departure.strip())
+    return match.group(1) if match else ""
+
+
 #: A leading airline designator inside the service name: "QR General",
 #: "TK URGENT". Two characters, letters/digits, as IATA prints them.
 _SERVICE_CODE = re.compile(r"^([A-Z][A-Z0-9]|[0-9][A-Z])\s+\S")
@@ -125,6 +150,9 @@ def map_record(record: WebCargoRateRecord, index: int = 0) -> Rate:
         source_ref=f"{ADAPTER_ID}:{record.date_tab}:{record.service.strip()}"
         f":{record.departure.strip()}#{index}",
         departure_date_label=record.date_tab.strip(),
+        departure_time_label=departure_time_of(record.departure),
+        arrival_label=record.arrival.strip(),
+        rate_per_kg_label=per_kg_of(record),
     )
 
 

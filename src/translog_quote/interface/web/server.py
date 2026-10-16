@@ -178,6 +178,10 @@ def _live_decide(session: LiveSession | MultiAccountSession, body: dict[str, obj
         # One specific eligible rate from the "other rates" column, by its
         # source_ref. The session refuses anything not in the search's eligible set.
         rate_ref=_str_or_none(body.get("rate_ref")),
+        # Optional, plain text, bounded by the session: a note to the client sent
+        # with the quotation, and an internal note for the approver email/audit.
+        client_note=_str_or_none(body.get("client_note")),
+        internal_note=_str_or_none(body.get("internal_note")),
     )
 
 
@@ -226,6 +230,12 @@ _LIVE_ACTIONS: dict[
     "goods-type/decide": _live_decide_goods_type,
     "manual-review/resolve": _live_resolve_manual_review,
 }
+
+
+#: Read-only live POST routes: they compose and return something and change
+#: nothing (no audit, no state, no email). Kept apart from `_LIVE_ACTIONS` so the
+#: list of things that *do* something stays exactly the human gates.
+_LIVE_READS: frozenset[str] = frozenset({"quotation/preview"})
 
 
 _SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
@@ -603,7 +613,11 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "forbidden"}, status=403)
             return
         if path.startswith("/api/live/"):
-            self._do_live_post(path.removeprefix("/api/live/"))
+            name = path.removeprefix("/api/live/")
+            if name in _LIVE_READS:
+                self._do_live_preview()
+            else:
+                self._do_live_post(name)
             return
 
         prefix = "/api/action/"
@@ -722,6 +736,42 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             # page reports that the server did not respond — which is both
             # wrong and unactionable. The class name is safe and says enough.
             _log.exception("Unhandled failure in live action %s", name)
+            self._send_json({"error": type(exc).__name__}, status=500)
+
+    def _do_live_preview(self) -> None:
+        """The client email APPROVE would send for the given choice and note.
+
+        Read-only: it composes text with the same code that sends, and changes
+        nothing. Authenticated and cross-site-guarded like every live POST (the
+        caller already checked both). A POST rather than a GET only so the note
+        travels in the body, never in a URL.
+        """
+        live = self._demo.live
+        if live is None:
+            self._send_json({"error": "not found"}, status=404)
+            return
+        try:
+            body = self._read_json()
+        except ValueError:
+            self._send_json({"error": "request body must be a JSON object"}, status=400)
+            return
+        request_id = _str_or_none(body.get("request_id"))
+        if request_id is None:
+            self._send_json({"error": "A preview must name the request it is for."}, status=409)
+            return
+        try:
+            with self._demo.lock:
+                preview = live.preview_quotation(
+                    request_id,
+                    option=_str_or_none(body.get("option")),
+                    rate_ref=_str_or_none(body.get("rate_ref")),
+                    client_note=_str_or_none(body.get("client_note")),
+                )
+            self._send_json({**preview})
+        except LiveSequenceError as exc:
+            self._send_json({"error": str(exc)}, status=409)
+        except Exception as exc:  # noqa: BLE001 - the boundary of the process
+            _log.exception("Unhandled failure in quotation preview")
             self._send_json({"error": type(exc).__name__}, status=500)
 
     def _read_json(self) -> dict[str, object]:

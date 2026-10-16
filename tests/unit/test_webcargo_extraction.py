@@ -1587,3 +1587,26 @@ def test_no_count_is_returned_unchanged_for_the_caller_to_refuse() -> None:
         )
         is None
     )
+
+
+# --- departure time: the provider's own clock, or nothing -----------------------
+
+
+@pytest.mark.parametrize(
+    ("departure", "time"),
+    [
+        ("Wed 28 Oct - 03:45", "03:45"),
+        ("Wed 28 Oct - 09:55", "09:55"),
+        ("Fri 30 Oct - 7:50", "7:50"),
+        ("Wed 28 Oct", ""),
+        ("", ""),
+        ("Wed 28 Oct - soon", ""),
+    ],
+)
+def test_the_departure_time_is_the_time_webcargo_printed_or_nothing(
+    departure: str, time: str
+) -> None:
+    rate = map_record(record(departure=departure))
+
+    assert rate.departure_time_label == time
+    assert rate.departure_date_label == "15/09/2026"  # the date tab, unchanged

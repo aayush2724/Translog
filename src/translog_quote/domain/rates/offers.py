@@ -43,8 +43,10 @@ if TYPE_CHECKING:
     from translog_quote.domain.rates.model import Rate
     from translog_quote.domain.rates.options import RateOptions
 
-#: How many offers the "Other rates" column lists.
-OTHER_OFFERS_LIMIT = 8
+#: How many offers the "Other rates" column receives. Generous on purpose: the
+#: dashboard groups offers of one airline at one price into a single card and
+#: caps the column by *cards*, so a family must never be cut part-way here.
+OTHER_OFFERS_LIMIT = 24
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,16 +65,23 @@ class Offer:
 
     @property
     def also_departs(self) -> tuple[str, ...]:
-        """The other dates this offer departs, each once, never the card's own
-        date (a second flight that day adds no date to show)."""
-        seen = {self.rate.departure_date_label}
-        days: list[str] = []
+        """The offer's other departures, each once, never the card's own: the
+        date and, when the provider stated it, the time ("29/10/2026 03:45"),
+        so a second flight the same day is listed by its time."""
+        seen = {departure_label(self.rate)}
+        departures: list[str] = []
         for rate in self.also:
-            label = rate.departure_date_label
+            label = departure_label(rate)
             if label and label not in seen:
                 seen.add(label)
-                days.append(label)
-        return tuple(days)
+                departures.append(label)
+        return tuple(departures)
+
+
+def departure_label(rate: Rate) -> str:
+    """ "28/10/2026 03:45" — the provider's date and time as stated, either part
+    omitted when it was not stated."""
+    return " ".join(part for part in (rate.departure_date_label, rate.departure_time_label) if part)
 
 
 def _offer_key(rate: Rate) -> tuple[object, ...]:
@@ -109,9 +118,17 @@ def group_offers(eligible: tuple[Rate, ...]) -> list[list[Rate]]:
 
 
 def _by_departure(rates: list[Rate]) -> list[Rate]:
-    """Earliest departure first; unparseable dates keep their order, after."""
+    """Earliest departure first — date, then the stated time where there is
+    one — else the provider's order; unparseable dates go last."""
     dated = [(i, rate, _departure(rate)) for i, rate in enumerate(rates)]
-    dated.sort(key=lambda item: (item[2] is None, item[2] or date.min, item[0]))
+    dated.sort(
+        key=lambda item: (
+            item[2] is None,
+            item[2] or date.min,
+            item[1].departure_time_label.zfill(5) or "99:99",
+            item[0],
+        )
+    )
     return [rate for _, rate, _ in dated]
 
 

@@ -22,6 +22,7 @@ from translog_quote.domain.quotation.decide import (
     decision_from_choice,
 )
 from translog_quote.domain.quotation.model import (
+    NOTE_MAX_CHARS,
     ApprovalDecision,
     Approved,
     Quotation,
@@ -30,6 +31,7 @@ from translog_quote.domain.quotation.model import (
 )
 
 __all__ = [
+    "NOTE_MAX_CHARS",
     "IncompatibleService",
     "APPROVE",
     "DECLINE",

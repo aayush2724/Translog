@@ -168,6 +168,8 @@ def test_decide_routes_to_the_owning_account(
             reason: str = "",
             option: str | None = None,
             rate_ref: str | None = None,
+            client_note: str | None = None,
+            internal_note: str | None = None,
             _a: str = account_id,
         ) -> object:
             calls["decide"] = (_a, request_id, option, rate_ref)

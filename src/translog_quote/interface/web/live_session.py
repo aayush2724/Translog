@@ -42,6 +42,7 @@ from translog_quote.config import WebCargoMode
 from translog_quote.domain.clarification import UnresolvedPlace
 from translog_quote.domain.quotation import (
     INTERNAL_SUBJECT_PREFIX,
+    NOTE_MAX_CHARS,
     Approved,
     ReviewPacket,
     decision_from_choice,
@@ -827,6 +828,8 @@ class LiveSession:
         reason: str = "",
         option: str | None = None,
         rate_ref: str | None = None,
+        client_note: str | None = None,
+        internal_note: str | None = None,
     ) -> LiveRequest:
         """Apply one explicit human decision to the quotation gate.
 
@@ -848,6 +851,12 @@ class LiveSession:
         exactly one *eligible* rate of this request's search, so an excluded
         rate can never be quoted this way. It is refused alongside a
         ``fastest``/``cheapest`` option, since the two would disagree.
+
+        ``client_note`` is the approving person's optional message to the
+        client, sent in the quotation after the figures exactly as typed;
+        ``internal_note`` reaches only the approver email and the audit. Both are
+        plain text up to `NOTE_MAX_CHARS`; longer is refused before anything is
+        recorded. A decline sends nothing, so it ignores both.
         """
         request = self.requests.get(request_id)
         if request is None:
@@ -860,10 +869,27 @@ class LiveSession:
             )
 
         chosen = self._chosen_option(request, option, rate_ref)
+        to_client, internal = _checked_note(client_note), _checked_note(internal_note)
         decision = decision_from_choice(choice, by=by, at=self._clock.now(), reason=reason)
         packet = request.packet
         if isinstance(decision, Approved):
             packet, chosen = self._packet_for_option(request, chosen, rate_ref)
+            packet = packet.model_copy(update={"client_note": to_client, "internal_note": internal})
+            if to_client or internal:
+                from translog_quote.pipeline.audit import AuditEvent, AuditEventType
+
+                self.audit.record(
+                    AuditEvent(
+                        request_id=request.request_id,
+                        event=AuditEventType.QUOTATION_NOTE,
+                        at=self._clock.now(),
+                        detail={
+                            "by": decision.by,
+                            "client_note": to_client,
+                            "internal_note": internal,
+                        },
+                    )
+                )
         self._gate.record(decision)
         outcome = self._quotation.run(
             packet,
@@ -881,6 +907,43 @@ class LiveSession:
         self._mark_settled(request)
         bootstrap.commit_request(self._working, self._durable, request_id)
         return request
+
+    def preview_quotation(
+        self,
+        request_id: str,
+        *,
+        option: str | None = None,
+        rate_ref: str | None = None,
+        client_note: str | None = None,
+    ) -> dict[str, str]:
+        """The client email APPROVE would send for this choice and note, composed
+        by the same code that sends it — and nothing else: no audit, no state
+        change, no email. Refused exactly where APPROVE would be refused (an
+        unknown option, an ineligible rate, a note too long)."""
+        from translog_quote.domain.quotation import (
+            compose_quotation_body,
+            compose_quotation_subject,
+        )
+
+        request = self.requests.get(request_id)
+        if request is None:
+            raise LiveSequenceError(f"There is no request {request_id}.")
+        if request.packet is None or request.decision is not None:
+            raise LiveSequenceError("There is no quotation awaiting a decision on this request.")
+        chosen = self._chosen_option(request, option, rate_ref)
+        packet, _ = self._packet_for_option(request, chosen, rate_ref, record=False)
+        body = compose_quotation_body(
+            packet.record,
+            packet.selection,
+            reference=packet.request_id,
+            is_simulated=request.rates.uses_mock_data if request.rates else True,
+            note=_checked_note(client_note),
+        )
+        return {
+            "to": request.client_address,
+            "subject": compose_quotation_subject(packet.record, reference=packet.request_id),
+            "body": body,
+        }
 
     @staticmethod
     def _chosen_option(
@@ -932,7 +995,12 @@ class LiveSession:
         )
 
     def _packet_for_option(
-        self, request: LiveRequest, chosen: RateStrategy, rate_ref: str | None = None
+        self,
+        request: LiveRequest,
+        chosen: RateStrategy,
+        rate_ref: str | None = None,
+        *,
+        record: bool = True,
     ) -> tuple[ReviewPacket, RateStrategy]:
         """The approval packet rebuilt around the chosen option's selection,
         and the option it really is.
@@ -941,7 +1009,8 @@ class LiveSession:
         "other" rate is looked up in that set too, so the swap can never reach
         an ineligible rate. A specific rate that turns out to be the fastest or
         the cheapest is recorded as that option. Audited, so the trail shows
-        which rate the person approved and what it beat on.
+        which rate the person approved and what it beat on — unless ``record``
+        is False (the email preview), which must leave no trace.
         """
         packet = request.packet
         assert packet is not None  # noqa: S101 - decide() checked it
@@ -971,27 +1040,28 @@ class LiveSession:
             raise LiveSequenceError(f"The cheapest rate cannot be quoted: {unavailable}.")
         from translog_quote.pipeline.audit import AuditEvent, AuditEventType
 
-        self.audit.record(
-            AuditEvent(
-                request_id=request.request_id,
-                event=AuditEventType.RATE_OPTION_CHOSEN,
-                at=self._clock.now(),
-                detail={
-                    "option": chosen.value,
-                    "rate_ref": selection.rate.source_ref,
-                    "recommended": request.recommended_option.value,
-                    "client_preference": request.rate_preference.value
-                    if request.rate_preference
-                    else None,
-                    "carrier": selection.rate.carrier_code,
-                    "total": str(selection.rate.total_amount),
-                    "currency": selection.rate.currency,
-                    "transit_minutes": selection.rate.transit.minutes
-                    if selection.rate.transit
-                    else None,
-                },
+        if record:
+            self.audit.record(
+                AuditEvent(
+                    request_id=request.request_id,
+                    event=AuditEventType.RATE_OPTION_CHOSEN,
+                    at=self._clock.now(),
+                    detail={
+                        "option": chosen.value,
+                        "rate_ref": selection.rate.source_ref,
+                        "recommended": request.recommended_option.value,
+                        "client_preference": request.rate_preference.value
+                        if request.rate_preference
+                        else None,
+                        "carrier": selection.rate.carrier_code,
+                        "total": str(selection.rate.total_amount),
+                        "currency": selection.rate.currency,
+                        "transit_minutes": selection.rate.transit.minutes
+                        if selection.rate.transit
+                        else None,
+                    },
+                )
             )
-        )
         updated = packet.model_copy(
             update={
                 "selection": selection,
@@ -2369,6 +2439,17 @@ class LiveSession:
             and stored.state is not RequestState.MANUAL_REVIEW,
             restored=True,
         )
+
+
+def _checked_note(note: str | None) -> str:
+    """A note as it will be stored and sent: trimmed, plain text, or refused
+    when longer than `NOTE_MAX_CHARS` — never shortened silently."""
+    text = (note or "").replace("\r\n", "\n").strip()
+    if len(text) > NOTE_MAX_CHARS:
+        raise LiveSequenceError(
+            f"A note can be at most {NOTE_MAX_CHARS} characters; this one is {len(text)}."
+        )
+    return text
 
 
 _CLASS_PREFIX = re.compile(r"^[A-Za-z][A-Za-z0-9_]*: ")

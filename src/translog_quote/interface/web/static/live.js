@@ -22,6 +22,13 @@ const ui = {
      approval card, by reference. Kept here because the card is rebuilt on every
      refresh; absent means the server's recommended option. */
   rateOption: {},
+  /* Per card (by reference): the optional notes being written, the last email
+     preview fetched, and which airline-and-price families are expanded. Kept on
+     `ui` because every refresh rebuilds the card. */
+  clientNote: {},
+  internalNote: {},
+  preview: {},
+  expandedFamilies: {},
   busy: false,
   busyLabel: null,
   refreshing: false,
@@ -188,7 +195,12 @@ function approverField(...dependents) {
     type: "text",
     value: ui.approver,
     placeholder: "Your name, for the record",
-    onFocus: () => { ui.editing = true; },
+    /* Selecting the remembered name on focus means typing replaces it rather
+       than appending to it (a live test recorded "Claude testClaude test"). */
+    onFocus: (event) => {
+      ui.editing = true;
+      if (event && event.target && typeof event.target.select === "function") event.target.select();
+    },
     onBlur: () => { ui.editing = false; resyncFromDom(); },
     onInput: (event) => {
       ui.approver = event.target.value;
@@ -850,7 +862,10 @@ function sectionRates(detail) {
   const handedOver = Boolean(detail.status && detail.status.state === "manual_review");
   return card(
     [el("h2", null, "Rate search & selection"), pill(rates.simulated ? "SIMULATED" : "LIVE PROVIDER", rates.simulated ? "amber" : "green")],
-    simBanner(rates),
+    /* The SIMULATED banner is shown once, on the approval card where the
+       decision is made; here the pill says it. Without an approval card (no
+       eligible rate) the banner stays, as nothing else would say it. */
+    detail.approval ? null : simBanner(rates),
     /* The search itself, presented as the search it is. */
     el("div", { class: "search-strip" },
       el("span", { class: "search-leg" },
@@ -861,19 +876,14 @@ function sectionRates(detail) {
       el("span", { class: "search-meta" }, rates.query.date),
       el("span", { class: "search-meta muted" },
         `${rates.returned} returned · ${rates.eligible_count} eligible`)),
-    el("p", { class: "strategy-note" }, rates.strategy),
-    /* Every eligible rate as a comparison card, the selected one leading.
-       Identity is source_ref, not carrier_code: the winning carrier can return
-       several rates, and matching on the code alone marked every one of them
-       SELECTED and pinned the winner's reason to all of them. */
+    /* No list of every rate here any more: the approval card's three columns
+       (Cheapest | Fastest | Other rates) are the one place rates are compared
+       and chosen, so the same rates are not listed twice. */
     selection
-      ? el("div", { class: "rate-board" },
-          ...[...rates.eligible]
-            .sort((a, b) => boardRank(a, rates) - boardRank(b, rates))
-            .map((rate) => rateCard(
-              rate,
-              rate.source_ref === selection.source_ref ? selection : null,
-              boardTag(rate, rates))))
+      ? el("p", { class: "strategy-note" },
+          detail.approval && !detail.decision
+            ? "Choose the rate to quote below: the cheapest, the fastest, or another eligible rate."
+            : "The rate quoted is shown under Final quotation.")
       : el("p", { class: "muted" }, "No eligible rate — nothing will be quoted."),
     rates.excluded.length
       ? el("details", {
@@ -903,8 +913,6 @@ function carrierAvatar(code, dim) {
   return el("span", { class: `carrier-avatar hue-${hue}${dim ? " avatar-dim" : ""}`, "aria-hidden": "true" }, code);
 }
 
-/* One rate as a marketplace-style comparison card. `chosen` is the selection
-   payload when this rate is the selected one, else null. */
 /* What an excluded rate actually offered, from the fields the rate already
    carries: service, departure date tab, transit and price. A missing value is
    shown as absent, never guessed. */
@@ -916,39 +924,6 @@ function excludedRateFacts(row) {
     `⏱ ${row.transit || "—"}`,
     price,
   ].filter(Boolean).join(" · ");
-}
-
-/* Fastest first, then the cheapest, then the rest in the order received. */
-function boardRank(rate, rates) {
-  if (rate.source_ref === rates.selection.source_ref) return 0;
-  if (rate.source_ref === rates.cheapest_ref) return 1;
-  return 2;
-}
-
-/* Which of the two options a rate is, if either. The approval card is where
-   the operator chooses; the board only marks the candidates. */
-function boardTag(rate, rates) {
-  if (rate.source_ref === rates.selection.source_ref) {
-    return rates.fastest_is_cheapest ? "FASTEST · CHEAPEST" : "FASTEST";
-  }
-  if (rate.source_ref === rates.cheapest_ref) return "CHEAPEST";
-  return null;
-}
-
-function rateCard(rate, chosen, tag) {
-  return el("div", { class: `rate-card${tag ? " rate-selected" : ""}` },
-    tag ? el("span", { class: "rate-ribbon" }, tag) : null,
-    el("div", { class: "rate-main" },
-      carrierAvatar(rate.carrier_code, false),
-      el("div", { class: "rate-carrier" },
-        el("span", { class: "rate-name" }, rate.carrier_name),
-        el("span", { class: "rate-product" }, rate.product))),
-    el("div", { class: "rate-mid" },
-      el("span", { class: "transit-chip" }, `⏱ ${rate.transit || "—"}`),
-      chosen ? el("span", { class: "rate-why" }, chosen.reason) : null),
-    el("div", { class: "rate-price" },
-      el("span", { class: "price-amount" }, rate.amount || "—"),
-      rate.currency ? el("span", { class: "price-currency" }, rate.currency) : null));
 }
 
 function sectionManualReview(detail) {
@@ -1052,6 +1027,7 @@ function sectionApproval(detail) {
                 el("ul", { class: "issue-list" },
                   ...approval.excluded.map((row) => el("li", null, `${row.carrier_name} — ${row.detail}`))))
             : null)),
+      approval.options && approval.options.length ? notesSection(approval) : null,
       decisionRow(approval),
       el("p", { class: "action-note" }, "A name is required for either choice. There is no default and no timeout: if nobody decides, nothing is sent."))
   );
@@ -1072,6 +1048,8 @@ function sectionQuotation(detail) {
         ? `${decision.quoted_option ? `${decision.quoted_option[0].toUpperCase()}${decision.quoted_option.slice(1)}: ` : ""}${decision.quoted_rate}`
         : "—"],
       ["Email to client", decision.sent ? "Sent" : "Not sent"],
+      ["Note to client", decision.client_note || "—"],
+      ["Internal note", decision.internal_note || "—"],
     ])
   );
 }
@@ -1083,6 +1061,35 @@ function sectionQuotation(detail) {
    them and works out which one is recommended and which one is selected, so the
    drawing code below has no decisions in it. Choosing changes only what APPROVE
    sends; nothing is sent until a named person approves. */
+
+/* A price as people read it: "Rs 20,992" (Indian digit grouping for rupees),
+   "USD 1,250.50". Only the display changes — the figure and its decimals are
+   the provider's; anything unrecognised is shown exactly as given. */
+function formatPrice(text) {
+  const m = /^\s*([0-9]+)(\.[0-9]+)?\s+([A-Za-z]{1,5})\s*$/.exec(text || "");
+  if (!m) return text || "—";
+  const rupees = /^(rs|inr)$/i.test(m[3]);
+  const whole = Number(m[1]).toLocaleString(rupees ? "en-IN" : "en-US");
+  return `${rupees ? "Rs" : m[3]} ${whole}${m[2] || ""}`;
+}
+
+/* WebCargo's arrival as it printed it, minus the " - " separator. */
+function arrivalText(rate) {
+  return rate.arrival ? String(rate.arrival).replace(/\s+-\s+/, " ") : null;
+}
+
+/* When a rate departs, as the provider stated it: date and time of day. The
+   time tells same-fare flights on one day apart (Qatar 03:45 vs 09:55); a part
+   the provider did not state is left out, never guessed. */
+function departsPlain(rate) {
+  return [rate.departure_date, rate.departure_time].filter(Boolean).join(" ") || "not stated";
+}
+
+function departsText(rate) {
+  return el("span", null,
+    el("span", { class: "nowrap" }, rate.departure_date || "Not stated"),
+    rate.departure_time ? [" ", el("strong", { class: "nowrap" }, rate.departure_time)] : null);
+}
 
 /* A selection key: "fastest", "cheapest", or "rate:<source_ref>" for an other rate. */
 const RATE_KEY_PREFIX = "rate:";
@@ -1133,7 +1140,13 @@ function choiceLabel(choices) {
     : choices.others.find((other) => other.key === choices.selected);
   const kind = choices.selected === "fastest" ? (choices.shared ? "fastest and cheapest" : "fastest")
     : choices.selected === "cheapest" ? "cheapest" : "other rate";
-  return rate ? `${kind}: ${rate.carrier}, ${rate.price}` : kind;
+  if (!rate) return kind;
+  /* An other rate can share its airline and price with several variants, so
+     the label also names what makes this one different. */
+  const variant = kind === "other rate"
+    ? ` (${rate.service || "—"}, ${rate.transit || "—"}, departs ${departsPlain(rate)})`
+    : "";
+  return `${kind}: ${rate.carrier}, ${formatPrice(rate.price)}${variant}`;
 }
 
 /* The current choices for a card, from the operator's pick (kept on `ui`
@@ -1166,11 +1179,14 @@ function rateChoiceCard(approval, choices, key, rate, badges, extra) {
       ...badges.map((badge) => el("span", { class: "rate-choice-label" }, badge)),
       recommended ? el("span", { class: "rate-choice-flag flag-recommended" }, "RECOMMENDED") : null,
       selected ? el("span", { class: "rate-choice-flag flag-selected" }, "SELECTED") : null),
-    el("div", { class: "rate-choice-price" }, rate.price),
+    el("div", { class: "rate-choice-price" }, formatPrice(rate.price)),
+    rate.per_kg ? el("div", { class: "rate-choice-perkg muted small" }, rate.per_kg) : null,
     el("dl", { class: "rate-choice-facts" },
       el("dt", null, "Airline"), el("dd", null, rate.carrier),
       el("dt", null, "Transit"), el("dd", null, rate.transit || "—"),
-      el("dt", null, "Departs"), el("dd", null, el("span", { class: "nowrap" }, rate.departure_date || "Not stated")),
+      el("dt", null, "Departs"), el("dd", null, departsText(rate)),
+      arrivalText(rate) ? el("dt", null, "Arrives") : null,
+      arrivalText(rate) ? el("dd", null, arrivalText(rate)) : null,
       el("dt", null, "Service"), el("dd", null, rate.service || "—")),
     /* The same offer on other days: one card, its other dates listed here.
        Selecting the card quotes the departure shown above. */
@@ -1179,6 +1195,189 @@ function rateChoiceCard(approval, choices, key, rate, badges, extra) {
           ...rate.also_departs.map((day, i) => [i ? ", " : "", el("span", { class: "nowrap" }, day)]))
       : null,
     extra || null);
+}
+
+/* Other rates from the same airline at the same price, as one family. WebCargo
+   offers the same fare several ways — another service ("First" vs "General
+   Cargo") or another departure date with a longer connection — and as separate
+   cards they read as one result repeated. Grouped, the card states the airline
+   and price once and lists each variant by exactly what differs. Families keep
+   the server's order (trade-offs first, then by price); variants within one are
+   fastest first. Departure *time* is not available, so it is never shown. */
+/* How many cards (airline-and-price families) the Other rates column shows. */
+const OTHER_RATE_CARDS = 6;
+
+function otherRateFamilies(others) {
+  const families = [];
+  const byFare = {};
+  others.forEach((rate) => {
+    const fare = `${rate.carrier}|${rate.price}`;
+    if (!byFare[fare]) {
+      byFare[fare] = { carrier: rate.carrier, price: rate.price, variants: [] };
+      families.push(byFare[fare]);
+    }
+    byFare[fare].variants.push(rate);
+  });
+  const minutes = (transit) => {
+    const m = /^(?:(\d+)h)?\s*(?:(\d+)m)?/.exec(transit || "");
+    return m && (m[1] || m[2]) ? Number(m[1] || 0) * 60 + Number(m[2] || 0) : Number.MAX_SAFE_INTEGER;
+  };
+  families.forEach((family) => family.variants.sort((a, b) => minutes(a.transit) - minutes(b.transit)));
+  return families;
+}
+
+/* One airline-and-price family: the shared facts once, then one selectable row
+   per variant showing its service, transit and departure. Selecting a row quotes
+   exactly that rate (its own rate_ref), as a single card would. */
+function rateFamilyCard(approval, choices, family) {
+  const selectedHere = family.variants.some((rate) => rate.key === choices.selected);
+  return el("div", { class: `rate-family${selectedHere ? " rate-family-selected" : ""}` },
+    el("div", { class: "rate-choice-head" },
+      el("span", { class: "rate-choice-label" }, "OTHER"),
+      selectedHere ? el("span", { class: "rate-choice-flag flag-selected" }, "SELECTED") : null),
+    el("div", { class: "rate-choice-price" }, formatPrice(family.price)),
+    family.variants[0].per_kg
+      ? el("div", { class: "rate-choice-perkg muted small" }, family.variants[0].per_kg)
+      : null,
+    el("div", { class: "rate-family-airline" }, family.carrier),
+    el("p", { class: "rate-family-note muted small" },
+      `${family.variants.length} options at this price — they differ by service, transit or departure date.`),
+    el("div", { class: "rate-variants" },
+      ...shownVariants(approval, choices, family).map((rate) => {
+        const selected = choices.selected === rate.key;
+        const input = el("input", {
+          type: "radio",
+          name: `rate-choice-${approval.reference}`,
+          value: rate.key,
+          "aria-label": `${rate.carrier}, ${rate.price}, ${rate.service}, ${rate.transit}, departs ${departsPlain(rate)}`,
+        });
+        input.checked = selected;
+        input.addEventListener("change", () => {
+          ui.rateOption[approval.reference] = rate.key;
+          render();
+        });
+        return el("label", { class: `rate-variant${selected ? " rate-variant-selected" : ""}`, "data-key": rate.key },
+          input,
+          el("span", { class: "rate-variant-facts" },
+            el("span", { class: "rate-variant-service" }, rate.service || "—"),
+            el("span", { class: "rate-variant-detail" }, `⏱ ${rate.transit || "—"}`),
+            el("span", { class: "rate-variant-detail" },
+              "departs ", departsText(rate)),
+            arrivalText(rate)
+              ? el("span", { class: "rate-variant-detail muted" }, `arrives ${arrivalText(rate)}`)
+              : null,
+            (rate.also_departs || []).length
+              ? el("span", { class: "rate-variant-also muted small" }, `also ${rate.also_departs.join(", ")}`)
+              : null),
+          rate.tradeoff ? el("span", { class: "rate-choice-label" }, "TRADE-OFF") : null);
+      })),
+    variantToggle(approval, choices, family));
+}
+
+/* How many variants a family shows before "Show N more". */
+const VARIANTS_SHOWN = 3;
+
+function familyKey(approval, family) {
+  return `${approval.reference}|${family.carrier}|${family.price}`;
+}
+
+/* The variants on screen: the first few, all when expanded, and always all when
+   the selected rate is one of the hidden ones (a selection is never hidden). */
+function shownVariants(approval, choices, family) {
+  const all = family.variants;
+  const selectedAt = all.findIndex((rate) => rate.key === choices.selected);
+  if (ui.expandedFamilies[familyKey(approval, family)] || selectedAt >= VARIANTS_SHOWN) return all;
+  return all.slice(0, VARIANTS_SHOWN);
+}
+
+function variantToggle(approval, choices, family) {
+  const hidden = family.variants.length - shownVariants(approval, choices, family).length;
+  const key = familyKey(approval, family);
+  if (hidden <= 0 && !ui.expandedFamilies[key]) return null;
+  return el("button", {
+    type: "button",
+    class: "variant-toggle",
+    onClick: () => { ui.expandedFamilies[key] = !ui.expandedFamilies[key]; render(); },
+  }, hidden > 0 ? `Show ${hidden} more` : "Show fewer");
+}
+
+/* --- notes and the client email preview -------------------------------------
+   Two optional notes, written by the approving person: one to the client, sent
+   in the quotation after the figures exactly as typed; one internal, for the
+   approver email and the audit only. The preview asks the server to compose the
+   client email with the same code that sends it, and changes nothing. */
+
+function noteField(approval, store, label, hint) {
+  const max = approval.note_max_chars || 1000;
+  const counter = el("span", { class: "note-count muted small" },
+    `${(store[approval.reference] || "").length}/${max}`);
+  const area = el("textarea", {
+    class: "note-input",
+    rows: "3",
+    maxlength: String(max),
+    placeholder: hint,
+    "aria-label": label,
+    onFocus: () => { ui.editing = true; },
+    onBlur: () => { ui.editing = false; },
+    onInput: (event) => {
+      store[approval.reference] = event.target.value;
+      counter.textContent = `${event.target.value.length}/${max}`;
+    },
+  });
+  area.value = store[approval.reference] || "";
+  return el("label", { class: "note-field" }, el("span", { class: "note-label" }, label), area, counter);
+}
+
+function notesSection(approval) {
+  return el("div", { class: "notes-section" },
+    el("h3", null, "Notes (optional)"),
+    noteField(approval, ui.clientNote, "Note to the client — sent with the quotation, after the figures",
+      "e.g. Space is limited on this departure; please confirm by Friday."),
+    noteField(approval, ui.internalNote, "Internal note — approver email and audit only, never sent",
+      "e.g. Client prefers Finnair; checked with ops."),
+    previewPanel(approval));
+}
+
+async function fetchPreview(approval) {
+  const choices = currentChoices(approval);
+  const note = ui.clientNote[approval.reference] || "";
+  const entry = { key: choices.selected, note, loading: true };
+  ui.preview[approval.reference] = entry;
+  render();
+  try {
+    const response = await fetch("/api/live/quotation/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.assign(
+        { request_id: ui.selected, client_note: note }, choiceBody(choices.selected))),
+    });
+    if (response.status === 401) { window.location.assign("/login"); return; }
+    const payload = await response.json();
+    Object.assign(entry, payload.error ? { error: payload.error } : payload, { loading: false });
+  } catch (err) {
+    Object.assign(entry, { error: "The preview could not be loaded.", loading: false });
+  }
+  render();
+}
+
+function previewPanel(approval) {
+  const entry = ui.preview[approval.reference];
+  const show = button(entry ? "Refresh the client email preview" : "Preview the client email", "secondary",
+    () => fetchPreview(approval), false);
+  if (!entry) return el("div", { class: "preview-panel" }, show);
+  const stale = entry.key !== currentChoices(approval).selected
+    || entry.note !== (ui.clientNote[approval.reference] || "");
+  return el("div", { class: "preview-panel" },
+    el("div", { class: "preview-actions" }, show,
+      button("Hide preview", "secondary", () => { delete ui.preview[approval.reference]; render(); }, false)),
+    entry.loading ? el("p", { class: "muted small" }, "Composing the email…")
+      : entry.error ? el("p", { class: "preview-error" }, entry.error)
+      : el("div", { class: "email-preview" },
+          stale ? el("p", { class: "preview-stale" },
+            "The rate or the note changed since this preview — refresh it to see what will be sent.") : null,
+          el("p", { class: "email-preview-head small" }, `To: ${entry.to}`),
+          el("p", { class: "email-preview-head small" }, `Subject: ${entry.subject}`),
+          el("pre", { class: "email-preview-body" }, entry.body)));
 }
 
 /* The three columns. A rate that is both fastest and cheapest is shown once,
@@ -1221,14 +1420,19 @@ function rateComparison(approval) {
           rateChoiceCard(approval, choices, "fastest", choices.fastest, ["FASTEST"], why(choices.fastest))),
       ];
 
-  const more = choices.othersTotal > choices.others.length
-    ? el("p", { class: "muted small" }, `Showing ${choices.others.length} of ${choices.othersTotal} other eligible rates.`)
+  const families = otherRateFamilies(choices.others).slice(0, OTHER_RATE_CARDS);
+  const shownRates = families.reduce((n, family) => n + family.variants.length, 0);
+  const more = choices.othersTotal > shownRates
+    ? el("p", { class: "muted small" }, `Showing ${shownRates} of ${choices.othersTotal} other eligible rates.`)
     : null;
   const others = column("Other rates", "rate-col-others",
     choices.others.length
       ? el("div", { class: "rate-col-list" },
-          ...choices.others.map((rate) =>
-            rateChoiceCard(approval, choices, rate.key, rate, [rate.tradeoff ? "TRADE-OFF" : "OTHER"])))
+          ...families.map((family) =>
+            family.variants.length === 1
+              ? rateChoiceCard(approval, choices, family.variants[0].key, family.variants[0],
+                  [family.variants[0].tradeoff ? "TRADE-OFF" : "OTHER"])
+              : rateFamilyCard(approval, choices, family)))
       : el("div", { class: "rate-col-empty" },
           el("p", { class: "muted small" }, "No other eligible rates in this search.")),
     more);
@@ -1249,7 +1453,13 @@ function decisionRow(approval) {
   const label = choices ? `APPROVE — send ${choiceLabel(choices)}` : "APPROVE — send quotation";
   const approve = button(label, "approve",
     () => post("quotation/decide",
-      Object.assign({ decision: "approve", by: ui.approver }, choices ? choiceBody(choices.selected) : {}),
+      Object.assign(
+        { decision: "approve", by: ui.approver },
+        choices ? choiceBody(choices.selected) : {},
+        approval ? {
+          client_note: ui.clientNote[approval.reference] || "",
+          internal_note: ui.internalNote[approval.reference] || "",
+        } : {}),
       "Sending quotation…"),
     !canDecide());
   const decline = button("DECLINE — send nothing", "decline",
