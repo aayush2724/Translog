@@ -249,7 +249,13 @@ async () => {
 #: its own.
 _JS_RESULTS_STATE = """
 () => {
-  const texts = [...document.querySelectorAll('div,span,p')].map(e => e.textContent || '');
+  // Text inside an AntD select dropdown is never the results surface: the
+  // location lookup's disabled "No results found" placeholder stays in the DOM
+  // (hidden) after the search is submitted, and read as page text it marked a
+  // still-loading search as empty — a false "0 rates".
+  const texts = [...document.querySelectorAll('div,span,p')]
+    .filter(e => !(e.closest && e.closest('.ant-select-dropdown')))
+    .map(e => e.textContent || '');
   const short = (re) => texts.some(t => re.test(t) && t.length < 200);
   const anyCount = short(/Showing\\s+the\\s+\\d+\\s+lowest rates/)
     || short(/We found\\s+the\\s+\\d+\\s+(?:cheapest|lowest) rates/);
@@ -1016,6 +1022,10 @@ def run_rate_search(
         driver, timeout_seconds=search_timeout_seconds, poll_interval_seconds=poll_interval_seconds
     )
     if not settled:  # the provider's own "no rates" — a valid empty outcome
+        # Kept as evidence: a "0 rates" quote is a business outcome someone may
+        # question, and the page text (plus a screenshot where the driver can
+        # take one) is what shows it was WebCargo's answer and not ours.
+        _log.info("WebCargo stated no rates; evidence: %s", _results_evidence(driver))
         return WebCargoResultSet(stated_count=0, stated_phrase="", records=())
 
     # Full list first: its "Showing the N lowest rates" is the authoritative
@@ -1093,7 +1103,7 @@ def _bounded(value: object, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _settle_timeout_diagnostics(driver: BrowserDriver) -> str:
+def _results_evidence(driver: BrowserDriver) -> str:
     """Best-effort, bounded evidence for a results-settle timeout. Never raises.
 
     Called only on the ``_await_results`` timeout path. Every probe is guarded
@@ -1124,7 +1134,12 @@ def _settle_timeout_diagnostics(driver: BrowserDriver) -> str:
         else:
             parts.append(f"screenshot={_bounded(path, 300)}" if path else "screenshot=<none>")
 
-    summary = " | ".join(parts)
+    return " | ".join(parts)
+
+
+def _settle_timeout_diagnostics(driver: BrowserDriver) -> str:
+    """Bounded evidence for a results surface that never settled (logged)."""
+    summary = _results_evidence(driver)
     _log.warning("WebCargo results surface did not settle; diagnostics: %s", summary)
     return summary
 
@@ -1142,13 +1157,23 @@ def _await_results(
     never-reached-results vs genuine-empty vs a detection miss — instead of
     leaving only the opaque state flags."""
     deadline = time.monotonic() + timeout_seconds
+    empty_seen = False
     while True:
         state = driver.evaluate(_JS_RESULTS_STATE)
         if isinstance(state, dict) and state.get("onResults"):
             if state.get("settled"):
                 return True
+            # "No rates" must hold on two consecutive polls. A single sighting
+            # can be a transient page state in the moment between submitting
+            # the search and WebCargo showing its loading message; two live
+            # searches (BLR-SIN, BOM-SIN, 2026-10-16) returned "0 rates" about
+            # 10 s after submit while a rates-bearing search takes ~40 s.
             if state.get("empty"):
-                return False
+                if empty_seen:
+                    return False
+                empty_seen = True
+            else:
+                empty_seen = False
         if time.monotonic() >= deadline:
             raise ContractViolation(
                 f"the results surface did not settle within {timeout_seconds}s "

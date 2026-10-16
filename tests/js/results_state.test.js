@@ -35,9 +35,11 @@ const predicateSrc = match[1].replace(/\\\\/g, "\\");
 
 const HASH = "#ebookings/dynamic-results";
 
-function evalPredicate(texts, hash = HASH) {
+function evalPredicate(texts, hash = HASH, dropdownTexts = []) {
+  const elements = texts.map((t) => ({ textContent: t, closest: () => null }))
+    .concat(dropdownTexts.map((t) => ({ textContent: t, closest: () => ({}) })));
   const sandbox = {
-    document: { querySelectorAll: () => texts.map((t) => ({ textContent: t })) },
+    document: { querySelectorAll: () => elements },
     location: { hash },
   };
   vm.createContext(sandbox);
@@ -74,6 +76,12 @@ check("empty: 'No results found for your search criteria.'",
   evalPredicate(["No results found for your search criteria.",
     "We couldn't find any results for these airlines"]),
   { onResults: true, settled: false, loading: false, empty: true });
+
+// A hidden AntD dropdown still holding its "No results found" placeholder is
+// not the results surface: a search that has not loaded yet is NOT empty.
+check("not empty: lingering dropdown placeholder only",
+  evalPredicate(["BANGALORE, INDIA"], HASH, ["No results found"]),
+  { onResults: true, settled: false, empty: false });
 
 /* --- rates present must stay settled and NOT be marked empty ------------- */
 

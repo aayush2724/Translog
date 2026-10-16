@@ -1449,3 +1449,36 @@ def test_flight_legs_are_captured_as_audit_data() -> None:
     assert leg.aircraft == "35H"
     # ...and the rate's transit still came from the row, not from the legs:
     assert result.records[0].duration == "34h 00m"  # type: ignore[attr-defined]
+
+
+# --- "no rates" must be confirmed (2026-10-16 false "0 rates") -------------------
+
+
+class _SequencedResults:
+    """Answers the results-state script from a fixed sequence of states."""
+
+    def __init__(self, *states: dict[str, object]) -> None:
+        self._states = list(states)
+
+    def evaluate(self, script: str, argument: object = None) -> object:
+        return self._states.pop(0) if len(self._states) > 1 else self._states[0]
+
+
+_EMPTY = {"onResults": True, "settled": False, "loading": False, "empty": True}
+_LOADING = {"onResults": True, "settled": False, "loading": True, "empty": False}
+_SETTLED = {"onResults": True, "settled": True, "loading": False, "empty": False}
+
+
+def test_a_single_empty_sighting_does_not_end_the_wait() -> None:
+    driver = _SequencedResults(_EMPTY, _LOADING, _SETTLED)
+    assert pages._await_results(driver, timeout_seconds=5, poll_interval_seconds=0) is True  # type: ignore[arg-type]
+
+
+def test_two_consecutive_empty_sightings_are_a_genuine_empty() -> None:
+    driver = _SequencedResults(_EMPTY, _EMPTY)
+    assert pages._await_results(driver, timeout_seconds=5, poll_interval_seconds=0) is False  # type: ignore[arg-type]
+
+
+def test_an_interrupted_empty_must_be_seen_twice_again() -> None:
+    driver = _SequencedResults(_EMPTY, _LOADING, _EMPTY, _SETTLED)
+    assert pages._await_results(driver, timeout_seconds=5, poll_interval_seconds=0) is True  # type: ignore[arg-type]
