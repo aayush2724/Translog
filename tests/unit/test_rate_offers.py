@@ -374,3 +374,68 @@ def test_the_approval_payload_lists_other_dates_on_cards(
     assert [r["rate_ref"] for r in card["other_rates"]] == ["ref:EK"]  # type: ignore[attr-defined]
     assert card["other_rates"][0]["also_departs"] == ["23/09/2026"]  # type: ignore[index]
     assert card["other_rates_total"] == 1
+
+
+# --- departure times (WebCargo "Wed 28 Oct - 03:45") ------------------------------
+
+
+def _at(rate: Rate, time: str) -> Rate:
+    return rate.model_copy(update={"departure_time_label": time})
+
+
+def test_same_day_flights_are_listed_by_their_time() -> None:
+    """With the time known, the offer's other departures name it, so Qatar's
+    03:45 and 09:55 flights read as two departures, not one date twice."""
+    rows = (
+        _at(QR_28_AM, "03:45"),
+        _at(QR_28_PM, "09:55"),
+        _at(QR_29_AM, "03:45"),
+        _at(QR_29_PM, "09:55"),
+        AY_CHEAP,
+    )
+    fastest = rows[0]
+
+    assert offer_for(fastest, rows).also_departs == (
+        "28/10/2026 09:55",
+        "29/10/2026 03:45",
+        "29/10/2026 09:55",
+    )
+
+
+def test_an_other_offer_is_represented_by_its_earliest_departure_time() -> None:
+    fast = _r("QR", "GEN", "30000", 1200, "28/10/2026", "fast")
+    cheap = _r("AY", "GEN", "18000", 3000, "28/10/2026", "cheap")
+    late = _at(_r("EK", "GEN", "24000", 1800, "29/10/2026", "ek-late"), "21:10")
+    early = _at(_r("EK", "GEN", "24000", 1800, "29/10/2026", "ek-early"), "06:05")
+
+    eligible = (fast, cheap, late, early)
+    listed, _ = other_offers(rate_options(eligible), eligible)
+
+    assert listed[0].rate.source_ref == "ek-early"
+    assert listed[0].also_departs == ("29/10/2026 21:10",)
+
+
+def test_the_payload_and_the_review_email_carry_the_time(
+    settings: Settings, sink: CollectingEmailSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.unit.test_rate_strategy_options import APPROVER, CHEAP, FAST, _review
+
+    fast = FAST.model_copy(update={"departure_time_label": "03:45"})
+    session = _session(settings, sink, monkeypatch, rates=(fast, CHEAP))
+    request = only_request(session)
+    card = live_serialize.approval_json(
+        request.packet,  # type: ignore[attr-defined]
+        request.rates,  # type: ignore[attr-defined]
+        approver="x",
+        options=request.rate_options,  # type: ignore[attr-defined]
+        recommended=request.recommended_option,  # type: ignore[attr-defined]
+    )
+
+    fastest = next(o for o in card["options"] if o["key"] == "fastest")  # type: ignore[attr-defined]
+    cheapest = next(o for o in card["options"] if o["key"] == "cheapest")  # type: ignore[attr-defined]
+    assert fastest["departure_time"] == "03:45"
+    assert cheapest["departure_time"] is None  # not stated: absent, never guessed
+
+    session.decide(request.request_id, choice="approve", by=APPROVER)  # type: ignore[attr-defined]
+
+    assert "Departs : 20/09/2026 03:45" in _review(sink)

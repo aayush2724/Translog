@@ -183,9 +183,30 @@ class MultiAccountSession:
         reason: str = "",
         option: str | None = None,
         rate_ref: str | None = None,
+        client_note: str | None = None,
+        internal_note: str | None = None,
     ) -> LiveRequest:
         return self._owner(request_id).decide(
-            request_id, choice=choice, by=by, reason=reason, option=option, rate_ref=rate_ref
+            request_id,
+            choice=choice,
+            by=by,
+            reason=reason,
+            option=option,
+            rate_ref=rate_ref,
+            client_note=client_note,
+            internal_note=internal_note,
+        )
+
+    def preview_quotation(
+        self,
+        request_id: str,
+        *,
+        option: str | None = None,
+        rate_ref: str | None = None,
+        client_note: str | None = None,
+    ) -> dict[str, str]:
+        return self._owner(request_id).preview_quotation(
+            request_id, option=option, rate_ref=rate_ref, client_note=client_note
         )
 
     def decide_goods_type(self, request_id: str, *, goods_type: str, by: str) -> None:

@@ -31,7 +31,7 @@ from translog_quote.domain.rates import RatePreference, RateStrategy
 from translog_quote.domain.shipment import CargoDimensions, DeliveryType
 
 if TYPE_CHECKING:
-    from translog_quote.domain.rates import Selection
+    from translog_quote.domain.rates import Rate, Selection
     from translog_quote.domain.shipment import ShipmentRecord
 
 #: Marks a message as internal correspondence in its subject line. Two jobs:
@@ -125,15 +125,23 @@ _PREFERENCE_LINES: dict[RatePreference, str] = {
 }
 
 
+def _departs(rate: Rate) -> str:
+    """The provider's departure date and time as stated, or that it stated none."""
+    stated = " ".join(p for p in (rate.departure_date_label, rate.departure_time_label) if p)
+    return stated or "Not stated by the provider"
+
+
 def _rate_block(selection: Selection) -> list[str]:
     """One rate as the approver reads it. A missing departure says so."""
     rate = selection.rate
     return [
         f"  Airline : {rate.carrier_name} ({rate.carrier_code})",
         f"  Service : {rate.product}",
-        f"  Departs : {rate.departure_date_label or 'Not stated by the provider'}",
+        f"  Departs : {_departs(rate)}",
+        f"  Arrives : {rate.arrival_label or 'Not stated by the provider'}",
         f"  Transit : {_transit(selection)}",
-        f"  Price   : {_price(selection)}",
+        f"  Price   : {_price(selection)}"
+        + (f" ({rate.rate_per_kg_label})" if rate.rate_per_kg_label else ""),
         f"  Why     : {selection.reason}",
     ]
 
@@ -284,6 +292,13 @@ def compose_review_body(packet: ReviewPacket, *, is_simulated: bool) -> str:
             for excluded in packet.rates.excluded
         ]
 
+    if packet.client_note.strip():
+        lines += ["", "NOTE TO THE CLIENT (sent with the quotation)", "-" * 60]
+        lines += [f"  {line}" for line in packet.client_note.strip().splitlines()]
+    if packet.internal_note.strip():
+        lines += ["", "INTERNAL NOTE (not sent to the client)", "-" * 60]
+        lines += [f"  {line}" for line in packet.internal_note.strip().splitlines()]
+
     if is_simulated:
         lines += ["", "-" * 60, SIMULATED_RATE_NOTICE]
 
@@ -322,8 +337,25 @@ def compose_quotation_subject(record: ShipmentRecord, *, reference: str) -> str:
     return f"Air freight quotation {reference} — {lane}"
 
 
+def _note_block(note: str) -> list[str]:
+    """The approver's note to the client, after the figures, exactly as typed."""
+    if not note.strip():
+        return []
+    return [
+        "",
+        "NOTE FROM TRANSLOG",
+        "-" * 60,
+        *(f"  {line}" if line.strip() else "" for line in note.strip().splitlines()),
+    ]
+
+
 def compose_quotation_body(
-    record: ShipmentRecord, selection: Selection, *, reference: str, is_simulated: bool
+    record: ShipmentRecord,
+    selection: Selection,
+    *,
+    reference: str,
+    is_simulated: bool,
+    note: str = "",
 ) -> str:
     """The client-facing quotation. One rate, never a list (BR-10).
 
@@ -358,6 +390,8 @@ def compose_quotation_body(
         f"  {'Validity:'} {_UNAVAILABLE}",
         f"  {'Payment terms:'} {_UNAVAILABLE}",
     ]
+    # After every figure, so a note can never be read as, or alter, the rate.
+    lines += _note_block(note)
 
     if is_simulated:
         lines += ["", "-" * 60, SIMULATED_RATE_NOTICE, "-" * 60]
@@ -425,6 +459,7 @@ def build_quotation(packet: ReviewPacket, approved: Approved, *, is_simulated: b
             packet.selection,
             reference=packet.request_id,
             is_simulated=is_simulated,
+            note=packet.client_note,
         ),
         approved=approved,
     )

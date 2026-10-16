@@ -131,6 +131,24 @@ class Rate(BaseModel):
     that day exactly as the provider stated it, never reformatted or guessed.
     Empty when the provider stated none (fixtures, simulations)."""
 
+    departure_time_label: str = ""
+    """The provider's own departure time of day for this rate, verbatim (e.g.
+    "03:45" from WebCargo's "Wed 28 Oct - 03:45"), for display and audit only.
+    It tells two same-fare flights on one day apart (Qatar's 03:45 and 09:55).
+    Empty when the provider stated none, and for results searched before this
+    field existed — never inferred."""
+
+    arrival_label: str = ""
+    """The provider's own arrival, verbatim (e.g. "Wed 16 Sep - 16:30"), for
+    display and audit only — often what the client actually plans around. Empty
+    when the provider stated none or before this field existed; never computed
+    from the departure and the transit."""
+
+    rate_per_kg_label: str = ""
+    """The provider's own per-kg rate, verbatim (e.g. "167.65 Rs/kg"), for
+    display and comparison only. Never used to rank or price: the quoted figure
+    is ``total_amount``. Empty when the provider stated none."""
+
 
 class LocationRef(BaseModel):
     """One end of a lane: what the client called it, and what it resolved to.

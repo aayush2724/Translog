@@ -115,7 +115,7 @@ function load(fetchStub) {
     "\n;globalThis.__t = { ui, canDecide, sectionClarification, sectionApproval," +
     " renderDashboard, renderTimeline, render, post, sectionRates, refresh," +
     " watchForChanges, REFRESH_MS, renderDetail, nextStep, sectionManualReview," +
-    " sectionShipment, sectionMerged," +
+    " sectionShipment, sectionMerged, formatPrice," +
     " syncApprover: () => syncApprover && syncApprover()," +
     " holderFor: (id) => document.getElementById(id) };";
   vm.runInContext(source, context);
@@ -826,12 +826,10 @@ check("door hand-over: a missing price or transit reads as absent, never guessed
   eq(line.textContent, "TK General · ⏱ — · price —", "absent values stay absent");
 });
 
-check("exactly one card is SELECTED when the winning carrier returns several rates", () => {
-  /* Bug A: the SELECTED card was matched by carrier_code, so every rate from the
-     winning carrier lit up SELECTED and inherited the winner's reason. Identity
-     is source_ref now, so exactly one card is marked — and Bug B: its chip and
-     its reason are the same spelling of the same duration, never "1110 minutes"
-     beside "18h 30m". */
+check("the rate section no longer lists every rate; it points to the three columns", () => {
+  /* The long list of every rate duplicated the approval card's comparison, so
+     it is gone: the Cheapest | Fastest | Other rates columns are the one place
+     rates are compared and chosen. */
   const t = load();
   const qr = (source_ref, transit, amount) => ({
     carrier_code: "QR", carrier_name: "Qatar Airways", product: "QR General",
@@ -841,7 +839,7 @@ check("exactly one card is SELECTED when the winning carrier returns several rat
     simulated: false, banner: null, adapter_id: "webcargo-browser",
     returned: 2, eligible_count: 2,
     query: { origin: "Bangalore", destination: "Manila", weight_kg: 320, date: "2026-09-25" },
-    strategy: "Fastest eligible transit — ranked by transit time, not price",
+    strategy: "unused",
     eligible: [qr("ref-fast", "18h 30m", "185597"), qr("ref-slow", "22h 30m", "90000")],
     excluded: [],
     selection: Object.assign(qr("ref-fast", "18h 30m", "185597"), {
@@ -849,20 +847,14 @@ check("exactly one card is SELECTED when the winning carrier returns several rat
     }),
   };
 
-  const section = t.sectionRates({ rates, rate_failure: null, rate_search_pending: false });
+  const section = t.sectionRates({
+    rates, rate_failure: null, rate_search_pending: false, approval: { reference: "R-1" }, decision: null,
+  });
 
-  eq(section.findAll((n) => n.className === "rate-ribbon").length, 1, "one SELECTED ribbon");
-  const selectedCards = section.findAll((n) => /rate-selected/.test(n.className));
-  eq(selectedCards.length, 1, "exactly one selected card despite two QR rates");
-
-  const chip = selectedCards[0].find((n) => n.className === "transit-chip");
-  const why = selectedCards[0].find((n) => n.className === "rate-why");
-  eq(/18h 30m/.test(chip.textContent), true, "the selected card's chip is the winner's transit");
-  eq(/18h 30m/.test(why.textContent), true, "and its reason states the same duration");
-  eq(/minutes/.test(chip.textContent), false, "never a raw minute count");
-
-  const chips = section.findAll((n) => n.className === "transit-chip").map((n) => n.textContent);
-  eq(chips.some((c) => /22h 30m/.test(c)), true, "the slower QR rate keeps its own chip");
+  eq(section.findAll((n) => /rate-card|rate-ribbon/.test(n.className || "")).length, 0, "no rate cards listed");
+  eq(/185597/.test(section.textContent), false, "no rate repeated here");
+  eq(/Choose the rate to quote below/.test(section.textContent), true, "points to the columns");
+  eq(/2 returned · 2 eligible/.test(section.textContent), true, "the search summary stays");
 });
 
 checkAsync("an action failing on the DASHBOARD renders a visible error", async () => {
@@ -1233,6 +1225,8 @@ function detailWith(approval) {
 const cardFor = (section, key) =>
   section.find((n) => n.tagName === "label" && n.attrs["data-key"] === key);
 const hasClass = (node, cls) => (node.className || "").split(" ").includes(cls);
+/* The APPROVE button by its label: the card now also has a preview button. */
+const approveButton = (section) => section.findAll(isButton).find((b) => /^APPROVE/.test(b.textContent));
 
 check("three columns: CHEAPEST, FASTEST and OTHER RATES, in that order", () => {
   const t = load();
@@ -1243,7 +1237,7 @@ check("three columns: CHEAPEST, FASTEST and OTHER RATES, in that order", () => {
   eq(Boolean(cardFor(section, "fastest")), true, "a fastest card");
   eq(Boolean(cardFor(section, "rate:ref:EY")), true, "an other-rate card");
   const text = section.textContent;
-  for (const fact of ["18499 Rs", "Finnair (AY)", "32 hours", "30/10/2026", "21950 Rs", "Etihad (EY)"]) {
+  for (const fact of ["Rs 18,499", "Finnair (AY)", "32 hours", "30/10/2026", "Rs 21,950", "Etihad (EY)"]) {
     eq(text.includes(fact), true, `shows ${fact}`);
   }
   eq(/Not stated/.test(text), true, "a missing departure says so");
@@ -1257,8 +1251,8 @@ check("a client asking for the cheapest highlights the CHEAPEST card, and it sta
   eq(hasClass(cheapest, "rate-choice-selected"), true, "cheapest is selected");
   eq(hasClass(cardFor(section, "fastest"), "rate-choice-recommended"), false, "fastest is not");
   eq(/RECOMMENDED/.test(cheapest.textContent), true, "a RECOMMENDED badge on it");
-  const approve = section.findAll(isButton)[0];
-  eq(approve.textContent, "APPROVE — send cheapest: Finnair (AY), 18499 Rs", "approve says what it sends");
+  const approve = approveButton(section);
+  eq(approve.textContent, "APPROVE — send cheapest: Finnair (AY), Rs 18,499", "approve says what it sends");
 });
 
 check("a client asking for speed highlights the FASTEST card", () => {
@@ -1295,8 +1289,8 @@ check("picking an other rate selects it, keeps the recommendation visible, and A
   eq(hasClass(cardFor(section, "cheapest"), "rate-choice-recommended"), true, "but still recommended");
 
   section.find(isInput).fire("input", { target: { value: "Aayush" } });
-  const approve = section.findAll(isButton)[0];
-  eq(approve.textContent, "APPROVE — send other rate: Etihad (EY), 21950 Rs", "label names the rate");
+  const approve = approveButton(section);
+  eq(approve.textContent, "APPROVE — send other rate: Etihad (EY), Rs 21,950 (GEN, 30 hours, departs 29/10/2026)", "label names the rate");
   approve.fire("click");
   eq(calls.length, 1, "one request");
   eq(calls[0].url, "/api/live/quotation/decide", "endpoint");
@@ -1313,7 +1307,7 @@ check("picking FASTEST against a CHEAPEST recommendation posts option=fastest", 
   t.ui.rateOption["R-9"] = "fastest";
   const section = t.sectionApproval(detailWith(comparisonApproval()));
   section.find(isInput).fire("input", { target: { value: "Aayush" } });
-  section.findAll(isButton)[0].fire("click");
+  approveButton(section).fire("click");
   eq(calls[0].option, "fastest", "option");
   eq("rate_ref" in calls[0], false, "no rate_ref");
 });
@@ -1356,7 +1350,7 @@ check("a cheapest that cannot be determined is explained, and a stale cheapest p
   eq(/different currencies \(Rs, USD\)/.test(text), true, "and why");
   eq(cardFor(section, "cheapest"), null, "no cheapest card is invented");
   eq(hasClass(cardFor(section, "fastest"), "rate-choice-selected"), true, "selection falls back to fastest");
-  eq(section.findAll(isButton)[0].textContent, "APPROVE — send fastest: Qatar Airways (QR), 30420 Rs", "approve label");
+  eq(approveButton(section).textContent, "APPROVE — send fastest: Qatar Airways (QR), Rs 30,420", "approve label");
 });
 
 check("no other eligible rates shows an empty state, not an empty column", () => {
@@ -1390,7 +1384,159 @@ check("an offer running on other days lists them on its card, without extra card
   eq(/Also departs 29\/10\/2026, 30\/10\/2026/.test(fastest.textContent), true, "fastest card lists its other dates");
   eq(/Also departs 31\/10\/2026/.test(cardFor(section, "rate:ref:EY").textContent), true, "other offer too");
   eq(/Also departs/.test(cardFor(section, "rate:ref:EK").textContent), false, "no row when there are none");
-  eq(section.findAll((n) => n.tagName === "label").length, 4, "still one card per offer");
+  eq(section.findAll((n) => n.tagName === "label" && n.attrs["data-key"]).length, 4, "still one card per offer");
+});
+
+
+check("other rates from one airline at one price are one card, each variant its own selectable row", () => {
+  const calls = [];
+  const t = load((url, options) => {
+    calls.push(JSON.parse(options.body));
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ requests: [] }) });
+  });
+  const variant = (ref, service, transit, departs) => ({
+    rate_ref: ref, carrier: "Finnair (AY)", service, price: "20992 Rs", transit,
+    departure_date: departs, also_departs: [], tradeoff: false,
+  });
+  const approval = comparisonApproval({
+    other_rates: [
+      variant("ay-first-32", "First", "32h 20m", "31/10/2026"),
+      variant("ay-gc-80", "General Cargo", "80h 20m", "29/10/2026"),
+      variant("ay-gc-56", "General Cargo", "56h 20m", "30/10/2026"),
+      { rate_ref: "ref:EK", carrier: "Emirates (EK)", service: "GEN", price: "24100 Rs", transit: "28 hours", departure_date: "28/10/2026", tradeoff: false },
+    ],
+    other_rates_total: 4,
+  });
+
+  let section = t.sectionApproval(detailWith(approval));
+  const families = section.findAll((n) => (n.className || "").split(" ").includes("rate-family"));
+  eq(families.length, 1, "the three Finnair variants are one card");
+  eq(/3 options at this price/.test(families[0].textContent), true, "the card says why it groups them");
+  const rows = families[0].findAll((n) => n.tagName === "label").map((n) => n.attrs["data-key"]);
+  eq(JSON.stringify(rows), JSON.stringify(["rate:ay-first-32", "rate:ay-gc-56", "rate:ay-gc-80"]), "variants fastest first");
+  eq(/General Cargo/.test(families[0].textContent) && /56h 20m/.test(families[0].textContent)
+    && /30\/10\/2026/.test(families[0].textContent), true, "each row shows service, transit and departure");
+  eq(Boolean(cardFor(section, "rate:ref:EK")), true, "a different airline keeps its own card");
+
+  families[0].find((n) => isInput(n) && n.attrs.value === "rate:ay-gc-56").fire("change");
+  section = t.sectionApproval(detailWith(approval));
+  section.find((n) => isInput(n) && n.className === "approver-input").fire("input", { target: { value: "Aayush" } });
+  const approve = approveButton(section);
+  eq(approve.textContent,
+    "APPROVE — send other rate: Finnair (AY), Rs 20,992 (General Cargo, 56h 20m, departs 30/10/2026)",
+    "approve names the exact variant");
+  approve.fire("click");
+  eq(calls[0].rate_ref, "ay-gc-56", "exactly that variant is sent");
+});
+
+check("two rates from the winning carrier: exactly one card is selected, one transit spelling", () => {
+  /* Bug A (once on the old list): selection was matched by carrier_code, so every
+     rate from the winning carrier lit up. The columns select by key (option or
+     source_ref), so exactly one card is selected — and its transit reads one way. */
+  const t = load();
+  const approval = comparisonApproval({
+    recommended_option: "fastest",
+    options: [
+      rateRow("fastest", "Fastest", "Qatar Airways (QR)", "185597 Rs", "18h 30m", "ref-fast"),
+      rateRow("cheapest", "Cheapest", "Qatar Airways (QR)", "90000 Rs", "22h 30m", "ref-slow"),
+    ],
+    other_rates: [],
+    other_rates_total: 0,
+  });
+
+  const section = t.sectionApproval(detailWith(approval));
+  const selected = section.findAll((n) => hasClass(n, "rate-choice-selected"));
+
+  eq(selected.length, 1, "exactly one selected card despite two QR rates");
+  eq(selected[0].attrs["data-key"], "fastest", "the fastest one");
+  eq(/18h 30m/.test(selected[0].textContent) && !/minutes/.test(selected[0].textContent), true, "one spelling");
+});
+
+
+
+check("prices read as people write them; arrival and per-kg are shown when stated", () => {
+  const t = load();
+  eq(t.formatPrice("20992 Rs"), "Rs 20,992", "rupees, grouped");
+  eq(t.formatPrice("185597.5 Rs"), "Rs 1,85,597.5", "Indian grouping, decimals as given");
+  eq(t.formatPrice("1250.50 USD"), "USD 1,250.50", "other currencies");
+  eq(t.formatPrice("price on request"), "price on request", "anything else unchanged");
+
+  const approval = comparisonApproval();
+  approval.options[1].arrival = "Sat 01 Nov - 16:30";
+  approval.options[1].per_kg = "150.70 Rs/kg";
+  const text = t.sectionApproval(detailWith(approval)).textContent;
+  eq(/ArrivesSat 01 Nov 16:30/.test(text), true, "arrival, separator tidied");
+  eq(/150\.70 Rs\/kg/.test(text), true, "per-kg as printed");
+});
+
+check("a long family shows three variants and a toggle, but never hides the selected one", () => {
+  const t = load();
+  const variant = (i) => ({
+    rate_ref: `ay-${i}`, carrier: "Finnair (AY)", service: i % 2 ? "First" : "General Cargo",
+    price: "20992 Rs", transit: `${32 + i * 24}h 20m`, departure_date: "30/10/2026", tradeoff: false,
+  });
+  const approval = comparisonApproval({ other_rates: [0, 1, 2, 3, 4].map(variant), other_rates_total: 5 });
+
+  let section = t.sectionApproval(detailWith(approval));
+  const rows = () => section.findAll((n) => n.tagName === "label" && /^rate:ay-/.test(n.attrs["data-key"] || ""));
+  eq(rows().length, 3, "three shown");
+  const toggle = section.find((n) => n.tagName === "button" && /Show 2 more/.test(n.textContent));
+  eq(Boolean(toggle), true, "a toggle offers the rest");
+
+  t.ui.rateOption["R-9"] = "rate:ay-4";  // the slowest, normally hidden
+  section = t.sectionApproval(detailWith(approval));
+  eq(rows().length, 5, "a selected variant is never hidden");
+});
+
+checkAsync("notes are sent with APPROVE, and the preview asks the server and flags a stale preview", async () => {
+  const calls = [];
+  const t = load((url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    const payload = url.endsWith("/quotation/preview")
+      ? { to: "client@example.com", subject: "Air freight quotation R-9", body: "QUOTATION\n...\nNOTE FROM TRANSLOG" }
+      : { requests: [] };
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(payload) });
+  });
+  t.ui.selected = "R-9";
+  const approval = comparisonApproval();
+  let section = t.sectionApproval(detailWith(approval));
+  const areas = section.findAll((n) => n.tagName === "textarea");
+  eq(areas.length, 2, "two optional note fields");
+  areas[0].fire("input", { target: { value: "Please confirm by Friday." } });
+  areas[1].fire("input", { target: { value: "ops ok" } });
+
+  const preview = section.findAll(isButton).find((b) => /Preview the client email/.test(b.textContent));
+  await preview.listeners.click[0]();
+  eq(calls[0].url, "/api/live/quotation/preview", "the preview asks the server");
+  eq(calls[0].body.client_note, "Please confirm by Friday.", "with the note");
+  eq(calls[0].body.option, "cheapest", "for the selected rate");
+  section = t.sectionApproval(detailWith(approval));
+  eq(/NOTE FROM TRANSLOG/.test(section.textContent), true, "the composed email is shown");
+  eq(/changed since this preview/.test(section.textContent), false, "fresh");
+
+  t.ui.rateOption["R-9"] = "fastest";
+  section = t.sectionApproval(detailWith(approval));
+  eq(/changed since this preview/.test(section.textContent), true, "a changed rate flags it as stale");
+
+  section.find((n) => isInput(n) && n.className === "approver-input").fire("input", { target: { value: "Aayush" } });
+  approveButton(section).fire("click");
+  const decide = calls.find((c) => c.url === "/api/live/quotation/decide");
+  eq(decide.body.client_note, "Please confirm by Friday.", "client note posted");
+  eq(decide.body.internal_note, "ops ok", "internal note posted");
+});
+
+check("on simulated data the banner appears once, on the approval card", () => {
+  const t = load();
+  const rates = {
+    simulated: true, banner: "SIMULATED WEBCARGO DATA — DEMO ONLY", adapter_id: "demo",
+    returned: 2, eligible_count: 2,
+    query: { origin: "A", destination: "B", weight_kg: 1, date: "2026-10-28" },
+    eligible: [], excluded: [], selection: { source_ref: "x" },
+  };
+  const withCard = t.sectionRates({ rates, approval: { reference: "R-9" }, decision: null });
+  const withoutCard = t.sectionRates({ rates, approval: null, decision: null });
+  eq(/SIMULATED WEBCARGO DATA/.test(withCard.textContent), false, "not repeated above the card");
+  eq(/SIMULATED WEBCARGO DATA/.test(withoutCard.textContent), true, "kept when there is no card");
 });
 
 (async () => {
