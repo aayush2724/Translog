@@ -1021,6 +1021,7 @@ def run_rate_search(
     settled = _await_results(
         driver, timeout_seconds=search_timeout_seconds, poll_interval_seconds=poll_interval_seconds
     )
+    _log_search_summary(driver, query)
     if not settled:  # the provider's own "no rates" — a valid empty outcome
         # Kept as evidence: a "0 rates" quote is a business outcome someone may
         # question, and the page text (plus a screenshot where the driver can
@@ -1071,6 +1072,37 @@ def run_rate_search(
 
 
 # --- helpers ----------------------------------------------------------------------
+
+
+#: WebCargo's own one-line summary of what it searched ("BANGALORE -> SINGAPORE
+#: Oct 30, 2026 General Cargo 3 Units 10.67 CFT 360 KG"): the smallest element
+#: naming Units together with a KG/LB figure. Read for the log only — it is the
+#: one place the provider states the weight it actually priced, which is how a
+#: per-unit multiplication of our total weight shows up.
+_JS_SEARCH_SUMMARY = """
+() => {
+  const els = [...document.querySelectorAll('div,section,header')]
+    .filter(e => e.offsetWidth > 0)
+    .map(e => (e.innerText || '').replace(/\\s+/g, ' ').trim())
+    .filter(t => /\\bUnits?\\b/.test(t) && /\\d[\\d,.]*\\s*(?:KG|LB)\\b/.test(t) && t.length < 300);
+  els.sort((a, b) => a.length - b.length);
+  return els[0] || '';
+}
+"""
+
+
+def _log_search_summary(driver: BrowserDriver, query: RateQuery) -> None:
+    """Log WebCargo's own summary of the search beside the weight we entered."""
+    try:
+        summary = driver.evaluate(_JS_SEARCH_SUMMARY)
+    except Exception as exc:  # noqa: BLE001 - a log line must never fail a search
+        summary = f"<unavailable: {type(exc).__name__}>"
+    _log.info(
+        "WebCargo searched: %s (entered %s kg total for %s pieces)",
+        _bounded(summary, 300),
+        _figure(query.weight_kg),
+        query.pieces,
+    )
 
 
 def _figure(value: float) -> str:
