@@ -288,9 +288,23 @@ def is_per_piece(text: str | None) -> bool:
     return bool(_PER_PIECE.search(text)) and not _TOTAL_WORD.search(text)
 
 
-def times_pieces(kg: float, pcs: int) -> float:
-    """A per-piece weight in kg multiplied out to the shipment total."""
-    return _round_up(kg * pcs)
+def times_pieces(value: float, unit: str, pcs: int) -> float:
+    """A per-piece weight in canonical ``unit`` multiplied out to the shipment
+    total in kg. Multiplied first, converted once: 4 x 55 lb is 99.8 kg, not
+    4 x 25.0 (each 24.95 rounded up) = 100 kg."""
+    if unit == "kg":
+        return _round_up(value * pcs)
+    return to_kg(value * pcs, unit)
+
+
+def thousand_weight_unit(raw: str) -> str | None:
+    """ "k kg" / "kkgs" / "k lbs" — the thousands "k" folded into the unit — as
+    the canonical weight unit, or ``None``. Only for a spelling that is not
+    already a unit itself ("kg" never reaches here)."""
+    folded = _fold(raw)
+    if folded in _WEIGHT_ALIASES or len(folded) < 2 or not folded.startswith("k"):
+        return None
+    return _WEIGHT_ALIASES.get(folded[1:])
 
 
 #: "1.5k kg" or "2K KGS" is 1,500 / 2,000 kg. The model copies the number as

@@ -326,3 +326,18 @@ def test_a_message_after_validation_is_shown_to_the_desk(
     assert [m.message_id for m in request.late_messages] == ["<b@x>"]
     assert request_summary(session, request)["late_messages"] == 1
     assert len(request_detail(session, request)["late_messages"]) == 1
+
+
+def test_a_thousands_k_folded_into_the_unit_is_restored() -> None:
+    result = _extract(
+        {"weight_kg": {"status": "stated", "value": 1.5, "unit": "k kg", "evidence": "1.5k kg"}}
+    )
+    assert result.weight_kg.value == 1500.0
+
+
+def test_per_piece_weights_multiply_before_converting() -> None:
+    from translog_quote.domain.shipment.units import thousand_weight_unit, times_pieces
+
+    assert times_pieces(55, "lb", 4) == 99.8  # not 4 x 25.0
+    assert thousand_weight_unit("kg") is None
+    assert thousand_weight_unit("k lbs") == "lb"

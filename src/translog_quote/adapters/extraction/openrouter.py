@@ -291,6 +291,11 @@ def _normalise_units(payload: dict[str, Any]) -> None:
         if isinstance(value, int | float) and not isinstance(value, bool):
             seen = _number_text(value)
             canon = units.weight_unit(raw) if isinstance(raw, str) else None
+            thousand = False
+            if canon is None and isinstance(raw, str):
+                # The model sometimes puts the "k" of "1.5k kg" into the unit.
+                canon = units.thousand_weight_unit(raw)
+                thousand = canon is not None
             written = units.dot_thousands_in(weight.get("evidence"), float(value))
             if written is not None:
                 # "1.200 kg" read as 1.2: maybe 1,200. Asked, never guessed.
@@ -307,15 +312,17 @@ def _normalise_units(payload: dict[str, Any]) -> None:
                     "note": units.unit_note("Weight", units.CHARGEABLE_MARKER, f"{seen} {raw}"),
                 }
             elif canon is not None:
-                if units.kilo_suffix_in(weight.get("evidence"), float(value)):
+                if thousand or units.kilo_suffix_in(weight.get("evidence"), float(value)):
                     value = value * 1000  # "1.5k kg" is 1,500 kg
                     _log.info("extraction: weight %sk read as %s", seen, _number_text(value))
-                kg = units.to_kg(value, canon)
+                if units.is_per_piece(weight.get("evidence")):
+                    # Multiplied in the client's unit, then converted once, so a
+                    # per-piece rounding is not multiplied up with it.
+                    _total_per_piece_weight(payload, weight, value, canon, f"{seen} {raw}")
+                else:
+                    payload["weight_kg"] = {**weight, "value": units.to_kg(value, canon)}
                 if canon != "kg":
                     _log.info("extraction: weight converted from %s %s to kg", seen, raw)
-                payload["weight_kg"] = {**weight, "value": kg}
-                if units.is_per_piece(weight.get("evidence")):
-                    _total_per_piece_weight(payload, weight, kg, f"{seen} {raw}")
             else:
                 missing = raw is None or (isinstance(raw, str) and raw.strip().lower() in _NO_UNIT)
                 marker = units.UNIT_MISSING_MARKER if missing else units.UNIT_UNSUPPORTED_MARKER
@@ -366,14 +373,14 @@ def _normalise_units(payload: dict[str, Any]) -> None:
 
 
 def _total_per_piece_weight(
-    payload: dict[str, Any], weight: dict[str, Any], kg: float, shown: str
+    payload: dict[str, Any], weight: dict[str, Any], value: float, unit: str, shown: str
 ) -> None:
     """A weight given per piece ("50 kg each"): multiplied by the stated piece
     count, or — with no usable count — asked for as the shipment total."""
     pcs = payload.get("pcs")
     count = pcs.get("value") if isinstance(pcs, dict) and pcs.get("status") == "stated" else None
     if isinstance(count, int) and not isinstance(count, bool) and count > 0:
-        payload["weight_kg"] = {**weight, "value": units.times_pieces(kg, count)}
+        payload["weight_kg"] = {**weight, "value": units.times_pieces(value, unit, count)}
         _log.info("extraction: per-piece weight %s multiplied by %d pieces", shown, count)
         return
     payload["weight_kg"] = {
