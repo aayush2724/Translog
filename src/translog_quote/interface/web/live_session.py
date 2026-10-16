@@ -1601,9 +1601,16 @@ class LiveSession:
             request.rate_job_id = None
             return
         if status.state is JobState.COMPLETED and status.result is not None:
-            self._apply_rate_outcome(
-                request, self._outcome_from_job_result(request.request_id, status.result)
-            )
+            outcome = self._outcome_from_job_result(request.request_id, status.result)
+            job_id = request.rate_job_id
+            # The in-process search (RateSearchStage) records these events
+            # itself; the worker does not, so the timeline's "Rate search" and
+            # "Rate selected" rows never completed for a live search. Recorded
+            # here, once per job: a restart that re-applies the same cached job
+            # result finds them already in the (durable) audit and adds nothing.
+            self._emit_search_completed(request.request_id, outcome, job_id=job_id)
+            self._apply_rate_outcome(request, outcome)
+            self._emit_rate_selected(request, job_id=job_id)
         elif status.state is JobState.FAILED:
             # A place that cannot be resolved to an airport without guessing is a
             # client clarification, not a seven-day dead end. Re-run the resolver
@@ -2060,6 +2067,84 @@ class LiveSession:
                 event=AuditEventType.GOODS_TYPE_DECIDED,
                 at=self._clock.now(),
                 detail=detail,
+            )
+        )
+
+    def _job_event_recorded(self, request_id: str, event: object, job_id: str | None) -> bool:
+        """Whether ``event`` was already recorded for this request's job."""
+        return any(
+            recorded.request_id == request_id
+            and recorded.event is event
+            and recorded.detail.get("job_id") == job_id
+            for recorded in self.audit.events
+        )
+
+    def _emit_search_completed(
+        self, request_id: str, outcome: RateSearchOutcome, *, job_id: str | None
+    ) -> None:
+        """The search-completion events for a worker result, as RateSearchStage
+        records them for an in-process search — fetched, normalised, filtered and
+        the resulting state — each tagged with the job, recorded once per job.
+
+        Only for a COMPLETED job: a failed search fetched nothing and records
+        nothing here (its failure is reported on the request)."""
+        from translog_quote.pipeline.audit import AuditEvent, AuditEventType
+
+        if self._job_event_recorded(request_id, AuditEventType.RATES_FETCHED, job_id):
+            return
+        at = self._clock.now()
+        for event, detail in (
+            (
+                AuditEventType.RATES_FETCHED,
+                {"adapter": outcome.adapter_id, "returned": outcome.returned},
+            ),
+            (AuditEventType.RATES_NORMALIZED, {"count": outcome.returned}),
+            (
+                AuditEventType.RATES_FILTERED,
+                {
+                    "eligible": len(outcome.filtered.eligible),
+                    "excluded": [
+                        {"carrier": e.rate.carrier_code, "reason": e.reason.value}
+                        for e in outcome.filtered.excluded
+                    ],
+                },
+            ),
+            (
+                AuditEventType.STATE_CHANGED,
+                {"from": RequestState.VALIDATED.value, "to": outcome.state.value},
+            ),
+        ):
+            self.audit.record(
+                AuditEvent(
+                    request_id=request_id, event=event, at=at, detail={**detail, "job_id": job_id}
+                )
+            )
+
+    def _emit_rate_selected(self, request: LiveRequest, *, job_id: str | None) -> None:
+        """RATE_SELECTED for the rate the approval card was built on — only when a
+        card was built. No selection (no rows, all excluded, handed to a person)
+        records nothing: a selection is never claimed that did not happen."""
+        from translog_quote.pipeline.audit import AuditEvent, AuditEventType
+
+        packet = request.packet
+        if packet is None or request.state is not RequestState.RATE_SELECTED:
+            return
+        if self._job_event_recorded(request.request_id, AuditEventType.RATE_SELECTED, job_id):
+            return
+        rate = packet.selection.rate
+        self.audit.record(
+            AuditEvent(
+                request_id=request.request_id,
+                event=AuditEventType.RATE_SELECTED,
+                at=self._clock.now(),
+                detail={
+                    "carrier": rate.carrier_code,
+                    "transit_hours": rate.transit.hours if rate.transit else None,
+                    "reason": packet.selection.reason,
+                    "rate_ref": rate.source_ref,
+                    "option": packet.selected_option.value if packet.selected_option else None,
+                    "job_id": job_id,
+                },
             )
         )
 

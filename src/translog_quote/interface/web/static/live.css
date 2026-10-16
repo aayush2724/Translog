@@ -667,6 +667,8 @@ h1 { font-size: 1.3rem; font-weight: 600; }
 .rate-choice-facts dt { color: #6b7385; }
 .rate-choice-facts dd { margin: 0; overflow-wrap: anywhere; }
 .rate-choice-why { margin: 0.35rem 0 0; }
+.rate-choice-also { margin: 0.35rem 0 0; }
+.rate-choice .nowrap { white-space: nowrap; }
 @container (max-width: 520px) {
   .rate-compare-grid { grid-template-columns: 1fr; }
   .rate-col-shared { grid-column: auto; }

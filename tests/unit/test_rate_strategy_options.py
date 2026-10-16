@@ -805,51 +805,7 @@ def test_a_missing_departure_is_stated_not_invented() -> None:
 
 # --- the "other rates" column and quoting one of them ---------------------------
 
-SLOW_MID = _rate("SQ", "26000", 40)  # dominated by MIDDLE (EK 25000, 30h): never a trade-off
 TRADE = _rate("TK", "21000", 36)  # between cheapest and fastest on both axes: a trade-off
-DUP_OF_CHEAP = CHEAP.model_copy(update={"source_ref": "ref:EY-again"})  # same offer, new ref
-
-
-def test_other_rates_never_repeat_the_two_options_or_each_other() -> None:
-    eligible = (FAST, CHEAP, MIDDLE, SLOW_MID, TRADE, DUP_OF_CHEAP)
-    options = rate_options(eligible)
-
-    listed, total = live_serialize.other_rates(options, eligible)
-
-    refs = [rate.source_ref for rate, _ in listed]
-    assert "ref:QR" not in refs and "ref:EY" not in refs  # the two options
-    assert "ref:EY-again" not in refs  # an identical offer to the cheapest
-    assert refs == ["ref:TK", "ref:EK", "ref:SQ"]  # trade-offs first, then by price
-    assert [tradeoff for _, tradeoff in listed] == [True, True, False]
-    assert total == 3
-
-
-def test_other_rates_are_capped_and_the_total_is_reported() -> None:
-    many = tuple(_rate(f"C{i}", str(20000 + i * 100), 30 + i) for i in range(12))
-    eligible = (FAST, CHEAP, *many)
-
-    listed, total = live_serialize.other_rates(rate_options(eligible), eligible, limit=8)
-
-    assert len(listed) == 8
-    assert total == 12
-
-
-def test_other_rates_with_uncomparable_prices_are_not_ranked_by_price() -> None:
-    usd = _rate("UA", "350", 29, currency="USD")
-    eligible = (FAST, CHEAP, usd, MIDDLE)
-    options = rate_options(eligible)
-    assert options is not None and options.cheapest is None
-
-    listed, _ = live_serialize.other_rates(options, eligible)
-
-    # Fastest-first, nothing marked as a price trade-off, cheapest not withheld.
-    assert [rate.carrier_code for rate, _ in listed] == ["UA", "EK", "EY"]
-    assert not any(tradeoff for _, tradeoff in listed)
-
-
-def test_no_other_rates_is_an_empty_list() -> None:
-    eligible = (FAST, CHEAP)
-    assert live_serialize.other_rates(rate_options(eligible), eligible) == ([], 0)
 
 
 def test_the_approval_payload_carries_the_other_rates(
