@@ -79,7 +79,7 @@ class KeyedExtractor:
         self._by_marker = by_marker
         self.calls: list[str] = []
 
-    def extract_shipment(self, text: str) -> ExtractionResult:
+    def extract_shipment(self, text: str, *, asked_about: tuple[str, ...] = ()) -> ExtractionResult:
         self.calls.append(text)
         for marker, result in self._by_marker.items():
             if marker in text:

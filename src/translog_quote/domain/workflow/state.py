@@ -181,6 +181,17 @@ class QuotationRequest(BaseModel):
     the request. Optional with a ``None`` default so a request written before this
     field existed loads unchanged."""
 
+    asked_about: tuple[str, ...] = ()
+    """What the last clarification sent to the client asked about, one line per
+    field: the field's label and, where there was one, the client's own earlier
+    wording ("Dimensions: Dimensions given without a unit: 50 x 40 x 30").
+
+    Given to the extraction with the client's next reply, so a short answer —
+    "cm", "yes", "5 November 2026" — is read against the question it answers
+    instead of as an email that states nothing. Our example values are never
+    included, so an example cannot be read back as an answer. Empty by default
+    so a request written before this field existed loads unchanged."""
+
     resolved_by: str | None = None
     """The operator who marked a manual-review request resolved. Persisted with
     ``resolved_at`` and ``resolution_note`` so the History entry still says who

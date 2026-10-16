@@ -138,6 +138,41 @@ def decide_goods_type(
     return GoodsTypeDecision(goods_type=general_cargo_label, source="rule")
 
 
+def hold_reasons(
+    *,
+    commodity: str,
+    cargo_type: str | None,
+    is_chemical: bool | None,
+    special_handling: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Why `decide_goods_type` would not pick General Cargo by itself, in plain
+    words for the desk. Empty when the rule would decide it."""
+    special_handling = special_handling or DEFAULT_SPECIAL_HANDLING
+    reasons: list[str] = []
+    if is_chemical is True:
+        reasons.append("the client says the cargo is a chemical")
+    elif is_chemical is None:
+        reasons.append("the client has not said whether the cargo is a chemical")
+    if _normalise(cargo_type) not in _ACCEPTED_CARGO_TYPES:
+        shown = f'"{cargo_type}"' if cargo_type else "not given"
+        reasons.append(f"the cargo type ({shown}) is not plainly general cargo")
+    words = [w for w in special_handling if _has_special_handling(commodity, (w,))]
+    if words:
+        reasons.append(f'the commodity mentions special handling ({", ".join(words)})')
+    return tuple(reasons)
+
+
+def only_option(catalog: tuple[str, ...], general_cargo_label: str) -> str | None:
+    """The single Goods Type an operator could pick, when there is exactly one.
+
+    A hold whose picker offers one label is not a decision — the operator can
+    only confirm it — so the caller applies it automatically (and shows the
+    desk why the rule would have held). ``None`` when there are several, or none.
+    """
+    options = effective_catalog(catalog, general_cargo_label)
+    return options[0] if len(options) == 1 else None
+
+
 def effective_catalog(catalog: tuple[str, ...], general_cargo_label: str) -> tuple[str, ...]:
     """The operator's pickable labels: the general-cargo label first (when it is
     a real, non-blank label), then the configured catalog, de-duplicated, order

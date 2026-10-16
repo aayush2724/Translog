@@ -58,6 +58,14 @@ _EXPLICIT_CODE = re.compile(r"^[A-Z]{3}$")
 #: client explicitly gave.
 _PARENTHESISED_CODE = re.compile(r"\(([A-Za-z]{3})\)")
 
+#: Three-letter country abbreviations clients write in capitals ("USA",
+#: "Dubai (UAE)", "Riyadh (KSA)"). Several are also real but obscure IATA codes
+#: (USA is Concord, North Carolina; KSA is Kosrae), so read as codes they would
+#: send a shipment to the wrong airport. They are never taken as airport codes.
+#: Codes that are both a country reading and a major airport (IND, AUS, CAN) are
+#: deliberately not listed — see the conflict check for the case that matters.
+COUNTRY_ABBREVIATIONS = frozenset({"USA", "UAE", "KSA", "GBR", "PRC", "RSA"})
+
 #: A trailing country the client tacked on, folded before lookup.
 _COUNTRY_SUFFIX = re.compile(r"\s*,\s*(?:india|in)\s*$", re.IGNORECASE)
 
@@ -85,10 +93,21 @@ class CanonicalLocationResolver:
 
         parenthesised = _PARENTHESISED_CODE.search(stated)
         if parenthesised is not None:
-            return LocationRef(
-                stated=stated, code=parenthesised.group(1).upper(), resolved_by=RESOLVER_ID
-            )
-        if _EXPLICIT_CODE.match(stated):
+            code = parenthesised.group(1).upper()
+            named = CANONICAL_IATA.get(_normalise(stated[: parenthesised.start()]))
+            if code in COUNTRY_ABBREVIATIONS:
+                if named is not None:  # "Delhi (UAE)" is still Delhi
+                    return LocationRef(stated=stated, code=named, resolved_by=RESOLVER_ID)
+            elif named is not None and named != code:
+                # "Delhi (IND)" or "Mumbai (DEL)": the name and the code point at
+                # different airports. One is a slip; neither is guessed.
+                raise UnresolvedLocation(
+                    f"{stated!r} names one airport and gives the code of another. "
+                    "Please confirm the airport, for example 'Delhi (DEL)'."
+                )
+            else:
+                return LocationRef(stated=stated, code=code, resolved_by=RESOLVER_ID)
+        elif _EXPLICIT_CODE.match(stated) and stated not in COUNTRY_ABBREVIATIONS:
             return LocationRef(stated=stated, code=stated, resolved_by=RESOLVER_ID)
 
         code = CANONICAL_IATA.get(_normalise(stated))

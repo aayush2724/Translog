@@ -572,7 +572,7 @@ class _KeyedExtractor:
         self._by_body = by_body
         self.calls: list[str] = []
 
-    def extract_shipment(self, text: str) -> ExtractionResult:
+    def extract_shipment(self, text: str, *, asked_about: tuple[str, ...] = ()) -> ExtractionResult:
         self.calls.append(text)
         return self._by_body[text]
 

@@ -69,7 +69,7 @@ class StubExtractor:
     def __init__(self, result: ExtractionResult | Exception) -> None:
         self._result = result
 
-    def extract_shipment(self, text: str) -> ExtractionResult:
+    def extract_shipment(self, text: str, *, asked_about: tuple[str, ...] = ()) -> ExtractionResult:
         if isinstance(self._result, Exception):
             raise self._result
         return self._result

@@ -33,6 +33,7 @@ from translog_quote.domain.clarification import (
     location_question,
     past_ship_date_question,
 )
+from translog_quote.domain.clarification.questions import FIELD_LABELS
 from translog_quote.domain.email import OutboundMessage
 from translog_quote.domain.extraction import (
     ExtractionResult,
@@ -276,7 +277,19 @@ class ClarificationWorkflow:
 
         # --- the model's only involvement -------------------------------------
         try:
-            extraction = self._extractor.extract_shipment(email.body_text)
+            # Only the reply's own text is extracted. What our last
+            # clarification asked travels beside it, so "cm" or "yes" is read
+            # as the answer to its question rather than as an empty email.
+            asked = (
+                existing.asked_about
+                if existing is not None and state is RequestState.CLARIFICATION_SENT
+                else ()
+            )
+            extraction = (
+                self._extractor.extract_shipment(email.body_text, asked_about=asked)
+                if asked
+                else self._extractor.extract_shipment(email.body_text)
+            )
         except (TransientFailure, PermanentFailure) as exc:
             # The provider could not answer for this message: a timeout, an
             # outage, a rejected or exhausted key (HTTP 402). Translated into
@@ -715,7 +728,9 @@ class ClarificationWorkflow:
             UnresolvedField(
                 field=place.field,
                 reason=UnresolvedReason.AMBIGUOUS,
-                question=location_question(place.field, place.stated),
+                question=location_question(
+                    place.field, place.stated, same_as_other_end=place.same_as_other_end
+                ),
                 detail=place.stated,
             )
             for place in unresolved
@@ -915,7 +930,11 @@ class ClarificationWorkflow:
         del self._pending[request_id]
         state = self._advance(request_id, stored.state, RequestState.CLARIFICATION_SENT)
         self._emit(request_id, AuditEventType.CLARIFICATION_SENT, {"approved_by": by})
-        self._store.save_request(stored.model_copy(update={"state": state}))
+        asked = tuple(
+            f"{FIELD_LABELS[u.field]}: {u.detail}" if u.detail else FIELD_LABELS[u.field]
+            for u in held.message.unresolved
+        )
+        self._store.save_request(stored.model_copy(update={"state": state, "asked_about": asked}))
         return approval
 
     # -------------------------------------------------------------- helpers --

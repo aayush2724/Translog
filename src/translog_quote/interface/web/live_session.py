@@ -197,6 +197,13 @@ class LiveRequest:
     that looks idle while their client is waiting, and no reason why.
     """
 
+    late_messages: list[RawEmail] = field(default_factory=list)
+    """Client messages that arrived after this request stopped taking answers
+    (validated, quoted, closed, with a person). They are not extracted — that
+    is what keeps a chatty thread from re-paying the model on every poll — but a
+    client correcting a weight after validation must not vanish, so the desk is
+    shown that they wrote and what they said."""
+
     merged_fields: tuple[str, ...] = ()
     carried_fields: tuple[str, ...] = ()
     stated_count: int = 0
@@ -239,6 +246,15 @@ class LiveRequest:
     applies: the request is held (state stays VALIDATED) for an operator to pick
     an exact WebCargo Goods Type. A presentation hold, not a domain state —
     re-derived from the record on every poll, like a location clarification."""
+
+    goods_type_auto_reasons: tuple[str, ...] = ()
+    """Set when the Goods Type was applied automatically because the catalog
+    offers only one label, although the General Cargo rule would have held the
+    request: the rule's reasons, in plain words, shown to the desk so the person
+    approving the quotation can see the cargo was searched as that one label.
+    Empty otherwise."""
+    goods_type_auto_label: str | None = None
+    """The label applied in that case."""
 
     operator_goods_type: str | None = None
     """An operator's chosen WebCargo Goods Type label, persisted so a restart
@@ -1115,6 +1131,14 @@ class LiveSession:
 
     def _route(self, email: RawEmail) -> None:
         routed = self._router.route(email)
+        if (
+            routed.outcome is not None
+            and routed.outcome.reply_not_accepted
+            and routed.request_id in self.requests
+        ):
+            # The client wrote again after the request stopped taking answers —
+            # often a correction. Not extracted, but shown to the desk.
+            self.requests[routed.request_id].late_messages.append(email)
         if routed.ignored and routed.request_id is not None:
             # Unrelated mail (bulk/automated sender, or a first-contact message
             # that stated no shipment detail). The router recorded it as seen;
@@ -1570,6 +1594,7 @@ class LiveSession:
         code without guessing. Pure and deterministic — ``resolve`` does no I/O,
         so this is safe in the web process."""
         places: list[UnresolvedPlace] = []
+        codes: list[str | None] = []
         for field_name, stated in (
             (FieldName.ORIGIN, record.origin),
             (FieldName.DESTINATION, record.destination),
@@ -1577,9 +1602,27 @@ class LiveSession:
             if not stated:
                 continue
             try:
-                self._resolver.resolve(stated)
+                codes.append(self._resolver.resolve(stated).code)
             except UnresolvedLocation:
                 places.append(UnresolvedPlace(field=field_name, stated=stated))
+        # Both ends resolve to one airport ("Mumbai" to "BOM"): there is no
+        # flight to price, and searching would waste a worker run on a refusal
+        # or, worse, return something. Asked about, never searched.
+        # Both ends are cleared and asked, because either one may be the slip.
+        if (
+            len(codes) == 2
+            and codes[0] is not None
+            and codes[0] == codes[1]
+            and record.origin
+            and record.destination
+        ):
+            places.extend(
+                UnresolvedPlace(field=name, stated=stated, same_as_other_end=True)
+                for name, stated in (
+                    (FieldName.ORIGIN, record.origin),
+                    (FieldName.DESTINATION, record.destination),
+                )
+            )
         return tuple(places)
 
     def _draft_location_clarification_if_unresolved(self, request: LiveRequest) -> bool:
@@ -1695,7 +1738,12 @@ class LiveSession:
         discarded (audited) and the rule re-decides. Otherwise the reviewed
         General Cargo rule decides, or holds. Pure/deterministic — no I/O.
         """
-        from translog_quote.domain.goods_type import decide_goods_type, record_fingerprint
+        from translog_quote.domain.goods_type import (
+            decide_goods_type,
+            hold_reasons,
+            only_option,
+            record_fingerprint,
+        )
 
         record = request.record
         commodity = record.commodity or ""
@@ -1717,6 +1765,22 @@ class LiveSession:
             general_cargo_label=goods.general_cargo_label,
             special_handling=goods.special_handling,
         )
+        request.goods_type_auto_reasons = ()
+        request.goods_type_auto_label = None
+        if decision.held:
+            # A hold whose picker would offer exactly one label is not a choice:
+            # the operator could only confirm it. Apply it, and keep the rule's
+            # reasons so the desk sees why it would have been held.
+            single = only_option(goods.catalog, goods.general_cargo_label)
+            if single is not None:
+                request.goods_type_auto_reasons = hold_reasons(
+                    commodity=commodity,
+                    cargo_type=record.cargo_type,
+                    is_chemical=record.is_chemical,
+                    special_handling=goods.special_handling,
+                )
+                request.goods_type_auto_label = single
+                return single, "only_option"
         return decision.goods_type, decision.source
 
     def _emit_goods_type(

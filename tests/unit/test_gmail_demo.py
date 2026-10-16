@@ -66,7 +66,7 @@ class StubExtractor:
         self._result = result
         self.calls: list[str] = []
 
-    def extract_shipment(self, text: str) -> ExtractionResult:
+    def extract_shipment(self, text: str, *, asked_about: tuple[str, ...] = ()) -> ExtractionResult:
         self.calls.append(text)
         if isinstance(self._result, Exception):
             raise self._result

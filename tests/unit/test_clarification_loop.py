@@ -49,9 +49,11 @@ class ScriptedExtractor:
     def __init__(self, *results: ExtractionResult) -> None:
         self._results = list(results)
         self.calls: list[str] = []
+        self.asked: list[tuple[str, ...]] = []
 
-    def extract_shipment(self, text: str) -> ExtractionResult:
+    def extract_shipment(self, text: str, *, asked_about: tuple[str, ...] = ()) -> ExtractionResult:
         self.calls.append(text)
+        self.asked.append(asked_about)
         return self._results.pop(0)
 
     def read_client_intent(self, text: str):  # type: ignore[no-untyped-def]
@@ -1010,7 +1012,7 @@ class _RaisingExtractor:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def extract_shipment(self, text: str) -> ExtractionResult:
+    def extract_shipment(self, text: str, *, asked_about: tuple[str, ...] = ()) -> ExtractionResult:
         self.calls.append(text)
         raise ContractViolation("extracted pcs must be positive, got -5")
 

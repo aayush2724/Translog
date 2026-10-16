@@ -618,7 +618,7 @@ class PoisonExtractor:
         self._results = list(results)
         self.calls: list[str] = []
 
-    def extract_shipment(self, text: str) -> ExtractionResult:
+    def extract_shipment(self, text: str, *, asked_about: tuple[str, ...] = ()) -> ExtractionResult:
         self.calls.append(text)
         if text == self._poison:
             raise ContractViolation("extracted pcs must be positive, got -5")

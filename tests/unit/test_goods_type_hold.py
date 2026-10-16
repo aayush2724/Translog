@@ -140,21 +140,45 @@ def test_msds_note_puts_a_client_stated_no_into_words() -> None:
     assert live_serialize._msds_note(None) is None
 
 
-def test_default_config_offers_general_cargo_and_is_configured(
+def test_a_single_option_catalog_is_applied_without_an_operator(
     sink: CollectingEmailSink, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With the default (valid) general-cargo label and an empty catalog, the
-    effective catalog still contains the General Cargo label, so the picker is
-    'configured' — never an empty picker, never 'not configured'."""
-    _install_queue(monkeypatch, QueueSpy())
+    """With the default label and an empty catalog the picker would offer one
+    label only — not a decision. It is applied automatically and the search
+    enqueued, and the desk is shown why the rule would have held it."""
+    spy = QueueSpy()
+    _install_queue(monkeypatch, spy)
     _forbid_demo_provider(monkeypatch)
-    session = _build_session(_hold_settings(catalog=()), sink)  # default label
+    audit = CollectingAudit()
+    session = _build_session(_hold_settings(catalog=()), sink, audit=audit)  # default label
     _drive_to_validated(session)
 
-    hold = live_serialize.request_detail(session, _only(session))["goods_type_hold"]
+    request = _only(session)
+    assert request.awaiting_goods_type is False
+    assert request.rate_job_id is not None
+    assert len(spy.enqueued) == 1
+    detail = live_serialize.request_detail(session, request)
+    assert detail["goods_type_hold"] is None
+    auto = detail["goods_type_auto"]
+    assert auto["goods_type"] == "0000 - General Cargo"
+    assert any("special handling (components)" in r for r in auto["reasons"])
+    assert live_serialize.request_summary(session, request)["goods_type_auto"] == auto
+    assert _goods_type_audits(audit)[-1]["source"] == "only_option"
 
-    assert hold["catalog_configured"] is True
-    assert hold["catalog"] == ["0000 - General Cargo"]
+
+def test_a_catalog_with_several_labels_still_holds(
+    sink: CollectingEmailSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spy = QueueSpy()
+    _install_queue(monkeypatch, spy)
+    _forbid_demo_provider(monkeypatch)
+    session = _build_session(_hold_settings(), sink)
+    _drive_to_validated(session)
+
+    request = _only(session)
+    assert request.awaiting_goods_type is True
+    assert spy.enqueued == []
+    assert live_serialize.request_detail(session, request)["goods_type_auto"] is None
 
 
 def test_not_configured_only_when_the_label_is_blank(

@@ -553,6 +553,14 @@ function requestCard(request) {
         ? el("p", { class: "waiting-note" },
             `${request.waiting_replies} client reply waiting — approve the clarification to merge it`)
         : null,
+      request.goods_type_auto
+        ? el("p", { class: "waiting-note" },
+            `Searched as ${request.goods_type_auto.goods_type} automatically (only option) — check the cargo before quoting`)
+        : null,
+      request.late_messages
+        ? el("p", { class: "waiting-note" },
+            `Client wrote again after this request was settled (${request.late_messages}) — read it before quoting`)
+        : null,
       request.rate_failure
         ? el("p", { class: "waiting-note" }, `Rate search could not run: ${request.rate_failure}`)
         : null,
@@ -642,6 +650,37 @@ function sectionEnquiry(detail) {
 
 function sectionReply(detail) {
   return emailCard("Client reply", detail.reply);
+}
+
+/* A client message that arrived after the request stopped taking answers —
+   typically "sorry, the weight is 120 kg". It was not merged into the shipment,
+   so it is shown in full with a plain warning instead of disappearing. */
+function sectionLateMessages(detail) {
+  const late = detail.late_messages || [];
+  if (!late.length) return null;
+  return [
+    el("div", { class: "banner banner-amber" },
+      "The client wrote again after this request was settled",
+      el("span", { class: "sub" },
+        "These messages were not merged into the shipment. If one changes a detail, " +
+        "handle it before the quotation goes out.")),
+    ...late.map((email) => emailCard("Later client message", email)),
+  ];
+}
+
+/* The Goods Type was applied without an operator because the catalog offers
+   only one label, although the General Cargo rule would have held the request.
+   The rule's reasons are shown so the person approving the quotation can see
+   what the search was run as, and why that may not fit this cargo. */
+function sectionGoodsTypeAuto(detail) {
+  const auto = detail.goods_type_auto;
+  if (!auto) return null;
+  return el("div", { class: "banner banner-amber" },
+    `Goods type set automatically: ${auto.goods_type}`,
+    el("span", { class: "sub" },
+      "It is the only goods type configured, so no operator pick was needed. " +
+      "The rule would otherwise have held this request because " +
+      auto.reasons.join("; ") + ". Check the rates fit this cargo before approving the quotation."));
 }
 
 function sectionMerged(detail) {
@@ -1064,7 +1103,9 @@ function renderDetail() {
     sectionClarification(detail),
     sectionReply(detail),
     sectionMerged(detail),
+    ...(sectionLateMessages(detail) || []),
     sectionManualReview(detail),
+    sectionGoodsTypeAuto(detail),
     sectionRates(detail),
     sectionApproval(detail),
     sectionQuotation(detail),

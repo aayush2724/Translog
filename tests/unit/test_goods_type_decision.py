@@ -147,3 +147,40 @@ def test_fingerprint_changes_when_cargo_facts_change() -> None:
     assert base != record_fingerprint("Auto spare parts", "hazardous", False)
     assert base != record_fingerprint("Cotton garments", "general cargo", False)
     assert base != record_fingerprint("Auto spare parts", "general cargo", True)
+
+
+# --- a single-option catalog (applied automatically) ------------------------------
+
+
+def test_only_option_is_the_label_when_nothing_else_is_configured() -> None:
+    from translog_quote.domain.goods_type import only_option
+
+    assert only_option((), "0000 - General Cargo") == "0000 - General Cargo"
+    assert only_option(("0000 - General Cargo",), "0000 - General Cargo") == "0000 - General Cargo"
+    assert only_option(("1234 - Machinery",), "0000 - General Cargo") is None
+    assert only_option((), "") is None
+
+
+def test_hold_reasons_say_why_the_rule_would_hold() -> None:
+    from translog_quote.domain.goods_type import hold_reasons
+
+    reasons = hold_reasons(
+        commodity="Lithium batteries",
+        cargo_type="DG class 9",
+        is_chemical=None,
+        special_handling=(),
+    )
+    assert reasons == (
+        "the client has not said whether the cargo is a chemical",
+        'the cargo type ("DG class 9") is not plainly general cargo',
+        "the commodity mentions special handling (lithium)",
+    )
+    assert (
+        hold_reasons(
+            commodity="Printed books",
+            cargo_type="General Cargo",
+            is_chemical=False,
+            special_handling=(),
+        )
+        == ()
+    )

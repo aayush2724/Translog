@@ -26,7 +26,14 @@ from translog_quote.domain.extraction import (
     FieldStatus,
     build_extraction_messages,
 )
-from translog_quote.domain.extraction.ship_date import DATE_ORDER_MARKER, ambiguous_day_month
+from translog_quote.domain.extraction.prompt import with_reply_context
+from translog_quote.domain.extraction.ship_date import (
+    DATE_ORDER_MARKER,
+    WEEKDAY_MARKER,
+    ambiguous_day_month,
+    either_way_date,
+    weekday_mismatch,
+)
 from translog_quote.domain.shipment import units
 from translog_quote.errors import ContractViolation
 from translog_quote.observability import get_logger
@@ -82,8 +89,8 @@ class OpenRouterExtractionAdapter:
         if callable(closer):
             closer()
 
-    def extract_shipment(self, text: str) -> ExtractionResult:
-        payload = self._build_payload(text)
+    def extract_shipment(self, text: str, *, asked_about: tuple[str, ...] = ()) -> ExtractionResult:
+        payload = self._build_payload(with_reply_context(asked_about, text))
         body = self._transport.post_chat_completion(payload)
         content = self._content_of(body)
         return self._parse(content)
@@ -208,8 +215,10 @@ class OpenRouterExtractionAdapter:
                 f"Model returned a JSON {type(payload).__name__}, expected an object"
             )
 
+        _move_cargo_type_out_of_commodity(payload)
         _normalise_units(payload)
         _flag_ambiguous_day_month(payload)
+        _flag_weekday_mismatch(payload)
         _mark_impossible_values_invalid(payload)
 
         try:
@@ -290,10 +299,23 @@ def _normalise_units(payload: dict[str, Any]) -> None:
                     "evidence": weight.get("evidence"),
                     "note": units.unit_note("Weight", units.SEPARATOR_MARKER, written),
                 }
+            elif canon is not None and units.is_chargeable_only(weight.get("evidence")):
+                # The airline's billing figure, not the actual weight. Asked.
+                payload["weight_kg"] = {
+                    "status": "invalid",
+                    "evidence": weight.get("evidence"),
+                    "note": units.unit_note("Weight", units.CHARGEABLE_MARKER, f"{seen} {raw}"),
+                }
             elif canon is not None:
-                payload["weight_kg"] = {**weight, "value": units.to_kg(value, canon)}
+                if units.kilo_suffix_in(weight.get("evidence"), float(value)):
+                    value = value * 1000  # "1.5k kg" is 1,500 kg
+                    _log.info("extraction: weight %sk read as %s", seen, _number_text(value))
+                kg = units.to_kg(value, canon)
                 if canon != "kg":
                     _log.info("extraction: weight converted from %s %s to kg", seen, raw)
+                payload["weight_kg"] = {**weight, "value": kg}
+                if units.is_per_piece(weight.get("evidence")):
+                    _total_per_piece_weight(payload, weight, kg, f"{seen} {raw}")
             else:
                 missing = raw is None or (isinstance(raw, str) and raw.strip().lower() in _NO_UNIT)
                 marker = units.UNIT_MISSING_MARKER if missing else units.UNIT_UNSUPPORTED_MARKER
@@ -317,6 +339,11 @@ def _normalise_units(payload: dict[str, Any]) -> None:
     else:
         return
     raw_sides = [value.get(side) for side in _SIDES]
+    if (isinstance(raw, str) and units.is_feet_inches(raw)) or any(
+        isinstance(s, str) for s in raw_sides
+    ):
+        _convert_feet_inches(payload, dims, raw_sides, raw)
+        return
     if not all(isinstance(s, int | float) and not isinstance(s, bool) for s in raw_sides):
         return  # malformed — left for model_validate to reject
     sides = [float(s) for s in raw_sides]  # type: ignore[arg-type]  # checked just above
@@ -338,6 +365,63 @@ def _normalise_units(payload: dict[str, Any]) -> None:
     }
 
 
+def _total_per_piece_weight(
+    payload: dict[str, Any], weight: dict[str, Any], kg: float, shown: str
+) -> None:
+    """A weight given per piece ("50 kg each"): multiplied by the stated piece
+    count, or — with no usable count — asked for as the shipment total."""
+    pcs = payload.get("pcs")
+    count = pcs.get("value") if isinstance(pcs, dict) and pcs.get("status") == "stated" else None
+    if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+        payload["weight_kg"] = {**weight, "value": units.times_pieces(kg, count)}
+        _log.info("extraction: per-piece weight %s multiplied by %d pieces", shown, count)
+        return
+    payload["weight_kg"] = {
+        "status": "invalid",
+        "evidence": weight.get("evidence"),
+        "note": units.unit_note("Weight", units.PER_PIECE_MARKER, shown),
+    }
+
+
+def _convert_feet_inches(
+    payload: dict[str, Any], dims: dict[str, Any], raw_sides: list[object], raw: object
+) -> None:
+    """Dimensions with a side written as text: feet and inches ("2'6\" x 1'8\"
+    x 1'4\""), or a fraction under an ordinary unit ("1 1/2 ft"). Each side is
+    parsed in code. A bare number under the feet-and-inches unit is whole feet.
+    Any side that does not parse makes the field INVALID with the client's
+    wording, so it is asked about — never guessed."""
+    seen = " x ".join(_number_text(s) for s in raw_sides)
+    feet_inches = isinstance(raw, str) and units.is_feet_inches(raw)
+    canon = None if feet_inches else (units.length_unit(raw) if isinstance(raw, str) else None)
+    inches: list[float] = []
+    for side in raw_sides:
+        parsed: float | None = None
+        number = isinstance(side, int | float) and not isinstance(side, bool) and side > 0
+        if canon is not None:
+            if isinstance(side, str):
+                parsed = units.parse_side(side, canon)
+            elif number:
+                parsed = units.to_inches(float(side), canon)  # type: ignore[arg-type]
+        elif isinstance(side, str):
+            parsed = units.parse_feet_inches(side)
+        elif number and feet_inches:
+            parsed = float(side) * 12  # type: ignore[arg-type]
+        if parsed is None:
+            payload["dimensions_in"] = {
+                "status": "invalid",
+                "evidence": dims.get("evidence"),
+                "note": units.unit_note("Dimensions", units.UNIT_UNSUPPORTED_MARKER, seen),
+            }
+            return
+        inches.append(parsed)
+    payload["dimensions_in"] = {
+        **dims,
+        "value": dict(zip(_SIDES, inches, strict=True)),
+    }
+    _log.info("extraction: dimensions converted from %s (feet and inches) to inches", seen)
+
+
 def _flag_ambiguous_day_month(payload: dict[str, Any]) -> None:
     """Turn a stated numeric date that could be either day/month order
     ("05/11/2026") into an AMBIGUOUS field, in place.
@@ -348,6 +432,13 @@ def _flag_ambiguous_day_month(payload: dict[str, Any]) -> None:
     readings so the client only has to pick one.
     """
     cell = payload.get("ship_date")
+    if isinstance(cell, dict) and cell.get("status") == "ambiguous":
+        # The model saw the problem itself; give it the note that asks the
+        # client to pick between the two readings.
+        written = either_way_date(cell.get("evidence")) or either_way_date(cell.get("note"))
+        if written is not None:
+            cell["note"] = f"Ship date {DATE_ORDER_MARKER}: {written}"
+        return
     if not (isinstance(cell, dict) and cell.get("status") == "stated"):
         return
     value = cell.get("value")
@@ -366,6 +457,76 @@ def _flag_ambiguous_day_month(payload: dict[str, Any]) -> None:
         "evidence": cell.get("evidence"),
         "note": f"Ship date {DATE_ORDER_MARKER}: {written}",
     }
+
+
+def _flag_weekday_mismatch(payload: dict[str, Any]) -> None:
+    """Turn a stated date whose written weekday is wrong ("Monday, 29 October
+    2026", a Thursday) into an AMBIGUOUS field, in place, so the client is asked
+    which of the two they meant."""
+    cell = payload.get("ship_date")
+    if not (isinstance(cell, dict) and cell.get("status") == "stated"):
+        return
+    value = cell.get("value")
+    if not isinstance(value, str):
+        return
+    try:
+        stated = date.fromisoformat(value)
+    except ValueError:
+        return
+    named = weekday_mismatch(cell.get("evidence"), stated)
+    if named is None:
+        return
+    payload["ship_date"] = {
+        "status": "ambiguous",
+        "evidence": cell.get("evidence"),
+        "note": f"Ship date {WEEKDAY_MARKER}: {named}, {stated.isoformat()}",
+    }
+
+
+#: Phrases that describe the cargo's *type*, never what it is. The model reads
+#: a short reply such as "general cargo, chemical: no" as naming the commodity;
+#: recorded there it conflicts with the real commodity and the client is asked
+#: a nonsensical question ("Printed books or general cargo?").
+_CARGO_TYPE_PHRASES = frozenset(
+    {
+        "general cargo",
+        "general",
+        "gc",
+        "gen cargo",
+        "non haz",
+        "nonhaz",
+        "non hazardous",
+        "non hazardous cargo",
+        "non haz cargo",
+        "ndg",
+        "non dg",
+        "non dangerous goods",
+        "dg",
+        "dangerous goods",
+        "haz",
+        "hazardous",
+        "hazardous cargo",
+    }
+)
+
+
+def _move_cargo_type_out_of_commodity(payload: dict[str, Any]) -> None:
+    """A stated commodity that is only a cargo-type phrase is moved to
+    ``cargo_type`` (when that is not already stated) and the commodity left
+    not stated, in place."""
+    commodity = payload.get("commodity")
+    if not (isinstance(commodity, dict) and commodity.get("status") == "stated"):
+        return
+    value = commodity.get("value")
+    if not isinstance(value, str):
+        return
+    key = " ".join(value.lower().replace("-", " ").replace(".", " ").split())
+    if key not in _CARGO_TYPE_PHRASES:
+        return
+    cargo = payload.get("cargo_type")
+    if not (isinstance(cargo, dict) and cargo.get("status") == "stated"):
+        payload["cargo_type"] = dict(commodity)
+    payload["commodity"] = {"status": "not_stated", "value": None}
 
 
 def _is_nonpositive_number(value: object) -> bool:

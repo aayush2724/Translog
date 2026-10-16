@@ -55,7 +55,7 @@ class ScriptedExtractor:
         self._results = list(results)
         self.calls: list[str] = []
 
-    def extract_shipment(self, text: str) -> ExtractionResult:
+    def extract_shipment(self, text: str, *, asked_about: tuple[str, ...] = ()) -> ExtractionResult:
         self.calls.append(text)
         result = self._results.pop(0)
         if isinstance(result, Exception):

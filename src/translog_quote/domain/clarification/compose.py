@@ -21,14 +21,20 @@ from translog_quote.domain.clarification.model import (
 )
 from translog_quote.domain.clarification.questions import (
     ambiguous_question,
+    chargeable_question,
     conflict_question,
     date_order_question,
     invalid_question,
+    is_chargeable_note,
     is_date_order_note,
+    is_per_piece_note,
     is_separator_note,
+    is_weekday_note,
     missing_question,
+    per_piece_question,
     separator_question,
     unit_question,
+    weekday_question,
 )
 from translog_quote.domain.extraction import ExtractionResult, FieldStatus
 from translog_quote.domain.shipment import FieldConflict, FieldName
@@ -114,11 +120,12 @@ def identify_unresolved(
             detail = _ambiguity_detail(extraction, issue.field)
             # A numeric date that reads either way round gets both readings
             # quoted back, so the client only has to pick one.
-            question = (
-                date_order_question(detail)
-                if is_date_order_note(detail)
-                else ambiguous_question(issue.field)
-            )
+            if is_date_order_note(detail):
+                question = date_order_question(detail)
+            elif is_weekday_note(detail):
+                question = weekday_question(detail, _evidence_of(extraction, issue.field))
+            else:
+                question = ambiguous_question(issue.field)
             unresolved.append(
                 UnresolvedField(
                     field=issue.field,
@@ -141,6 +148,10 @@ def identify_unresolved(
             note = _ambiguity_detail(extraction, issue.field)
             if is_separator_note(note):
                 question = separator_question(note)
+            elif is_per_piece_note(note):
+                question = per_piece_question(note)
+            elif is_chargeable_note(note):
+                question = chargeable_question(note)
             elif is_unit_note(note):
                 question = unit_question(issue.field, note)
             else:
@@ -194,6 +205,13 @@ def _ambiguity_detail(extraction: ExtractionResult | None, field: FieldName) -> 
         return ""
     value = getattr(extraction, field.value, None)
     return (value.note or "") if value is not None else ""
+
+
+def _evidence_of(extraction: ExtractionResult | None, field: FieldName) -> str | None:
+    if extraction is None:
+        return None
+    value = getattr(extraction, field.value, None)
+    return value.evidence if value is not None else None
 
 
 def compose_clarification(

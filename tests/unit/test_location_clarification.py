@@ -77,7 +77,9 @@ class _ScriptedExtractor:
     def __init__(self, *results: ExtractionResult) -> None:
         self._results = list(results)
 
-    def extract_shipment(self, _text: str) -> ExtractionResult:
+    def extract_shipment(
+        self, _text: str, *, asked_about: tuple[str, ...] = ()
+    ) -> ExtractionResult:
         return self._results.pop(0)
 
 

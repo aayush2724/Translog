@@ -90,7 +90,7 @@ class ScriptedExtractor:
     def __init__(self, *results: ExtractionResult) -> None:
         self._results = list(results)
 
-    def extract_shipment(self, text: str) -> ExtractionResult:
+    def extract_shipment(self, text: str, *, asked_about: tuple[str, ...] = ()) -> ExtractionResult:
         if not self._results:
             raise ContractViolation("the scripted scenario has no further extraction to give")
         return self._results.pop(0)

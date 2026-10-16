@@ -363,3 +363,106 @@ def test_missing_dimension_and_weight_questions_ask_for_the_unit() -> None:
     assert "and their unit" in missing_question(FieldName.DIMENSIONS_IN)
     assert "in inches" not in missing_question(FieldName.DIMENSIONS_IN)
     assert "its unit" in missing_question(FieldName.WEIGHT_KG)
+
+
+# --- feet and inches ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "inches"),
+    [
+        ("2'6\"", 30.0),
+        ("1'8\"", 20.0),
+        ("2 ft 6 in", 30.0),
+        ("2' 6''", 30.0),
+        ("2ft6in", 30.0),
+        ("3 ft", 36.0),
+        ("3'", 36.0),
+        ("1.5 ft", 18.0),
+        ('20"', 20.0),
+        ("20 in", 20.0),
+    ],
+)
+def test_feet_and_inches_parse_exactly(text: str, inches: float) -> None:
+    from translog_quote.domain.shipment.units import parse_feet_inches
+
+    assert parse_feet_inches(text) == inches
+
+
+@pytest.mark.parametrize("text", ["2'14\"", "40", "abc", "0 ft"])
+def test_text_that_is_not_feet_and_inches_is_refused(text: str) -> None:
+    from translog_quote.domain.shipment.units import parse_feet_inches
+
+    assert parse_feet_inches(text) is None
+
+
+def test_feet_and_inches_dimensions_convert_to_inches() -> None:
+    """The sweep's case: 2'6" x 1'8" x 1'4" was asked about; it is 30 x 20 x 16."""
+    result = _extract(
+        {
+            "dimensions_in": {
+                "status": "stated",
+                "value": {"length": "2'6\"", "width": "1'8\"", "height": "1'4\""},
+                "unit": "ft-in",
+            }
+        }
+    )
+    assert result.dimensions_in.is_stated
+    assert result.dimensions_in.value == CargoDimensions(length=30, width=20, height=16)
+
+
+def test_a_bare_number_under_feet_and_inches_is_whole_feet() -> None:
+    result = _extract(
+        {
+            "dimensions_in": {
+                "status": "stated",
+                "value": {"length": "2 ft 6 in", "width": 2, "height": "1 ft"},
+                "unit": "ft-in",
+            }
+        }
+    )
+    assert result.dimensions_in.value == CargoDimensions(length=30, width=24, height=12)
+
+
+def test_an_unparseable_side_is_asked_about_not_guessed() -> None:
+    result = _extract(
+        {
+            "dimensions_in": {
+                "status": "stated",
+                "value": {"length": "2'6\"", "width": "about two feet", "height": "1'4\""},
+                "unit": "ft-in",
+            }
+        }
+    )
+    assert result.dimensions_in.status is FieldStatus.INVALID
+    assert is_unit_note(result.dimensions_in.note)
+
+
+def test_feet_and_inches_flow_through_to_a_valid_request() -> None:
+    result = _extract(
+        {
+            "dimensions_in": {
+                "status": "stated",
+                "value": {"length": "2'6\"", "width": "1'8\"", "height": "1'4\""},
+                "unit": "ft-in",
+            }
+        }
+    )
+    wf, _sink = workflow(complete(dimensions_in=result.dimensions_in))
+    out = wf.handle(REQ, email("2'6\" x 1'8\" x 1'4\"", n=1))
+    assert out.state is RequestState.VALIDATED
+    assert out.record.dimensions_in == CargoDimensions(length=30, width=20, height=16)
+
+
+def test_mixed_feet_inches_and_inches_only_sides_convert() -> None:
+    """Live finding: 2'6" x 20" x 16" mixes forms; each side parses on its own."""
+    result = _extract(
+        {
+            "dimensions_in": {
+                "status": "stated",
+                "value": {"length": "2 ft 6 in", "width": '20"', "height": '16"'},
+                "unit": "ft-in",
+            }
+        }
+    )
+    assert result.dimensions_in.value == CargoDimensions(length=30, width=20, height=16)

@@ -283,6 +283,49 @@ Both checks run in code against the `evidence` quote, which the model is told to
 copy character for character. The missing-field questions for weight and
 dimensions now ask for the value *and its unit*.
 
+**Feet and inches (2026-10-16).** "2'6\" x 1'8\" x 1'4\"" or "2 ft 6 in" cannot be
+one number, so the model gives each side as written with `"unit": "ft-in"`
+and `units.parse_feet_inches` converts exactly (feet × 12 + inches, not
+rounded). Inches-only sides ("20\"") may be mixed in; a bare number under
+`ft-in` is whole feet; a side that does not parse, or inches of 12+ after
+feet, is `INVALID` and asked about.
+
+**Edge-case sweep (2026-10-16).** Each of these was a silently wrong value or an
+unreadable reply. All are deterministic, in code, after the model:
+
+- *Per-piece weight* ("50 kg each", "20 kg per carton", "15 kg/pc"): multiplied
+  by the stated `pcs`; with no piece count, `INVALID` asking for the total.
+  Evidence that also says "total" is left alone.
+- *Thousands "k"* ("1.5k kg"): the model copies 1.5; the code restores 1,500.
+- *Chargeable / volumetric weight only*: `INVALID`, asking for the actual gross
+  weight (chargeable weight is derived from it, so it is not a search input).
+- *Fractions* ("1 1/2 ft", "2½ in", "2 ft 6 1/2 in") parse exactly.
+- *A cargo type written as the commodity* ("general cargo", "GC", "non-haz",
+  "DG" alone) moves to `cargo_type`; the commodity stays not stated.
+- *Dates*: a two-digit year ("05/11/26") gets the same day/month check; a date
+  the model itself marked ambiguous still gets the two-reading question; a
+  weekday that does not fall on an explicit-year date ("Monday, 29 October
+  2026", a Thursday) is `AMBIGUOUS` and confirmed.
+- *Places* (resolver): country abbreviations (USA, UAE, KSA, GBR, PRC, RSA) are
+  never airport codes; a name and parenthesised code that point to different
+  airports ("Delhi (IND)") are refused; origin and destination on one airport
+  are both asked about, never searched.
+- *Prompt*: route shorthand reads origin first ("BOM ✈ SIN", "BOM-SIN"); `pcs`
+  counts outer packages ("5 pallets with 20 cartons each" is 5; "2 pallets and
+  3 boxes" is 5).
+
+**Replies are read with what was asked.** `QuotationRequest.asked_about` keeps
+one line per field the last sent clarification asked (label plus the client's
+own earlier wording, never our example values). The workflow passes it to
+`extract_shipment(text, asked_about=...)`; the adapter prefixes the reply with a
+"QUESTIONS THE DESK ASKED" block. The extracted text is still only the reply, so
+"cm", "No" or "5 November 2026" now resolve instead of reading as empty.
+
+**Messages after validation are shown.** A client message on a request that no
+longer takes answers is still not extracted (cost), but it is kept on the live
+request (`late_messages`) and shown on the desk with a warning, so a late
+correction cannot vanish.
+
 ## 12. The prompt-injection boundary
 
 The client email is **data**. It is written by a third party, and this system

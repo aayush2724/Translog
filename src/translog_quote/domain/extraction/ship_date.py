@@ -76,7 +76,12 @@ def resolve_ship_date(extraction: ExtractionResult, *, today: date) -> Extractio
 #: day with no warning, so such a date is confirmed with the client instead.
 DATE_ORDER_MARKER = "written with day and month that could be either way round"
 
-_NUMERIC_DATE = re.compile(r"(?<!\d)(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4})(?!\d)")
+_NUMERIC_DATE = re.compile(r"(?<!\d)(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4}|\d{2})(?!\d)")
+
+
+def full_year(year: int) -> int:
+    """A two-digit year ("26" in 05/11/26) is this century's."""
+    return year + 2000 if year < 100 else year
 
 
 def ambiguous_day_month(text: str | None, stated: date) -> tuple[str, date, date] | None:
@@ -86,6 +91,7 @@ def ambiguous_day_month(text: str | None, stated: date) -> tuple[str, date, date
         return None
     for match in _NUMERIC_DATE.finditer(text):
         first, second, year = (int(g) for g in match.groups())
+        year = full_year(year)
         if first > 12 or second > 12 or first == second:
             continue
         try:
@@ -95,4 +101,62 @@ def ambiguous_day_month(text: str | None, stated: date) -> tuple[str, date, date
             continue
         if stated in (day_first, month_first):
             return match.group(0), day_first, month_first
+    return None
+
+
+#: "Monday, 29 October 2026" — but 29 October 2026 is a Thursday. One of the two
+#: is a slip, and quoting for the wrong one is a missed flight, so the client is
+#: asked which they meant.
+WEEKDAY_MARKER = "written with a weekday that does not fall on that date"
+
+_WEEKDAYS = (
+    ("monday", "mon"),
+    ("tuesday", "tue", "tues"),
+    ("wednesday", "wed"),
+    ("thursday", "thu", "thur", "thurs"),
+    ("friday", "fri"),
+    ("saturday", "sat"),
+    ("sunday", "sun"),
+)
+_WEEKDAY_WORD = re.compile(
+    r"\b(" + "|".join(name for names in _WEEKDAYS for name in names) + r")\b\.?", re.IGNORECASE
+)
+
+
+def weekday_mismatch(text: str | None, stated: date) -> str | None:
+    """The weekday ``text`` names when it is not ``stated``'s weekday, or ``None``.
+
+    Only checked when the text carries the year itself (four digits, or a
+    numeric date): with no year written, the model chose one, and the date is
+    rolled to the right year later — a mismatch then means nothing."""
+    if not text:
+        return None
+    if str(stated.year) not in text and _NUMERIC_DATE.search(text) is None:
+        return None
+    named = [m.group(1).lower() for m in _WEEKDAY_WORD.finditer(text)]
+    if not named:
+        return None
+    days = {idx for word in named for idx, names in enumerate(_WEEKDAYS) if word in names}
+    if stated.weekday() in days:
+        return None
+    return _WEEKDAYS[min(days)][0].capitalize()
+
+
+def either_way_date(text: str | None) -> str | None:
+    """A numeric date in ``text`` that reads validly both ways round
+    ("05/11/26"), as written; ``None`` when there is none. For a date the model
+    itself already called ambiguous, so the client can be asked the precise
+    two-reading question rather than a generic one."""
+    if not text:
+        return None
+    for match in _NUMERIC_DATE.finditer(text):
+        first, second, year = (int(g) for g in match.groups())
+        if first > 12 or second > 12 or first == second:
+            continue
+        try:
+            date(full_year(year), second, first)
+            date(full_year(year), first, second)
+        except ValueError:
+            continue
+        return match.group(0)
     return None

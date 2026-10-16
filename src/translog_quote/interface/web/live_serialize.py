@@ -597,6 +597,17 @@ def _goods_type_hold(session: LiveSession, request: LiveRequest) -> Json | None:
     }
 
 
+def _goods_type_auto(request: LiveRequest) -> Json | None:
+    """The single catalog label applied without an operator, and why the rule
+    would otherwise have held the request."""
+    if request.goods_type_auto_label is None:
+        return None
+    return {
+        "goods_type": request.goods_type_auto_label,
+        "reasons": list(request.goods_type_auto_reasons),
+    }
+
+
 def _msds_note(msds_attached: bool | None) -> str | None:
     """The MSDS status in words for the operator judging a Goods Type hold.
 
@@ -678,8 +689,12 @@ def request_summary(session: LiveSession, request: LiveRequest) -> Json:
         "worker_notice": _worker_notice(session, request),
         # Held for an operator to pick a WebCargo Goods Type. None unless it applies.
         "goods_type_hold": _goods_type_hold(session, request),
+        # Applied automatically because it was the only label on offer, although
+        # the General Cargo rule would have held it. None unless it applies.
+        "goods_type_auto": _goods_type_auto(request),
         "manual_review_notes": list(request.manual_review_notes),
         "waiting_replies": len(request.waiting_replies),
+        "late_messages": len(request.late_messages),
         "awaiting_decision": request.awaiting_quotation_decision,
         "settled": request.is_settled,
     }
@@ -708,6 +723,7 @@ def request_detail(session: LiveSession, request: LiveRequest) -> Json:
         "rate_search_pending": request.rate_search_pending,
         "worker_notice": _worker_notice(session, request),
         "goods_type_hold": _goods_type_hold(session, request),
+        "goods_type_auto": _goods_type_auto(request),
         "manual_review_notes": list(request.manual_review_notes),
         "resolution": None
         if request.state is not RequestState.RESOLVED
@@ -739,6 +755,9 @@ def request_detail(session: LiveSession, request: LiveRequest) -> Json:
         # request that looks idle is actually waiting on them, rather than on
         # the client.
         "waiting_replies": len(request.waiting_replies),
+        # Client messages after the request stopped taking answers: not merged,
+        # so the operator reads them (often a correction) before quoting.
+        "late_messages": [email_json(m) for m in request.late_messages],
         "rates": rates_json(request.rates) if request.rates is not None else None,
         "approval": None
         if request.packet is None or request.rates is None

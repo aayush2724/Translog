@@ -62,6 +62,10 @@ class UnresolvedPlace(BaseModel):
 
     field: FieldName
     stated: str
+    same_as_other_end: bool = False
+    """The place resolves, but to the same airport as the other end of the
+    journey ("Mumbai" to "BOM"): no air freight to quote, so the client is
+    asked to confirm both ends rather than searched for."""
 
 
 class ClarificationMessage(BaseModel):

@@ -86,7 +86,7 @@ class ProviderExtractor:
         self.answers = answers
         self.calls: list[str] = []
 
-    def extract_shipment(self, text: str) -> ExtractionResult:
+    def extract_shipment(self, text: str, *, asked_about: tuple[str, ...] = ()) -> ExtractionResult:
         self.calls.append(text)
         answer = self.answers[text]
         if isinstance(answer, Exception):

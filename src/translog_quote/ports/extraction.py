@@ -27,6 +27,10 @@ class ExtractionPort(Protocol):
     of the model, not an empty extraction, and must not be reported as one.
     """
 
-    def extract_shipment(self, text: str) -> ExtractionResult: ...
+    def extract_shipment(self, text: str, *, asked_about: tuple[str, ...] = ()) -> ExtractionResult:
+        """``asked_about`` lists what the clarification this ``text`` replies
+        to asked (see ``QuotationRequest.asked_about``), so a short answer can be
+        read against its question. Empty for a first message."""
+        ...
 
     def read_client_intent(self, text: str) -> ClientIntent: ...

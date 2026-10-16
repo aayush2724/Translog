@@ -164,3 +164,166 @@ def thousands_readings(written: str) -> tuple[str, str]:
     as_thousands = f"{int(written.replace('.', '')):,}"
     as_decimal = f"{float(written):g}"
     return as_thousands, as_decimal
+
+
+#: Feet-and-inches — "2'6\"", "2 ft 6 in", "2' 6''", "3 ft" — a compound
+#: measurement no single factor converts. The model reports each side as
+#: written with this unit, and `parse_feet_inches` does the arithmetic. The
+#: result is exact (feet × 12 + inches), so it is not rounded.
+FEET_INCHES = "ft-in"
+
+_FEET_INCHES_ALIASES = ("ft-in", "ftin", "ft_in", "feet-inches", "feetinches", "ftandin")
+
+#: A measured number as clients write it: "2", "2.5", "1 1/2", "1/2", "1½".
+_NUM = r"\d+(?:\.\d+)?(?:\s*(?:\d+/\d+|[½¼¾]))?|\d+/\d+|[½¼¾]"
+_VULGAR = {"½": 0.5, "¼": 0.25, "¾": 0.75}
+
+
+def parse_number(text: str) -> float | None:
+    """ "1 1/2" -> 1.5, "1½" -> 1.5, "3/4" -> 0.75, "2.5" -> 2.5; ``None`` for
+    anything else. Whole text only — no unit."""
+    match = re.fullmatch(
+        r"\s*(?:(?P<whole>\d+(?:\.\d+)?)\s*)?(?:(?P<num>\d+)/(?P<den>\d+)|(?P<vulgar>[½¼¾]))?\s*",
+        text,
+    )
+    if match is None or not (match.group("whole") or match.group("num") or match.group("vulgar")):
+        return None
+    total = float(match.group("whole") or 0)
+    if match.group("num"):
+        if match.group("whole") and "." in match.group("whole"):
+            return None  # "1.5 1/2" is not a number anyone writes
+        den = int(match.group("den"))
+        if den == 0:
+            return None
+        total += int(match.group("num")) / den
+    if match.group("vulgar"):
+        total += _VULGAR[match.group("vulgar")]
+    return total
+
+
+_FEET_INCHES_TEXT = re.compile(
+    rf"""^\s*
+        (?P<feet>{_NUM})\s*(?:'|′|ft|feet|foot)\s*
+        (?:(?P<inches>{_NUM})\s*(?:"|″|''|in|inch|inches)?)?
+        \s*$""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def is_feet_inches(raw: str | None) -> bool:
+    """Whether ``raw`` names the compound feet-and-inches unit."""
+    return raw is not None and _fold(raw) in _FEET_INCHES_ALIASES
+
+
+_INCHES_ONLY_TEXT = re.compile(rf'^\s*({_NUM})\s*(?:"|″|\'\'|in|inch|inches)\s*$', re.IGNORECASE)
+
+
+def parse_feet_inches(text: str) -> float | None:
+    """``"2'6\\""`` -> 30.0 inches; ``None`` when ``text`` is not feet-and-inches.
+
+    A side written in inches alone (``20"``, ``20 in``) is accepted too, because
+    clients mix them: ``2'6" x 20" x 16"``. A bare number with no mark is not
+    parsed here — it carries no unit. Inches of 12 or more after feet
+    ("2'14\\"") are refused rather than carried over: a typo there is more
+    likely than a deliberate 14 inches."""
+    inches_only = _INCHES_ONLY_TEXT.match(text)
+    if inches_only is not None:
+        value = parse_number(inches_only.group(1))
+        return value if value is not None and value > 0 else None
+    match = _FEET_INCHES_TEXT.match(text)
+    if match is None:
+        return None
+    feet = parse_number(match.group("feet"))
+    inches = parse_number(match.group("inches")) if match.group("inches") else 0.0
+    if feet is None or inches is None or inches >= 12:
+        return None
+    total = feet * 12 + inches
+    return total if total > 0 else None
+
+
+#: A side written as text under an ordinary length unit — "1 1/2 ft", "45cm",
+#: "2½" — is read as a number (fractions included) with the unit word, if any,
+#: removed. The unit word must agree with the field's unit; a different one is
+#: refused rather than mixed.
+_TRAILING_UNIT = re.compile(r"^(?P<num>.*?)\s*(?P<unit>[a-z\"'″′.]+)?\s*$", re.IGNORECASE)
+
+
+def parse_side(text: str, unit: str) -> float | None:
+    """One dimension written as text, in canonical length ``unit``, to inches."""
+    match = _TRAILING_UNIT.match(text)
+    if match is None:
+        return None
+    written_unit = match.group("unit")
+    if written_unit and length_unit(written_unit) != unit:
+        return None
+    value = parse_number(match.group("num"))
+    if value is None or value <= 0:
+        return None
+    return to_inches(value, unit)
+
+
+#: A weight given per piece ("50 kg each", "20 kg per carton", "15 kg/pc") is not
+#: the shipment total WebCargo needs. With the piece count stated it is
+#: multiplied out — exact arithmetic on two stated facts — otherwise the client
+#: is asked for the total.
+PER_PIECE_MARKER = "given per piece, not as the shipment total"
+
+_PACKAGE = (
+    r"(?:pieces?|pcs?|pces?|box(?:es)?|cartons?|ctns?|pallets?|plts?|bags?|drums?"
+    r"|crates?|cases?|packages?|pkgs?|units?|parcels?|skids?)"
+)
+_PER_PIECE = re.compile(
+    rf"\beach\b|\bea\b|\bper\s+{_PACKAGE}\b|/\s*{_PACKAGE}\b|\bapiece\b",
+    re.IGNORECASE,
+)
+_TOTAL_WORD = re.compile(
+    r"\b(?:total|totals|totalling|totaling|altogether|in\s+all|overall)\b", re.IGNORECASE
+)
+
+
+def is_per_piece(text: str | None) -> bool:
+    """Whether a weight's evidence says it is per piece (and not also a total)."""
+    if not text:
+        return False
+    return bool(_PER_PIECE.search(text)) and not _TOTAL_WORD.search(text)
+
+
+def times_pieces(kg: float, pcs: int) -> float:
+    """A per-piece weight in kg multiplied out to the shipment total."""
+    return _round_up(kg * pcs)
+
+
+#: "1.5k kg" or "2K KGS" is 1,500 / 2,000 kg. The model copies the number as
+#: written (1.5), so the thousand is restored here rather than lost.
+_KILO_SUFFIX = re.compile(
+    r"(?<![\d.,])(\d+(?:\.\d+)?)\s*k\s*(?=(?:kgs?|kilos?|kilograms?|lbs?|pounds?)\b)",
+    re.IGNORECASE,
+)
+
+
+def kilo_suffix_in(text: str | None, value: float) -> bool:
+    """Whether ``text`` writes ``value`` with a thousands "k" ("1.5k kg")."""
+    if not text:
+        return False
+    return any(math.isclose(float(m.group(1)), value) for m in _KILO_SUFFIX.finditer(text))
+
+
+#: A chargeable or volumetric weight is the airline's billing figure, derived
+#: from the dimensions — not the actual gross weight WebCargo searches with.
+#: Taking it as the gross weight double-counts volume, so the client is asked
+#: for the actual weight.
+CHARGEABLE_MARKER = "given as a chargeable or volumetric weight, not the actual weight"
+
+_CHARGEABLE = re.compile(
+    r"\b(?:chargeable|charg\.|volumetric|volume\s+weight|vol\.?\s*(?:wt|weight)|dimensional\s+weight|dim\.?\s+weight)\b",
+    re.IGNORECASE,
+)
+_ACTUAL_WORD = re.compile(r"\b(?:gross|actual|net|g\.?w\.?)\b", re.IGNORECASE)
+
+
+def is_chargeable_only(text: str | None) -> bool:
+    """Whether a weight's evidence calls it chargeable/volumetric and gives no
+    actual (gross) weight alongside."""
+    if not text:
+        return False
+    return bool(_CHARGEABLE.search(text)) and not _ACTUAL_WORD.search(text)

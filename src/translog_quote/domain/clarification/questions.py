@@ -14,9 +14,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from translog_quote.domain.extraction.ship_date import DATE_ORDER_MARKER
+from translog_quote.domain.extraction.ship_date import (
+    DATE_ORDER_MARKER,
+    WEEKDAY_MARKER,
+    full_year,
+)
 from translog_quote.domain.shipment import FieldName
 from translog_quote.domain.shipment.units import (
+    CHARGEABLE_MARKER,
+    PER_PIECE_MARKER,
     SEPARATOR_MARKER,
     UNIT_MISSING_MARKER,
     quoted_from_note,
@@ -154,12 +160,61 @@ def date_order_question(note: str) -> str:
     written = quoted_from_note(note)
     parts = [int(p) for p in written.replace(".", "/").replace("-", "/").split("/")]
     first, second, year = parts
+    year = full_year(year)
     day_first = date(year, second, first)
     month_first = date(year, first, second)
     return (
         f"The shipment date — you wrote {written}. Please confirm whether that is "
         f"{day_first.day} {day_first:%B %Y} or {month_first.day} {month_first:%B %Y}."
     )
+
+
+def per_piece_question(note: str) -> str:
+    """Ask for the total weight when only a per-piece weight was given."""
+    seen = quoted_from_note(note)
+    lead = f"you gave {seen} per piece" if seen else "you gave the weight per piece"
+    return (
+        f"The total shipment weight — {lead}. Please reply with the total weight of "
+        "all pieces together, and the number of pieces."
+    )
+
+
+def chargeable_question(note: str) -> str:
+    """Ask for the actual gross weight when only a chargeable weight was given."""
+    seen = quoted_from_note(note)
+    lead = f"you gave the chargeable weight ({seen})" if seen else "you gave the chargeable weight"
+    return (
+        f"The actual gross weight of the shipment — {lead}. Please reply with the "
+        "actual weight; the chargeable weight is worked out from it and the dimensions."
+    )
+
+
+def weekday_question(note: str, written: str | None) -> str:
+    """Ask which was meant when the weekday written does not fall on the date."""
+    from datetime import date
+
+    named, iso = quoted_from_note(note).split(", ", 1)
+    stated = date.fromisoformat(iso)
+    shown = (
+        f'you wrote "{written}"' if written else f"you wrote {named}, {stated.day} {stated:%B %Y}"
+    )
+    return (
+        f"The shipment date — {shown}, but {stated.day} {stated:%B %Y} is a "
+        f"{stated:%A}, not a {named}. Please confirm the date you would like the "
+        "shipment to leave."
+    )
+
+
+def is_weekday_note(note: str | None) -> bool:
+    return bool(note) and WEEKDAY_MARKER in (note or "")
+
+
+def is_per_piece_note(note: str | None) -> bool:
+    return bool(note) and PER_PIECE_MARKER in (note or "")
+
+
+def is_chargeable_note(note: str | None) -> bool:
+    return bool(note) and CHARGEABLE_MARKER in (note or "")
 
 
 def is_separator_note(note: str | None) -> bool:
@@ -184,13 +239,22 @@ _LOCATION_UNRESOLVED = (
 )
 
 
-def location_question(field: FieldName, stated: str) -> str:
+_SAME_AIRPORT = (
+    '{label} airport — the origin and destination both point to the same airport ("{stated}"). '
+    "Please confirm the {end} airport, ideally with its three-letter code."
+)
+
+
+def location_question(field: FieldName, stated: str, *, same_as_other_end: bool = False) -> str:
     """Ask for the airport behind a place we could not resolve without guessing.
 
     ``field`` is ORIGIN or DESTINATION; ``stated`` is the client's own wording,
     quoted back verbatim. Unlike the static ``AMBIGUOUS_QUESTIONS`` entries this
     interpolates the stated place, so it is a function, not a table row.
     """
+    if same_as_other_end:
+        end = "origin" if field is FieldName.ORIGIN else "destination"
+        return _SAME_AIRPORT.format(label=FIELD_LABELS[field], stated=stated, end=end)
     return _LOCATION_UNRESOLVED.format(label=FIELD_LABELS[field], stated=stated)
 
 
