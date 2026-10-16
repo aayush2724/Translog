@@ -24,9 +24,11 @@ from translog_quote.domain.clarification.questions import (
     conflict_question,
     invalid_question,
     missing_question,
+    unit_question,
 )
 from translog_quote.domain.extraction import ExtractionResult, FieldStatus
 from translog_quote.domain.shipment import FieldConflict, FieldName
+from translog_quote.domain.shipment.units import is_unit_note
 from translog_quote.domain.validation import ValidationResult, ValidationSeverity
 
 _BLOCKING = frozenset({ValidationSeverity.MISSING, ValidationSeverity.INVALID})
@@ -121,12 +123,21 @@ def identify_unresolved(
             # valid one. Unlike AMBIGUOUS this is never a hand-over — a further
             # invalid reply just asks again (it is not in the futile set, which
             # is scoped to AMBIGUOUS).
+            # A measurement given without a unit (or in one we cannot convert)
+            # is also INVALID: the client knows the unit, so ask for it — with
+            # their own numbers quoted back — rather than for "a valid value".
+            note = _ambiguity_detail(extraction, issue.field)
+            question = (
+                unit_question(issue.field, note)
+                if is_unit_note(note)
+                else invalid_question(issue.field)
+            )
             unresolved.append(
                 UnresolvedField(
                     field=issue.field,
                     reason=UnresolvedReason.INVALID,
-                    question=invalid_question(issue.field),
-                    detail=_ambiguity_detail(extraction, issue.field),
+                    question=question,
+                    detail=note,
                 )
             )
             continue

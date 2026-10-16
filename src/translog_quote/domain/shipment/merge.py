@@ -45,6 +45,19 @@ narrower alias reads better than the field-specific types already declared on
 """
 
 
+def _same_value(existing: object, incoming: object) -> bool:
+    """Equal, treating free text case- and whitespace-insensitively.
+
+    "pharmaceutical samples" then "Pharmaceutical samples" is the client saying
+    the same thing twice, not a disagreement, and must not raise a conflict
+    that blocks the request. Only text is folded: numbers, dates, booleans and
+    dimensions must match exactly.
+    """
+    if isinstance(existing, str) and isinstance(incoming, str):
+        return " ".join(existing.casefold().split()) == " ".join(incoming.casefold().split())
+    return existing == incoming
+
+
 class FieldConflict(BaseModel):
     """One field where the existing and incoming values disagree.
 
@@ -102,7 +115,7 @@ def merge_shipment(existing: ShipmentRecord, incoming: ExtractedFields) -> Merge
         if existing_value is None:
             updates[field.value] = new_value
             changed.append(field)
-        elif existing_value == new_value:
+        elif _same_value(existing_value, new_value):
             unchanged.append(field)
         else:
             conflicts.append(

@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from translog_quote.domain.shipment import FieldName
+from translog_quote.domain.shipment.units import UNIT_MISSING_MARKER, quoted_from_note
 
 if TYPE_CHECKING:
     from datetime import date
@@ -101,6 +102,31 @@ INVALID_QUESTIONS: dict[FieldName, str] = {
 def invalid_question(field: FieldName) -> str:
     """Ask the client to correct an out-of-range value they stated."""
     return INVALID_QUESTIONS.get(field, MISSING_QUESTIONS[field])
+
+
+def unit_question(field: FieldName, note: str) -> str:
+    """Ask for the unit of a measurement the client gave without one, or in a
+    unit that cannot be converted. ``note`` is the field's unit note; the
+    client's own wording is quoted back so they can see exactly what is meant.
+    """
+    seen = quoted_from_note(note)
+    missing = UNIT_MISSING_MARKER in note
+    if field is FieldName.WEIGHT_KG:
+        lead = f"The unit of the weight you gave ({seen})" if seen else "The unit of the weight"
+        return (
+            f"{lead}. Please reply with the weight and its unit, "
+            'for example "100 kg" or "220 lb".'
+        )
+    example = seen if (missing and seen) else "40 x 30 x 24"
+    lead = (
+        f"The unit of the package dimensions you gave ({seen})"
+        if seen
+        else "The unit of the package dimensions"
+    )
+    return (
+        f"{lead}. Please reply with the dimensions and their unit, "
+        f'for example "{example} cm" or "{example} inches".'
+    )
 
 
 #: What to ask when a stated place cannot be resolved to a single airport without

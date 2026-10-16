@@ -33,9 +33,15 @@ silence and not an absence: record it as `stated` with the value false. \
 "Chemical: No" is `stated` false; "We have no MSDS" is `stated` false. \
 Neither is `not_stated`, and neither is `denied`.
 5. Preserve ambiguity. If the email states something you cannot represent in \
-the schema — a weight in pounds, dimensions in centimetres, two different \
-values for one field — mark that field ambiguous and describe what you saw. Do \
-not convert units. Do not pick one of two values.
+the schema — two different values for one field, two different package sizes \
+— mark that field ambiguous and describe what you saw. Do not pick one of two \
+values.
+5a. Never convert units yourself. For weight and dimensions, copy the numbers \
+exactly as written and report the unit the email uses in the field's `unit` \
+key; the conversion is done after you. A unit is not an ambiguity: "100 x 80 x \
+60 cm" and "220 lbs" are `stated`. Numbers written with no unit at all are \
+still `stated`, with `unit` set to null. An approximate value with its unit \
+("around 80 kg", "approx. 45 kgs") is `stated` with that number.
 6. Perform no business validation. Do not decide whether the shipment is \
 complete, whether an MSDS is required, or whether an address is needed. \
 Something else does that after you.
@@ -109,18 +115,26 @@ Fields, with the exact representation required:
   origin             text, the place the cargo moves FROM for this
                      shipment. Not the sender's office or letterhead city.
   destination        text, place named as the destination
-  weight_kg          number, kilograms only. "kg", "kgs", "KG", "Kgs" and
-                     "kilograms" are all kilograms - these are `stated`, not
-                     ambiguous. Only a genuinely different unit, such as pounds
-                     or tonnes, is `ambiguous`, and it is never converted.
-  dimensions_in      an object with keys `length`, `width` and `height`, in
-                     inches only, for example
-                     {"length": 34, "width": 24, "height": 6}
-                     Never an array: read each axis from the label the email
-                     gives it, not from the order the numbers appear in.
-                     "24 (width) x 34 (length) x 6 (breadth)" is
-                     length 34, width 24, height 6.
-                     Any other unit is `ambiguous`.
+  weight_kg          number exactly as written, plus a `unit` key beside
+                     `status` naming the unit the email uses - "kg", "lb",
+                     "g", "tonne" - or null when no unit is written. Never
+                     convert. For example 220 lbs is
+                     {"status": "stated", "value": 220, "unit": "lb", ...}
+  dimensions_in      an object with keys `length`, `width` and `height`,
+                     numbers exactly as written, plus a `unit` key beside
+                     `status` naming the unit - "in", "cm", "mm", "m", "ft" -
+                     or null when the email gives no unit. Never convert. For
+                     example "100 x 80 x 60 cm" is
+                     {"status": "stated",
+                      "value": {"length": 100, "width": 80, "height": 60},
+                      "unit": "cm", ...}
+                     and "40x30x24" with no unit is the same shape with
+                     "unit": null. Never an array: read each axis from the
+                     label the email gives it, not from the order the numbers
+                     appear in. "24 (width) x 34 (length) x 6 (breadth)" is
+                     length 34, width 24, height 6. When no axes are labelled,
+                     take the numbers in the order written as length, width,
+                     height.
   commodity          text, what is being shipped
   cargo_type         text, as the client described it (for example "Non Haz")
   is_chemical        true or false, only when the email says so. "Chemical: No",
@@ -171,6 +185,8 @@ Two rules about the shape of each field, which are enforced and will reject the
 whole response if broken:
 
   - `stated` must carry a value. Every other status must set `value` to null.
+  - `unit` appears only on `weight_kg` and `dimensions_in`, and only when the
+    status is `stated`.
     Never return a status of `not_stated`, `denied` or `ambiguous` alongside a
     value.
   - `note` is one short sentence explaining an ambiguity. It is not a place to

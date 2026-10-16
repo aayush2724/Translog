@@ -102,8 +102,8 @@ Invariants, enforced by the type:
 |---|---|---|
 | `origin` | `str` | Place named as origin |
 | `destination` | `str` | Place named as destination |
-| `weight_kg` | `float` | **Kilograms only.** Any other unit is `AMBIGUOUS` — never converted |
-| `dimensions_in` | `CargoDimensions` | **Inches only**, length/width/height read from the email's own labels, not positional order. Any other unit is `AMBIGUOUS` |
+| `weight_kg` | `float` | Kilograms in the record. The model reports the number as written plus a `unit` (kg, lb, g, tonne); code converts (see below). No unit or an unconvertible one (e.g. "tons") → `INVALID`, asked for |
+| `dimensions_in` | `CargoDimensions` | Inches in the record, length/width/height read from the email's own labels, not positional order. The model reports the numbers as written plus a `unit` (in, cm, mm, m, ft); code converts. No unit → `INVALID`, and the clarification asks for the unit, quoting the client's numbers |
 | `commodity` | `str` | What is being shipped |
 | `cargo_type` | `str` | As the client described it, e.g. `"Non Haz"` |
 | `is_chemical` | `bool` | Only when stated. **A chemical-sounding commodity name is not a statement** |
@@ -258,13 +258,18 @@ drop.
 
 | Situation | Why ambiguous |
 |---|---|
-| `"1100 lbs"` | `weight_kg` is kilograms; **no conversion rule is defined in any approved document** |
-| `"60 x 86 x 15 cm"` | `dimensions_in` is inches; same reason |
 | `"20 bags"` and later `"25 bags"` in one email | No ordering to appeal to within a single message |
 
-Unit conversion is deliberately not invented here. If the business wants pounds
-or centimetres accepted, that is a specification decision with a defined
-conversion and rounding rule, not something an extraction layer should improvise.
+**Unit conversion (decided 2026-10-16).** Pounds, centimetres and the other
+common units are accepted. The model never converts: it copies the numbers as
+written and names the unit, and `domain.shipment.units` does the arithmetic
+(cm ÷ 2.54, mm ÷ 25.4, m × 39.37, ft × 12; lb × 0.45359237, g × 0.001,
+tonne × 1000), **rounding up** to 0.1 so a package is never under-declared. A
+value already in inches / kilograms is not rounded. Numbers with no unit, or
+in a unit the code will not convert ("tons": short, long or metric?), are
+`INVALID` with a unit note: the client knows the unit, so it is asked for in a
+clarification that quotes their numbers back — never guessed, and never handed
+to a person merely for lacking a unit.
 
 ## 12. The prompt-injection boundary
 

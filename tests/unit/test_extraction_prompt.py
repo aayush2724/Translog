@@ -97,7 +97,11 @@ def test_an_explicit_delivery_type_wins_over_a_delivery_address() -> None:
 
 
 def test_the_prompt_forbids_unit_conversion() -> None:
-    assert "do not convert units" in PROMPT
+    """The model copies measurements as written and reports the unit; the
+    arithmetic happens in code (`domain.shipment.units`), never in the model."""
+    assert "never convert units yourself" in PROMPT
+    assert "a unit is not an ambiguity" in PROMPT
+    assert '"unit": null' in PROMPT
 
 
 def test_the_prompt_forbids_cross_message_reasoning() -> None:

@@ -25,6 +25,7 @@ from translog_quote.domain.extraction import (
     FieldStatus,
     build_extraction_messages,
 )
+from translog_quote.domain.shipment import units
 from translog_quote.errors import ContractViolation
 from translog_quote.observability import get_logger
 
@@ -205,6 +206,7 @@ class OpenRouterExtractionAdapter:
                 f"Model returned a JSON {type(payload).__name__}, expected an object"
             )
 
+        _normalise_units(payload)
         _mark_impossible_values_invalid(payload)
 
         try:
@@ -228,6 +230,101 @@ _IMPOSSIBLE_NOTES = {
     "pcs": "stated number of pieces is not greater than 0",
     "dimensions_in": "a stated dimension is not greater than 0",
 }
+
+
+#: Spellings the model may use for "the email gave no unit".
+_NO_UNIT = {"", "none", "null", "unknown", "unspecified", "not stated", "n/a"}
+
+_SIDES = ("length", "width", "height")
+
+
+def _number_text(value: object) -> str:
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _normalise_units(payload: dict[str, Any]) -> None:
+    """Convert a stated weight or set of dimensions to kilograms / inches, in
+    place, before the contract is validated.
+
+    The model reports measurements exactly as written plus the unit it saw, in a
+    ``unit`` key on the field (for dimensions it may also sit inside ``value``).
+    This step does the arithmetic in code (`domain.shipment.units`) — never the
+    model — and removes the ``unit`` key so the contract sees only canonical
+    values. A value with no unit, or a unit that cannot be converted, becomes an
+    INVALID field carrying a unit note: the client knows the unit, so it is
+    asked for in a clarification instead of being guessed or handed to a person.
+
+    A field with no ``unit`` key at all is left untouched: that is the original
+    contract (kilograms / inches only), so older-format output still parses.
+    Anything malformed is also left untouched and still fails ``model_validate``.
+
+    On any status other than ``stated`` a ``unit`` key carries no information
+    and is simply dropped: the live model writes ``"unit": null`` on a
+    ``not_stated`` weight, and rejecting the whole extraction over it would hand
+    a perfectly good reply to a person.
+    """
+    for field in ("weight_kg", "dimensions_in"):
+        cell = payload.get(field)
+        if isinstance(cell, dict) and cell.get("status") != "stated":
+            cell.pop("unit", None)
+            if isinstance(cell.get("value"), dict):
+                cell["value"].pop("unit", None)
+
+    weight = payload.get("weight_kg")
+    if isinstance(weight, dict) and weight.get("status") == "stated" and "unit" in weight:
+        raw = weight.pop("unit")
+        value = weight.get("value")
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            seen = _number_text(value)
+            canon = units.weight_unit(raw) if isinstance(raw, str) else None
+            if canon is not None:
+                payload["weight_kg"] = {**weight, "value": units.to_kg(value, canon)}
+                if canon != "kg":
+                    _log.info("extraction: weight converted from %s %s to kg", seen, raw)
+            else:
+                missing = raw is None or (isinstance(raw, str) and raw.strip().lower() in _NO_UNIT)
+                marker = units.UNIT_MISSING_MARKER if missing else units.UNIT_UNSUPPORTED_MARKER
+                shown = seen if missing else f"{seen} {raw}"
+                payload["weight_kg"] = {
+                    "status": "invalid",
+                    "evidence": weight.get("evidence"),
+                    "note": units.unit_note("Weight", marker, shown),
+                }
+
+    dims = payload.get("dimensions_in")
+    if not (isinstance(dims, dict) and dims.get("status") == "stated"):
+        return
+    value = dims.get("value")
+    if not isinstance(value, dict):
+        return
+    if "unit" in dims:
+        raw = dims.pop("unit")
+    elif "unit" in value:
+        raw = value.pop("unit")
+    else:
+        return
+    raw_sides = [value.get(side) for side in _SIDES]
+    if not all(isinstance(s, int | float) and not isinstance(s, bool) for s in raw_sides):
+        return  # malformed — left for model_validate to reject
+    sides = [float(s) for s in raw_sides]  # type: ignore[arg-type]  # checked just above
+    seen = " x ".join(_number_text(s) for s in raw_sides)
+    canon = units.length_unit(raw) if isinstance(raw, str) else None
+    if canon is not None:
+        converted = {side: units.to_inches(s, canon) for side, s in zip(_SIDES, sides, strict=True)}
+        payload["dimensions_in"] = {**dims, "value": converted}
+        if canon != "in":
+            _log.info("extraction: dimensions converted from %s %s to inches", seen, raw)
+        return
+    missing = raw is None or (isinstance(raw, str) and raw.strip().lower() in _NO_UNIT)
+    marker = units.UNIT_MISSING_MARKER if missing else units.UNIT_UNSUPPORTED_MARKER
+    shown = seen if missing else f"{seen} {raw}"
+    payload["dimensions_in"] = {
+        "status": "invalid",
+        "evidence": dims.get("evidence"),
+        "note": units.unit_note("Dimensions", marker, shown),
+    }
 
 
 def _is_nonpositive_number(value: object) -> bool:
