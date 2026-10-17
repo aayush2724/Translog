@@ -441,7 +441,10 @@ def approval_json(
         ),
         "recommended_option": recommended_key,
         "client_preference": preference.value if preference is not None else None,
-        "client_preference_text": _PREFERENCE_WORDING.get(
+        # After a late message, `preference` is what the card was built on, and
+        # the line says so; the late notice below says what changed since.
+        "client_preference_text": ("In the enquiry: " if late_preference is not None else "")
+        + _PREFERENCE_WORDING.get(
             preference.value if preference is not None else "", _NO_PREFERENCE
         ),
         "cheapest_unavailable": options.cheapest_unavailable if options is not None else None,
@@ -942,7 +945,11 @@ def request_detail(session: LiveSession, request: LiveRequest) -> Json:
             request.rates,
             approver=session.approver_address,
             options=request.rate_options,
-            preference=request.rate_preference,
+            # Once a late preference arrives, show the one the card was built on;
+            # the late one is reported separately as a notice.
+            preference=request.preference_at_selection
+            if request.late_preference is not None
+            else request.rate_preference,
             recommended=request.recommended_option,
             late_preference=request.late_preference,
         ),

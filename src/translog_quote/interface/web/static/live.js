@@ -1045,7 +1045,7 @@ function sectionQuotation(detail) {
       ["Decided at", fmtStamp(decision.at) || "—"],
       ["Reason", decision.reason || "—"],
       ["Rate quoted", decision.quoted_rate
-        ? `${decision.quoted_option ? `${decision.quoted_option[0].toUpperCase()}${decision.quoted_option.slice(1)}: ` : ""}${decision.quoted_rate}`
+        ? `${decision.quoted_option ? `${decision.quoted_option[0].toUpperCase()}${decision.quoted_option.slice(1)}: ` : ""}${formatPricesIn(decision.quoted_rate)}`
         : "—"],
       ["Email to client", decision.sent ? "Sent" : "Not sent"],
       ["Note to client", decision.client_note || "—"],
@@ -1071,6 +1071,15 @@ function formatPrice(text) {
   const rupees = /^(rs|inr)$/i.test(m[3]);
   const whole = Number(m[1]).toLocaleString(rupees ? "en-IN" : "en-US");
   return `${rupees ? "Rs" : m[3]} ${whole}${m[2] || ""}`;
+}
+
+/* Prices inside a sentence ("lowest eligible total at 23616 Rs", "Finnair —
+   22960 Rs, 32h 20m") written the same way as the cards. Only an amount
+   followed by Rs, INR or a three-letter currency code is touched — never
+   "20 hours" or "26h 30m". Display only; email text is unchanged. */
+function formatPricesIn(text) {
+  return String(text || "").replace(/\b(\d+(?:\.\d+)?) (Rs|INR|[A-Z]{3})\b/g,
+    (match, amount, currency) => formatPrice(`${amount} ${currency}`));
 }
 
 /* WebCargo's arrival as it printed it, minus the " - " separator. */
@@ -1397,7 +1406,7 @@ function rateComparison(approval) {
     ]);
   }
   const choices = currentChoices(approval);
-  const why = (rate) => (rate.reason ? el("p", { class: "rate-choice-why muted small" }, rate.reason) : null);
+  const why = (rate) => (rate.reason ? el("p", { class: "rate-choice-why muted small" }, formatPricesIn(rate.reason)) : null);
 
   const column = (title, cls, ...body) =>
     el("section", { class: `rate-col ${cls}`, "aria-label": title }, el("h4", { class: "rate-col-title" }, title), ...body);

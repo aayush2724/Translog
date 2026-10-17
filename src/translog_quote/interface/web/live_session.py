@@ -304,6 +304,12 @@ class LiveRequest:
     the approval card (a late message, not extracted). Shown to the operator as
     a notice; changes nothing on its own. Cleared when a new card is built."""
 
+    preference_at_selection: RatePreference | None = None
+    """The preference the approval card was built on (what the enquiry and its
+    replies stated by then). Kept apart from ``rate_preference`` so that, after a
+    late message, the card can say what the enquiry asked for and, separately,
+    what changed — instead of describing the late wording as the original ask."""
+
     packet: ReviewPacket | None = None
     decision: ApprovalDecision | None = None
     quotation_sent: bool = False
@@ -1730,6 +1736,7 @@ class LiveSession:
             request.rate_options = rate_options(outcome.filtered.eligible)
             request.recommended_at_selection = None  # a new card: recompute, then freeze
             request.late_preference = None
+            request.preference_at_selection = request.rate_preference
             recommended = request.recommended_option
             selection = outcome.selection
             if request.rate_options is not None:

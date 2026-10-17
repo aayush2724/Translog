@@ -115,7 +115,7 @@ function load(fetchStub) {
     "\n;globalThis.__t = { ui, canDecide, sectionClarification, sectionApproval," +
     " renderDashboard, renderTimeline, render, post, sectionRates, refresh," +
     " watchForChanges, REFRESH_MS, renderDetail, nextStep, sectionManualReview," +
-    " sectionShipment, sectionMerged, formatPrice," +
+    " sectionShipment, sectionMerged, formatPrice, sectionQuotation," +
     " syncApprover: () => syncApprover && syncApprover()," +
     " holderFor: (id) => document.getElementById(id) };";
   vm.runInContext(source, context);
@@ -1537,6 +1537,25 @@ check("on simulated data the banner appears once, on the approval card", () => {
   const withoutCard = t.sectionRates({ rates, approval: null, decision: null });
   eq(/SIMULATED WEBCARGO DATA/.test(withCard.textContent), false, "not repeated above the card");
   eq(/SIMULATED WEBCARGO DATA/.test(withoutCard.textContent), true, "kept when there is no card");
+});
+
+
+
+check("prices inside the why and rate-quoted lines read like the cards; hours are left alone", () => {
+  const t = load();
+  const approval = comparisonApproval();
+  approval.options[1].reason = "Finnair GEN — lowest eligible total at 18499 Rs";
+  approval.options[0].reason = "Qatar Airways GEN — fastest eligible transit at 20 hours";
+  const text = t.sectionApproval(detailWith(approval)).textContent;
+  eq(/lowest eligible total at Rs 18,499/.test(text), true, "price in the reason formatted");
+  eq(/18499 Rs/.test(text), false, "no raw price left");
+  eq(/fastest eligible transit at 20 hours/.test(text), true, "hours untouched");
+
+  const record = t.sectionQuotation({
+    decision: { approved: true, by: "A", at: null, reason: "", sent: true, quoted_option: "other",
+      quoted_rate: "Finnair (Finnair) — 22960 Rs, 32h 20m", headline: "APPROVED", client_note: null, internal_note: null },
+  }).textContent;
+  eq(/Other: Finnair \(Finnair\) — Rs 22,960, 32h 20m/.test(record), true, "rate quoted formatted, transit untouched");
 });
 
 (async () => {

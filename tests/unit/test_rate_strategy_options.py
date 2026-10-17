@@ -910,3 +910,37 @@ def test_other_is_never_a_ranked_option() -> None:
     options = rate_options((FAST, CHEAP))
     assert options is not None
     assert options.selection_for(RateStrategy.OTHER) is None
+
+
+def test_after_a_late_preference_the_card_says_what_the_enquiry_stated(
+    settings: Settings, sink: CollectingEmailSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Live E3: the enquiry stated nothing, a late reply asked for the cheapest.
+    The card must not describe the late wording as the original ask above a
+    fastest preselection: it says what the enquiry stated, and the late notice
+    says what changed."""
+    session = _session(settings, sink, monkeypatch, late_words="Please make it the cheapest.")
+    session.poll()
+    request_id = only_request(session).request_id  # type: ignore[attr-defined]
+
+    card = live_serialize.snapshot(session, selected=request_id)["selected"]["approval"]  # type: ignore[index]
+
+    assert card["client_preference"] is None  # what the card was built on
+    assert card["client_preference_text"] == (
+        "In the enquiry: The client did not state a speed or price preference."
+    )
+    assert card["late_preference"] == "cheapest"
+    assert card["recommended_option"] == "fastest"
+    assert "was not changed" in card["late_preference_notice"]
+
+
+def test_without_a_late_message_the_preference_line_is_unchanged(
+    settings: Settings, sink: CollectingEmailSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = _session(settings, sink, monkeypatch, enquiry_words="cheapest please")
+    request_id = only_request(session).request_id  # type: ignore[attr-defined]
+
+    card = live_serialize.snapshot(session, selected=request_id)["selected"]["approval"]  # type: ignore[index]
+
+    assert card["client_preference"] == "cheapest"
+    assert card["client_preference_text"].startswith("The client asked for the lowest price")
